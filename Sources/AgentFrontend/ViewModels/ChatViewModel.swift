@@ -1,0 +1,462 @@
+import Foundation
+import SwiftUI
+import Combine
+
+/// Main view model for chat functionality (equivalent to useChat hook)
+@MainActor
+public class ChatViewModel: ObservableObject {
+    // MARK: - Published State
+    
+    @Published public var messages: [Message] = []
+    @Published public var isLoading: Bool = false
+    @Published public var error: String?
+    @Published public var conversationId: String?
+    @Published public var hasMoreMessages: Bool = false
+    @Published public var loadingMoreMessages: Bool = false
+    
+    // MARK: - Private State
+    
+    private var messagesOffset: Int = 0
+    private var currentRunId: String?
+    private var sseClient: SSEClient?
+    private var assistantContent: String = ""
+    
+    // MARK: - Dependencies
+    
+    private let config: ChatWidgetConfig
+    private let apiClient: APIClient
+    private let storage: StorageService
+    
+    // MARK: - Initialization
+    
+    public init(config: ChatWidgetConfig, apiClient: APIClient, storage: StorageService) {
+        self.config = config
+        self.apiClient = apiClient
+        self.storage = storage
+        
+        // Load saved conversation ID
+        if let savedId = storage.get(config.conversationIdKey) {
+            self.conversationId = savedId
+        }
+    }
+    
+    // MARK: - Public Methods
+    
+    /// Send a message to the agent
+    public func sendMessage(
+        _ content: String,
+        files: [FileAttachment] = [],
+        model: String? = nil,
+        thinking: Bool = false,
+        supersedeFromMessageIndex: Int? = nil
+    ) async {
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
+        
+        isLoading = true
+        error = nil
+        
+        // Add user message
+        let userMessage = Message(
+            role: .user,
+            content: content.trimmingCharacters(in: .whitespacesAndNewlines),
+            files: files.isEmpty ? nil : files
+        )
+        messages.append(userMessage)
+        
+        do {
+            // Create the run
+            let apiMessages: [[String: Any]] = [["role": "user", "content": content.trimmingCharacters(in: .whitespacesAndNewlines)]]
+            
+            let run = try await apiClient.createRun(
+                conversationId: conversationId,
+                messages: apiMessages,
+                model: model,
+                thinking: thinking,
+                supersedeFromMessageIndex: supersedeFromMessageIndex
+            )
+            
+            currentRunId = run.id
+            
+            // Update conversation ID if new
+            if conversationId == nil, let newConvId = run.conversationId {
+                conversationId = newConvId
+                storage.set(config.conversationIdKey, value: newConvId)
+            }
+            
+            // Subscribe to SSE events
+            await subscribeToEvents(runId: run.id)
+            
+        } catch {
+            self.error = error.localizedDescription
+            isLoading = false
+        }
+    }
+    
+    /// Cancel the current run
+    public func cancelRun() async {
+        guard let runId = currentRunId, isLoading else { return }
+        
+        do {
+            try await apiClient.cancelRun(id: runId)
+            
+            sseClient?.disconnect()
+            sseClient = nil
+            isLoading = false
+            currentRunId = nil
+            
+            // Add cancelled message
+            messages.append(Message(
+                role: .system,
+                content: "⏹ Run cancelled",
+                type: .cancelled
+            ))
+        } catch {
+            print("[ChatViewModel] Failed to cancel run: \(error)")
+        }
+    }
+    
+    /// Clear all messages and start fresh
+    public func clearMessages() {
+        messages = []
+        conversationId = nil
+        error = nil
+        hasMoreMessages = false
+        messagesOffset = 0
+        storage.set(config.conversationIdKey, value: nil)
+    }
+    
+    /// Load a specific conversation
+    public func loadConversation(_ convId: String) async {
+        isLoading = true
+        messages = []
+        conversationId = convId
+        
+        do {
+            let conversation = try await apiClient.loadConversation(id: convId)
+            
+            if let apiMessages = conversation.messages {
+                messages = apiMessages.flatMap { mapApiMessage($0) }
+            }
+            
+            hasMoreMessages = conversation.hasMore ?? false
+            messagesOffset = conversation.messages?.count ?? 0
+            
+        } catch APIError.notFound {
+            conversationId = nil
+            storage.set(config.conversationIdKey, value: nil)
+        } catch {
+            print("[ChatViewModel] Failed to load conversation: \(error)")
+        }
+        
+        isLoading = false
+    }
+    
+    /// Load more messages (pagination)
+    public func loadMoreMessages() async {
+        guard let convId = conversationId, !loadingMoreMessages, hasMoreMessages else { return }
+        
+        loadingMoreMessages = true
+        
+        do {
+            let conversation = try await apiClient.loadConversation(id: convId, limit: 10, offset: messagesOffset)
+            
+            if let apiMessages = conversation.messages, !apiMessages.isEmpty {
+                let olderMessages = apiMessages.flatMap { mapApiMessage($0) }
+                messages.insert(contentsOf: olderMessages, at: 0)
+                messagesOffset += apiMessages.count
+                hasMoreMessages = conversation.hasMore ?? false
+            } else {
+                hasMoreMessages = false
+            }
+        } catch {
+            print("[ChatViewModel] Failed to load more messages: \(error)")
+        }
+        
+        loadingMoreMessages = false
+    }
+
+    /// Edit a message and resend from that point
+    public func editMessage(at index: Int, newContent: String, model: String? = nil, thinking: Bool = false) async {
+        guard !isLoading, index < messages.count else { return }
+
+        let messageToEdit = messages[index]
+        guard messageToEdit.role == .user else { return }
+
+        // Truncate messages to just before this message
+        messages = Array(messages.prefix(index))
+
+        // Send the edited message with supersede flag
+        await sendMessage(newContent, model: model, thinking: thinking, supersedeFromMessageIndex: index)
+    }
+
+    /// Retry from a specific message
+    public func retryMessage(at index: Int, model: String? = nil, thinking: Bool = false) async {
+        guard !isLoading, index < messages.count else { return }
+
+        let messageAtIndex = messages[index]
+        var userMessageIndex = index
+        var userMessage = messageAtIndex
+
+        // If this is an assistant message, find the previous user message
+        if messageAtIndex.role == .assistant {
+            for i in stride(from: index - 1, through: 0, by: -1) {
+                if messages[i].role == .user {
+                    userMessageIndex = i
+                    userMessage = messages[i]
+                    break
+                }
+            }
+            guard userMessage.role == .user else { return }
+        } else if messageAtIndex.role != .user {
+            return
+        }
+
+        // Truncate messages to just before the user message
+        messages = Array(messages.prefix(userMessageIndex))
+
+        // Resend the same message with supersede flag
+        await sendMessage(userMessage.content, model: model, thinking: thinking, supersedeFromMessageIndex: userMessageIndex)
+    }
+
+    // MARK: - Private Methods
+
+    private func subscribeToEvents(runId: String) async {
+        sseClient?.disconnect()
+
+        let eventPath = config.apiPaths.runEventsUrl(for: runId)
+        var urlString = "\(config.backendUrl)\(eventPath)"
+
+        // Add token for anonymous auth
+        if let token = try? await apiClient.getOrCreateSession() {
+            urlString += "?anonymous_token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)"
+        }
+
+        guard let url = URL(string: urlString) else { return }
+
+        assistantContent = ""
+
+        let client = SSEClient()
+        sseClient = client
+
+        client.onEvent = { [weak self] event in
+            Task { @MainActor in
+                self?.handleSSEEvent(event)
+            }
+        }
+
+        client.onError = { [weak self] error in
+            Task { @MainActor in
+                self?.isLoading = false
+                self?.error = error.localizedDescription
+            }
+        }
+
+        client.onComplete = { [weak self] in
+            Task { @MainActor in
+                self?.isLoading = false
+            }
+        }
+
+        client.connect(url: url, headers: apiClient.authHeaders())
+    }
+
+    private func handleSSEEvent(_ event: SSEEvent) {
+        guard let json = event.json(), let payload = json["payload"] as? [String: Any] else { return }
+
+        // Notify callback
+        config.onEvent?(event.type, payload)
+
+        switch event.type {
+        case "assistant.message":
+            handleAssistantMessage(payload)
+
+        case "tool.call":
+            handleToolCall(payload)
+
+        case "tool.result":
+            handleToolResult(payload)
+
+        case "sub_agent.start":
+            handleSubAgentStart(payload)
+
+        case "sub_agent.end":
+            handleSubAgentEnd(payload)
+
+        case "custom":
+            handleCustomEvent(payload)
+
+        case "run.succeeded", "run.failed", "run.cancelled", "run.timed_out":
+            handleTerminalEvent(event.type, payload)
+
+        default:
+            break
+        }
+    }
+
+    private func handleAssistantMessage(_ payload: [String: Any]) {
+        guard let content = payload["content"] as? String else { return }
+
+        assistantContent += content
+
+        // Update or create streaming message
+        if let lastIndex = messages.indices.last,
+           messages[lastIndex].role == .assistant,
+           messages[lastIndex].id.hasPrefix("assistant-stream-") {
+            messages[lastIndex].content = assistantContent
+        } else {
+            messages.append(Message(
+                id: "assistant-stream-\(Date().timeIntervalSince1970)",
+                role: .assistant,
+                content: assistantContent,
+                type: .message
+            ))
+        }
+    }
+
+    private func handleToolCall(_ payload: [String: Any]) {
+        let name = payload["name"] as? String ?? "tool"
+        messages.append(Message(
+            id: "tool-call-\(Date().timeIntervalSince1970)",
+            role: .assistant,
+            content: "🔧 \(name)",
+            type: .toolCall,
+            metadata: MessageMetadata(
+                toolName: name,
+                toolCallId: payload["id"] as? String,
+                arguments: payload["arguments"] as? String
+            )
+        ))
+    }
+
+    private func handleToolResult(_ payload: [String: Any]) {
+        let result = payload["result"] as? [String: Any]
+        let isError = result?["error"] != nil
+        let content = isError ? "❌ \(result?["error"] ?? "Error")" : "✓ Done"
+
+        messages.append(Message(
+            id: "tool-result-\(Date().timeIntervalSince1970)",
+            role: .system,
+            content: content,
+            type: .toolResult,
+            metadata: MessageMetadata(
+                toolName: payload["name"] as? String,
+                toolCallId: payload["tool_call_id"] as? String,
+                result: result
+            )
+        ))
+    }
+
+    private func handleSubAgentStart(_ payload: [String: Any]) {
+        let agentName = payload["agent_name"] as? String ?? payload["sub_agent_key"] as? String ?? "sub-agent"
+        messages.append(Message(
+            id: "sub-agent-start-\(Date().timeIntervalSince1970)",
+            role: .system,
+            content: "🔗 Delegating to \(agentName)...",
+            type: .subAgentStart,
+            metadata: MessageMetadata(
+                subAgentKey: payload["sub_agent_key"] as? String,
+                agentName: payload["agent_name"] as? String,
+                invocationMode: payload["invocation_mode"] as? String
+            )
+        ))
+    }
+
+    private func handleSubAgentEnd(_ payload: [String: Any]) {
+        let agentName = payload["agent_name"] as? String ?? "Sub-agent"
+        messages.append(Message(
+            id: "sub-agent-end-\(Date().timeIntervalSince1970)",
+            role: .system,
+            content: "✓ \(agentName) completed",
+            type: .subAgentEnd,
+            metadata: MessageMetadata(
+                subAgentKey: payload["sub_agent_key"] as? String,
+                agentName: payload["agent_name"] as? String
+            )
+        ))
+    }
+
+    private func handleCustomEvent(_ payload: [String: Any]) {
+        if payload["type"] as? String == "agent_context" {
+            let agentName = payload["agent_name"] as? String ?? "Sub-agent"
+            messages.append(Message(
+                id: "agent-context-\(Date().timeIntervalSince1970)",
+                role: .system,
+                content: "🔗 \(agentName) is now handling this request",
+                type: .agentContext,
+                metadata: MessageMetadata(
+                    subAgentKey: payload["agent_key"] as? String,
+                    agentName: agentName
+                )
+            ))
+        }
+    }
+
+    private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
+        if type == "run.failed" {
+            let errMsg = payload["error"] as? String ?? "Agent run failed"
+            error = errMsg
+            messages.append(Message(
+                id: "error-\(Date().timeIntervalSince1970)",
+                role: .system,
+                content: "❌ Error: \(errMsg)",
+                type: .error
+            ))
+        }
+
+        isLoading = false
+        sseClient?.disconnect()
+        sseClient = nil
+        currentRunId = nil
+    }
+
+    private func mapApiMessage(_ m: APIMessage) -> [Message] {
+        let timestamp = m.timestamp ?? Date()
+
+        // Tool result messages (role: "tool")
+        if m.role == "tool" {
+            return [Message(
+                role: .system,
+                content: "✓ Done",
+                timestamp: timestamp,
+                type: .toolResult,
+                metadata: MessageMetadata(
+                    toolCallId: m.toolCallId,
+                    result: m.content
+                )
+            )]
+        }
+
+        // Assistant messages with tool calls
+        if m.role == "assistant", let toolCalls = m.toolCalls, !toolCalls.isEmpty {
+            return toolCalls.map { tc in
+                let name = tc.function?.name ?? tc.name ?? "tool"
+                return Message(
+                    role: .assistant,
+                    content: "🔧 \(name)",
+                    timestamp: timestamp,
+                    type: .toolCall,
+                    metadata: MessageMetadata(
+                        toolName: name,
+                        toolCallId: tc.id,
+                        arguments: tc.function?.arguments ?? tc.arguments
+                    )
+                )
+            }
+        }
+
+        // Skip empty assistant messages
+        let content = m.content ?? ""
+        if m.role == "assistant" && content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return []
+        }
+
+        // Regular messages
+        return [Message(
+            role: MessageRole(rawValue: m.role) ?? .user,
+            content: content,
+            timestamp: timestamp,
+            type: .message
+        )]
+    }
+}
+
