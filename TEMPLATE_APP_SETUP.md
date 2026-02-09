@@ -772,7 +772,7 @@ struct MainShellView: View {
 
 ### `MyApp/Views/ChatContainerView.swift`
 
-This wraps the AgentFrontend components into the main chat area. Instead of using `ChatWidgetView` (which includes its own header and sidebar), we compose the individual pieces directly.
+This wraps the AgentFrontend `ChatWidgetView` into the main chat area. `ChatWidgetView` provides the chat flow (messages, error banner, input) — the header and sidebar are app-level concerns handled by `MainShellView` and `AppSidebarView` above.
 
 ```swift
 import SwiftUI
@@ -1080,7 +1080,7 @@ After creating all the files above, verify:
 
 ### Simple Alternative
 
-If you don't need a custom sidebar and top bar, you can skip `MainShellView`, `AppSidebarView`, and `ChatContainerView` entirely and use the built-in widget:
+If you don't need a custom sidebar and top bar, you can skip `MainShellView`, `AppSidebarView`, and `ChatContainerView` entirely and use the chat widget directly:
 
 ```swift
 struct MainShellView: View {
@@ -1098,7 +1098,7 @@ struct MainShellView: View {
 }
 ```
 
-This gives you the full chat widget with AgentFrontend's built-in header, sidebar, and input — just no custom app shell around it.
+This gives you the chat flow (messages, input, error handling) with no app shell around it. Add your own `NavigationView`, header, and sidebar as needed.
 
 ---
 
@@ -1115,11 +1115,9 @@ For the LLM or developer implementing this, here are the key types from the `Age
 | `AuthStrategy` | Enum: `.token`, `.jwt`, `.session`, `.anonymous`, `.none` |
 | `APICaseStyle` | Enum: `.camel`, `.snake`, `.auto` |
 | `ChatViewModel` | `@MainActor ObservableObject` — messages, send, cancel, load, edit, retry |
-| `ChatWidgetView` | Full widget view (header + sidebar + messages + input) |
+| `ChatWidgetView` | Chat flow view (messages + error banner + input) |
 | `MessageListView` | Just the scrollable message list |
 | `InputView` | Just the text input + file picker + send/cancel buttons |
-| `SidebarView` | Built-in conversation sidebar |
-| `HeaderView` | Built-in header bar |
 | `APIClient` | HTTP + SSE client for django_studio |
 | `StorageService` | Protocol for key-value storage |
 | `UserDefaultsStorage` | Default `StorageService` implementation |

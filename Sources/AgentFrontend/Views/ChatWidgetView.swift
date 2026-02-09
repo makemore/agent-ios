@@ -1,63 +1,18 @@
 import SwiftUI
 
-/// Main chat widget view
+/// Main chat widget view — provides the chat flow (messages, error banner, input).
+/// Navigation, headers, and sidebars are app-level concerns.
+/// See TEMPLATE_APP_SETUP.md for a full ChatGPT-style app scaffold.
 public struct ChatWidgetView: View {
     @ObservedObject var viewModel: ChatViewModel
     let config: ChatWidgetConfig
-    
-    @State private var showSidebar: Bool = false
-    @State private var selectedTab: ChatTab = .chat
-    
+
     public init(viewModel: ChatViewModel, config: ChatWidgetConfig) {
         self.viewModel = viewModel
         self.config = config
     }
-    
+
     public var body: some View {
-        NavigationView {
-            ZStack {
-                // Main content
-                VStack(spacing: 0) {
-                    // Header
-                    HeaderView(
-                        config: config,
-                        showSidebar: $showSidebar,
-                        selectedTab: $selectedTab,
-                        onClear: { viewModel.clearMessages() }
-                    )
-                    
-                    // Tab content
-                    if selectedTab == .chat {
-                        chatContent
-                    } else if selectedTab == .tasks && config.showTasksTab {
-                        TaskListView(config: config)
-                    }
-                }
-                
-                // Sidebar overlay
-                if showSidebar && config.showConversationSidebar {
-                    SidebarView(
-                        config: config,
-                        isPresented: $showSidebar,
-                        onSelectConversation: { convId in
-                            Task {
-                                await viewModel.loadConversation(convId)
-                            }
-                            showSidebar = false
-                        }
-                    )
-                }
-            }
-            #if os(iOS)
-            .navigationBarHidden(true)
-            #endif
-        }
-        #if os(iOS)
-        .navigationViewStyle(StackNavigationViewStyle())
-        #endif
-    }
-    
-    private var chatContent: some View {
         VStack(spacing: 0) {
             // Messages list
             MessageListView(
@@ -76,14 +31,14 @@ public struct ChatWidgetView: View {
                     Task { await viewModel.editMessage(at: index, newContent: content) }
                 }
             )
-            
+
             // Error display
             if let error = viewModel.error {
                 ErrorBannerView(message: error) {
                     viewModel.error = nil
                 }
             }
-            
+
             // Input form
             InputView(
                 config: config,
@@ -97,12 +52,6 @@ public struct ChatWidgetView: View {
             )
         }
     }
-}
-
-/// Chat tabs
-public enum ChatTab {
-    case chat
-    case tasks
 }
 
 /// Error banner view

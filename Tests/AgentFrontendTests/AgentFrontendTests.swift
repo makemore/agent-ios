@@ -11,19 +11,18 @@ final class AgentFrontendTests: XCTestCase {
         XCTAssertEqual(config.backendUrl, "http://localhost:8000")
         XCTAssertEqual(config.agentKey, "default-agent")
         XCTAssertEqual(config.title, "Chat Assistant")
-        XCTAssertTrue(config.showConversationSidebar)
         XCTAssertTrue(config.showTasksTab)
     }
     
     func testCustomConfiguration() {
         var config = ChatWidgetConfig(backendUrl: "https://api.example.com", agentKey: "my-agent")
         config.title = "My Chat"
-        config.showConversationSidebar = false
-        
+        config.showTasksTab = false
+
         XCTAssertEqual(config.backendUrl, "https://api.example.com")
         XCTAssertEqual(config.agentKey, "my-agent")
         XCTAssertEqual(config.title, "My Chat")
-        XCTAssertFalse(config.showConversationSidebar)
+        XCTAssertFalse(config.showTasksTab)
     }
     
     func testConfigurationMake() {

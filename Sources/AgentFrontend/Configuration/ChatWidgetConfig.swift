@@ -22,9 +22,6 @@ public struct ChatWidgetConfig {
     /// Primary theme color
     public var primaryColor: Color
     
-    /// Header text color (auto-detected if nil)
-    public var headerTextColor: Color?
-    
     /// Input placeholder text
     public var placeholder: String
     
@@ -35,13 +32,7 @@ public struct ChatWidgetConfig {
     public var emptyStateMessage: String
     
     // MARK: - Feature Flags
-    
-    /// Show conversation sidebar
-    public var showConversationSidebar: Bool
-    
-    /// Show clear conversation button
-    public var showClearButton: Bool
-    
+
     /// Show debug mode toggle
     public var showDebugButton: Bool
     
@@ -140,12 +131,9 @@ public struct ChatWidgetConfig {
         self.title = "Chat Assistant"
         self.subtitle = "How can we help you today?"
         self.primaryColor = Color(hex: "#0066cc")
-        self.headerTextColor = nil
         self.placeholder = "Type your message..."
         self.emptyStateTitle = "Start a Conversation"
         self.emptyStateMessage = "Send a message to get started."
-        self.showConversationSidebar = true
-        self.showClearButton = true
         self.showDebugButton = true
         self.enableDebugMode = true
         self.showTTSButton = true

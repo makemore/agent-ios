@@ -75,11 +75,9 @@ public extension ChatWidgetConfig {
     
     /// Configure UI options
     mutating func withUI(
-        showSidebar: Bool = true,
         showTasks: Bool = true,
         showModelSelector: Bool = false
     ) -> ChatWidgetConfig {
-        self.showConversationSidebar = showSidebar
         self.showTasksTab = showTasks
         self.showModelSelector = showModelSelector
         return self

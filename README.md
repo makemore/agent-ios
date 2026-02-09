@@ -79,7 +79,6 @@ config.primaryColor = Color(hex: "#FF6600")
 config.placeholder = "Ask me anything..."
 
 // Features
-config.showConversationSidebar = true
 config.showTasksTab = true
 config.showModelSelector = false
 config.enableFiles = true
