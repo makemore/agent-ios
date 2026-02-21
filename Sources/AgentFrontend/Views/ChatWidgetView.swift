@@ -51,6 +51,12 @@ public struct ChatWidgetView: View {
                 }
             )
         }
+        // Auto-restore saved conversation on launch (paginated, not full history)
+        .task {
+            print("[📜 ChatWidgetView] .task fired — calling restoreConversationIfNeeded()")
+            await viewModel.restoreConversationIfNeeded()
+            print("[📜 ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
+        }
     }
 }
 
@@ -58,7 +64,7 @@ public struct ChatWidgetView: View {
 struct ErrorBannerView: View {
     let message: String
     let onDismiss: () -> Void
-    
+
     var body: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -85,7 +91,7 @@ struct ChatWidgetView_Previews: PreviewProvider {
         let storage = InMemoryStorage()
         let apiClient = APIClient(config: config, storage: storage)
         let viewModel = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
-        
+
         ChatWidgetView(viewModel: viewModel, config: config)
     }
 }

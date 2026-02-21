@@ -6,37 +6,48 @@ import Combine
 @MainActor
 public class ChatViewModel: ObservableObject {
     // MARK: - Published State
-    
+
     @Published public var messages: [Message] = []
     @Published public var isLoading: Bool = false
     @Published public var error: String?
     @Published public var conversationId: String?
     @Published public var hasMoreMessages: Bool = false
     @Published public var loadingMoreMessages: Bool = false
-    
+
     // MARK: - Private State
-    
+
     private var messagesOffset: Int = 0
     private var currentRunId: String?
     private var sseClient: SSEClient?
     private var assistantContent: String = ""
-    
+    private var hasRestoredConversation: Bool = false
+
     // MARK: - Dependencies
-    
+
     private let config: ChatWidgetConfig
     private let apiClient: APIClient
     private let storage: StorageService
-    
+
     // MARK: - Initialization
-    
+
     public init(config: ChatWidgetConfig, apiClient: APIClient, storage: StorageService) {
         self.config = config
         self.apiClient = apiClient
         self.storage = storage
-        
+
         // Load saved conversation ID
         if let savedId = storage.get(config.conversationIdKey) {
             self.conversationId = savedId
+        }
+    }
+
+    /// Restore the saved conversation on launch (call from .task or .onAppear)
+    public func restoreConversationIfNeeded() async {
+        guard !hasRestoredConversation else { return }
+        hasRestoredConversation = true
+
+        if let savedId = storage.get(config.conversationIdKey) {
+            await loadConversation(savedId)
         }
     }
     
@@ -124,30 +135,31 @@ public class ChatViewModel: ObservableObject {
         messagesOffset = 0
         storage.set(config.conversationIdKey, value: nil)
     }
-    
+
     /// Load a specific conversation
     public func loadConversation(_ convId: String) async {
         isLoading = true
         messages = []
         conversationId = convId
-        
+        storage.set(config.conversationIdKey, value: convId)
+
         do {
             let conversation = try await apiClient.loadConversation(id: convId)
-            
+
             if let apiMessages = conversation.messages {
                 messages = apiMessages.flatMap { mapApiMessage($0) }
             }
-            
+
             hasMoreMessages = conversation.hasMore ?? false
             messagesOffset = conversation.messages?.count ?? 0
-            
+
         } catch APIError.notFound {
             conversationId = nil
             storage.set(config.conversationIdKey, value: nil)
         } catch {
             print("[ChatViewModel] Failed to load conversation: \(error)")
         }
-        
+
         isLoading = false
     }
     

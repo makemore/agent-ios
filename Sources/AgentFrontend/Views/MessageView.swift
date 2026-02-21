@@ -1,4 +1,9 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 /// Individual message view
 public struct MessageView: View {
@@ -15,17 +20,45 @@ public struct MessageView: View {
     public var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if isUser { Spacer(minLength: 40) }
-            
+
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                // Message bubble
+                // Message bubble with long-press copy
                 messageBubble
-                
+                    .contextMenu {
+                        Button {
+                            #if os(iOS)
+                            UIPasteboard.general.string = message.content
+                            #else
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(message.content, forType: .string)
+                            #endif
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                        }
+
+                        if let onRetry = onRetry {
+                            Button {
+                                onRetry()
+                            } label: {
+                                Label("Retry", systemImage: "arrow.clockwise")
+                            }
+                        }
+
+                        if let onEdit = onEdit {
+                            Button {
+                                onEdit()
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                        }
+                    }
+
                 // Actions row
                 if !isSystem && !isToolMessage {
                     actionsRow
                 }
             }
-            
+
             if !isUser { Spacer(minLength: 40) }
         }
     }
