@@ -31,7 +31,13 @@ public struct APIPaths {
     
     /// Tasks endpoint
     public var tasks: String
-    
+
+    /// Systems discovery endpoint
+    public var systems: String
+
+    /// Agents discovery endpoint
+    public var agents: String
+
     public init(
         anonymousSession: String = "/api/accounts/anonymous-session/",
         conversations: String = "/api/agent-runtime/conversations/",
@@ -42,7 +48,9 @@ public struct APIPaths {
         ttsVoices: String = "/api/tts/voices/",
         ttsSetVoice: String = "/api/tts/set-voice/",
         models: String = "/api/agent-runtime/models/",
-        tasks: String = "/api/agent/tasks/"
+        tasks: String = "/api/agent/tasks/",
+        systems: String = "/api/agent-runtime/systems/",
+        agents: String = "/api/agent-runtime/agents/"
     ) {
         self.anonymousSession = anonymousSession
         self.conversations = conversations
@@ -54,6 +62,8 @@ public struct APIPaths {
         self.ttsSetVoice = ttsSetVoice
         self.models = models
         self.tasks = tasks
+        self.systems = systems
+        self.agents = agents
     }
     
     /// Get the run events URL with the run ID substituted

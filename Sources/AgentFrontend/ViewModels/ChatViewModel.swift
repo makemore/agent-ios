@@ -14,6 +14,14 @@ public class ChatViewModel: ObservableObject {
     @Published public var hasMoreMessages: Bool = false
     @Published public var loadingMoreMessages: Bool = false
 
+    // MARK: - System State
+
+    @Published public var systems: [AgentSystem] = []
+    @Published public var selectedSystemSlug: String?
+    @Published public var selectedSystemVersion: String?
+    @Published public var selectedSystemVersionId: String?
+    @Published public var isLoadingSystems: Bool = false
+
     // MARK: - Private State
 
     private var messagesOffset: Int = 0
@@ -38,6 +46,17 @@ public class ChatViewModel: ObservableObject {
         // Load saved conversation ID
         if let savedId = storage.get(config.conversationIdKey) {
             self.conversationId = savedId
+        }
+
+        // Load saved system selection
+        if let savedSystem = storage.get(config.systemKey) {
+            self.selectedSystemSlug = savedSystem
+        }
+        if let savedVersion = storage.get(config.systemVersionKey) {
+            self.selectedSystemVersion = savedVersion
+        }
+        if let savedVersionId = storage.get(config.systemVersionIdKey) {
+            self.selectedSystemVersionId = savedVersionId
         }
     }
 
@@ -83,7 +102,9 @@ public class ChatViewModel: ObservableObject {
                 messages: apiMessages,
                 model: model,
                 thinking: thinking,
-                supersedeFromMessageIndex: supersedeFromMessageIndex
+                supersedeFromMessageIndex: supersedeFromMessageIndex,
+                agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
+                systemVersionId: selectedSystemVersionId
             )
             
             currentRunId = run.id
@@ -134,6 +155,76 @@ public class ChatViewModel: ObservableObject {
         hasMoreMessages = false
         messagesOffset = 0
         storage.set(config.conversationIdKey, value: nil)
+    }
+
+    // MARK: - System Selection
+
+    /// The effective agent key — uses the selected system's entry agent if set
+    public var effectiveAgentKey: String {
+        if let slug = selectedSystemSlug,
+           let system = systems.first(where: { $0.slug == slug }),
+           let entry = system.entryAgent {
+            return entry.slug
+        }
+        return config.agentKey
+    }
+
+    /// Load available systems from the backend
+    public func loadSystems() async {
+        isLoadingSystems = true
+        do {
+            let loaded = try await apiClient.loadSystems()
+            systems = loaded
+
+            // Auto-select if only one system and nothing saved
+            if selectedSystemSlug == nil && loaded.count == 1 {
+                selectSystem(loaded[0])
+            }
+        } catch {
+            print("[ChatViewModel] Failed to load systems: \(error)")
+        }
+        isLoadingSystems = false
+    }
+
+    /// Select a system — updates the effective agent key and starts a new conversation
+    public func selectSystem(_ system: AgentSystem) {
+        let previousSlug = selectedSystemSlug
+        selectedSystemSlug = system.slug
+        storage.set(config.systemKey, value: system.slug)
+
+        // Auto-set version to the active one
+        selectedSystemVersion = system.activeVersion
+        storage.set(config.systemVersionKey, value: system.activeVersion)
+
+        // Find the active version's ID for backend pinning
+        let activeVersionId = system.versions?.first(where: { $0.isActive })?.id
+        selectedSystemVersionId = activeVersionId
+        storage.set(config.systemVersionIdKey, value: activeVersionId)
+
+        // If the system changed, clear the conversation so the new agent key takes effect
+        if previousSlug != system.slug {
+            clearMessages()
+        }
+    }
+
+    /// Select a specific version of the current system
+    public func selectSystemVersion(_ version: AgentSystemVersionSummary) {
+        selectedSystemVersion = version.version
+        storage.set(config.systemVersionKey, value: version.version)
+        selectedSystemVersionId = version.id
+        storage.set(config.systemVersionIdKey, value: version.id)
+        // Changing version within the same system also resets the conversation
+        clearMessages()
+    }
+
+    /// Clear the system selection
+    public func clearSystemSelection() {
+        selectedSystemSlug = nil
+        selectedSystemVersion = nil
+        selectedSystemVersionId = nil
+        storage.set(config.systemKey, value: nil)
+        storage.set(config.systemVersionKey, value: nil)
+        storage.set(config.systemVersionIdKey, value: nil)
     }
 
     /// Load a specific conversation

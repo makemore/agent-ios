@@ -56,6 +56,9 @@ public struct ChatWidgetConfig {
     
     /// Show tasks tab
     public var showTasksTab: Bool
+
+    /// Show system picker (settings cog)
+    public var showSystemPicker: Bool
     
     // MARK: - Authentication
     
@@ -87,6 +90,15 @@ public struct ChatWidgetConfig {
     
     /// Key for storing selected model
     public var modelKey: String
+
+    /// Key for storing selected system slug
+    public var systemKey: String
+
+    /// Key for storing selected system version
+    public var systemVersionKey: String
+
+    /// Key for storing selected system version ID (UUID)
+    public var systemVersionIdKey: String
     
     // MARK: - API Paths
     
@@ -142,6 +154,7 @@ public struct ChatWidgetConfig {
         self.enableFiles = true
         self.showModelSelector = false
         self.showTasksTab = true
+        self.showSystemPicker = true
         self.authStrategy = nil
         self.authToken = nil
         self.authHeader = nil
@@ -151,6 +164,9 @@ public struct ChatWidgetConfig {
         self.sessionTokenKey = "chat_widget_session_token"
         self.anonymousTokenKey = "chat_widget_anonymous_token"
         self.modelKey = "chat_widget_selected_model"
+        self.systemKey = "chat_widget_selected_system"
+        self.systemVersionKey = "chat_widget_selected_system_version"
+        self.systemVersionIdKey = "chat_widget_selected_system_version_id"
         self.apiPaths = APIPaths()
         self.apiCaseStyle = .auto
         self.metadata = [:]

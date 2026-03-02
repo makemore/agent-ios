@@ -6,6 +6,7 @@ import SwiftUI
 public struct ChatWidgetView: View {
     @ObservedObject var viewModel: ChatViewModel
     let config: ChatWidgetConfig
+    @State private var showSystemPicker = false
 
     public init(viewModel: ChatViewModel, config: ChatWidgetConfig) {
         self.viewModel = viewModel
@@ -39,6 +40,38 @@ public struct ChatWidgetView: View {
                 }
             }
 
+            // System picker button — bottom-right, above input
+            if config.showSystemPicker {
+                HStack {
+                    // Show current system name if selected
+                    if let slug = viewModel.selectedSystemSlug,
+                       let system = viewModel.systems.first(where: { $0.slug == slug }) {
+                        Text(system.name)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                        if let version = system.activeVersion {
+                            Text("v\(version)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                    }
+
+                    Spacer()
+
+                    Button(action: { showSystemPicker = true }) {
+                        Image(systemName: "gearshape")
+                            .font(.body)
+                            .foregroundColor(.secondary)
+                            .padding(8)
+                            .background(PlatformColors.systemGray6)
+                            .clipShape(Circle())
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+            }
+
             // Input form
             InputView(
                 config: config,
@@ -56,6 +89,25 @@ public struct ChatWidgetView: View {
             print("[📜 ChatWidgetView] .task fired — calling restoreConversationIfNeeded()")
             await viewModel.restoreConversationIfNeeded()
             print("[📜 ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
+
+            // Load systems if picker is enabled
+            if config.showSystemPicker {
+                await viewModel.loadSystems()
+            }
+        }
+        .sheet(isPresented: $showSystemPicker) {
+            SystemPickerView(
+                systems: viewModel.systems,
+                selectedSystemSlug: viewModel.selectedSystemSlug,
+                selectedVersion: viewModel.selectedSystemVersion,
+                isLoading: viewModel.isLoadingSystems,
+                onSelectSystem: { system in
+                    viewModel.selectSystem(system)
+                },
+                onSelectVersion: { version in
+                    viewModel.selectSystemVersion(version)
+                }
+            )
         }
     }
 }

@@ -63,12 +63,14 @@ extension APIClient {
         messages: [[String: Any]],
         model: String? = nil,
         thinking: Bool = false,
-        supersedeFromMessageIndex: Int? = nil
+        supersedeFromMessageIndex: Int? = nil,
+        agentKeyOverride: String? = nil,
+        systemVersionId: String? = nil
     ) async throws -> AgentRun {
         let token = try await getOrCreateSession()
-        
+
         var body: [String: Any] = [
-            "agent_key": config.agentKey,
+            "agent_key": agentKeyOverride ?? config.agentKey,
             "messages": messages,
             "metadata": config.metadata.merging(["journey_type": config.defaultJourneyType]) { _, new in new }
         ]
@@ -87,6 +89,10 @@ extension APIClient {
         
         if let index = supersedeFromMessageIndex {
             body["supersede_from_message_index"] = index
+        }
+
+        if let systemVersionId = systemVersionId {
+            body["system_version_id"] = systemVersionId
         }
         
         let jsonData = try JSONSerialization.data(withJSONObject: body)
@@ -138,8 +144,30 @@ extension APIClient {
         }
     }
     
+    // MARK: - Systems Discovery
+
+    /// Load available agent systems
+    public func loadSystems() async throws -> [AgentSystem] {
+        let token = try await getOrCreateSession()
+        let path = config.apiPaths.systems
+        let request = buildRequest(path: path, method: "GET", token: token)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.httpError(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+
+        // Try paginated response first, then plain array
+        if let listResponse = try? decoder.decode(SystemsListResponse.self, from: data) {
+            return listResponse.results ?? []
+        }
+
+        return try decoder.decode([AgentSystem].self, from: data)
+    }
+
     // MARK: - Decoder
-    
+
     private var decoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
