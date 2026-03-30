@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Preference key to report the bottom anchor's position within the scroll view
 private struct BottomAnchorPreferenceKey: PreferenceKey {
@@ -149,6 +152,13 @@ public struct MessageListView: View {
         }
     }
 
+    /// Dismiss the keyboard by resigning first responder
+    private func dismissKeyboard() {
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+    }
+
     @ViewBuilder
     private func scrollContent(proxy: ScrollViewProxy) -> some View {
         ScrollView {
@@ -244,6 +254,15 @@ public struct MessageListView: View {
             }
             .padding()
         }
+        #if os(iOS)
+        .scrollDismissesKeyboard(.interactively)
+        #endif
+        // Tap on message list area dismisses keyboard without swallowing child taps
+        .simultaneousGesture(
+            TapGesture().onEnded { _ in
+                dismissKeyboard()
+            }
+        )
     }
 
     /// Tracks the scroll view's visible height (set via preference)

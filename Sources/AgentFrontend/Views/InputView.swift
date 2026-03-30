@@ -84,6 +84,11 @@ public struct InputView: View {
         onSend(inputText, attachedFiles)
         inputText = ""
         attachedFiles = []
+
+        // Dismiss keyboard after sending
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
     
     @ViewBuilder
