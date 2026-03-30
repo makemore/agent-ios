@@ -78,10 +78,14 @@ public struct MessageView: View {
                 }
             }
             
-            // Content
-            Text(message.content)
-                .font(.body)
-                .foregroundColor(messageTextColor)
+            // Content — markdown for assistant messages, plain text for user/system
+            if !isUser && !isSystem && !isToolMessage && config.enableMarkdown {
+                MarkdownTextView(content: message.content, foregroundColor: messageTextColor)
+            } else {
+                Text(message.content)
+                    .font(.body)
+                    .foregroundColor(messageTextColor)
+            }
             
             // Debug info
             if showDebug, let metadata = message.metadata {

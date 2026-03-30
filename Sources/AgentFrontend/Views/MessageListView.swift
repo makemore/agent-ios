@@ -186,7 +186,11 @@ public struct MessageListView: View {
 
                 // Messages
                 ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                    if editingIndex == index {
+                    // Hide tool messages when showToolMessages is disabled
+                    let isToolMsg = message.type == .toolCall || message.type == .toolResult
+                    if isToolMsg && !config.showToolMessages {
+                        EmptyView()
+                    } else if editingIndex == index {
                         EditMessageView(
                             text: $editText,
                             onSave: {

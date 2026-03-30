@@ -33,27 +33,35 @@ public struct ChatWidgetConfig {
     
     // MARK: - Feature Flags
 
-    /// Show debug mode toggle
+    /// Show debug mode toggle button in the UI
     public var showDebugButton: Bool
-    
-    /// Enable debug mode
+
+    /// Enable debug mode (show debug info like tool call args, raw events)
     public var enableDebugMode: Bool
-    
+
+    /// Show tool call/result messages in the chat thread.
+    /// When false, tool events are still processed internally but not rendered as visible messages.
+    public var showToolMessages: Bool
+
+    /// Render assistant messages as markdown (bold, italic, lists, headers, code blocks, links).
+    /// Only applies to assistant messages — user messages are always plain text.
+    public var enableMarkdown: Bool
+
     /// Show TTS toggle button
     public var showTTSButton: Bool
-    
+
     /// Enable text-to-speech
     public var enableTTS: Bool
-    
+
     /// Enable voice input
     public var enableVoice: Bool
-    
+
     /// Enable file attachments
     public var enableFiles: Bool
-    
+
     /// Show model selector
     public var showModelSelector: Bool
-    
+
     /// Show tasks tab
     public var showTasksTab: Bool
 
@@ -146,8 +154,10 @@ public struct ChatWidgetConfig {
         self.placeholder = "Type your message..."
         self.emptyStateTitle = "Start a Conversation"
         self.emptyStateMessage = "Send a message to get started."
-        self.showDebugButton = true
-        self.enableDebugMode = true
+        self.showDebugButton = false
+        self.enableDebugMode = false
+        self.showToolMessages = false
+        self.enableMarkdown = true
         self.showTTSButton = true
         self.enableTTS = false
         self.enableVoice = true
