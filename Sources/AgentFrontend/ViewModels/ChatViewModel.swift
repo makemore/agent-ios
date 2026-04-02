@@ -385,6 +385,9 @@ public class ChatViewModel: ObservableObject {
         case "sub_agent.end":
             handleSubAgentEnd(payload)
 
+        case "content.blocks":
+            handleContentBlocks(payload)
+
         case "custom":
             handleCustomEvent(payload)
 
@@ -474,6 +477,24 @@ public class ChatViewModel: ObservableObject {
             metadata: MessageMetadata(
                 subAgentKey: payload["sub_agent_key"] as? String,
                 agentName: payload["agent_name"] as? String
+            )
+        ))
+    }
+
+    private func handleContentBlocks(_ payload: [String: Any]) {
+        guard let blocksArray = payload["blocks"] as? [[String: Any]] else { return }
+        let blocks = ContentBlock.parse(from: blocksArray)
+        guard !blocks.isEmpty else { return }
+
+        messages.append(Message(
+            id: "content-blocks-\(Date().timeIntervalSince1970)",
+            role: .assistant,
+            content: "",
+            type: .contentBlocks,
+            metadata: MessageMetadata(
+                toolName: payload["tool_name"] as? String,
+                toolCallId: payload["tool_call_id"] as? String,
+                contentBlocks: blocks
             )
         ))
     }

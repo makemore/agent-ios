@@ -13,11 +13,19 @@ public struct MessageView: View {
     let onRetry: (() -> Void)?
     let onEdit: (() -> Void)?
     
+    var onBlockAction: ((BlockAction) -> Void)?
+
     private var isUser: Bool { message.role == .user }
     private var isSystem: Bool { message.role == .system }
     private var isToolMessage: Bool { message.type == .toolCall || message.type == .toolResult }
-    
+    private var isContentBlocks: Bool { message.type == .contentBlocks }
+
     public var body: some View {
+        // Content blocks: render as standalone rich content
+        if isContentBlocks, let blocks = message.metadata?.contentBlocks, !blocks.isEmpty {
+            ContentBlockRenderer(blocks: blocks, config: config, onAction: onBlockAction)
+                .padding(.horizontal, 12)
+        } else {
         HStack(alignment: .top, spacing: 8) {
             if isUser { Spacer(minLength: 40) }
 
@@ -61,8 +69,9 @@ public struct MessageView: View {
 
             if !isUser { Spacer(minLength: 40) }
         }
+        } // end else (non-content-blocks)
     }
-    
+
     @ViewBuilder
     private var messageBubble: some View {
         VStack(alignment: .leading, spacing: 8) {

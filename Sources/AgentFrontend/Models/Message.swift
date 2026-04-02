@@ -51,6 +51,7 @@ public enum MessageType: String, Codable {
     case subAgentStart = "sub_agent_start"
     case subAgentEnd = "sub_agent_end"
     case agentContext = "agent_context"
+    case contentBlocks = "content_blocks"
 }
 
 /// Message metadata
@@ -62,7 +63,8 @@ public struct MessageMetadata: Equatable {
     public var subAgentKey: String?
     public var agentName: String?
     public var invocationMode: String?
-    
+    public var contentBlocks: [ContentBlock]?
+
     public init(
         toolName: String? = nil,
         toolCallId: String? = nil,
@@ -70,7 +72,8 @@ public struct MessageMetadata: Equatable {
         result: Any? = nil,
         subAgentKey: String? = nil,
         agentName: String? = nil,
-        invocationMode: String? = nil
+        invocationMode: String? = nil,
+        contentBlocks: [ContentBlock]? = nil
     ) {
         self.toolName = toolName
         self.toolCallId = toolCallId
@@ -79,14 +82,16 @@ public struct MessageMetadata: Equatable {
         self.subAgentKey = subAgentKey
         self.agentName = agentName
         self.invocationMode = invocationMode
+        self.contentBlocks = contentBlocks
     }
-    
+
     public static func == (lhs: MessageMetadata, rhs: MessageMetadata) -> Bool {
         lhs.toolName == rhs.toolName &&
         lhs.toolCallId == rhs.toolCallId &&
         lhs.arguments == rhs.arguments &&
         lhs.subAgentKey == rhs.subAgentKey &&
-        lhs.agentName == rhs.agentName
+        lhs.agentName == rhs.agentName &&
+        lhs.contentBlocks == rhs.contentBlocks
     }
 }
 
