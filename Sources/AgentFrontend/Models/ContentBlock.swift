@@ -17,6 +17,7 @@ public enum ContentBlock: Codable, Equatable, Identifiable {
     case collapsible(CollapsibleBlock)
     case status(StatusBlock)
     case location(LocationBlock)
+    case video(VideoBlock)
     case unknown
 
     public var id: String {
@@ -33,6 +34,7 @@ public enum ContentBlock: Codable, Equatable, Identifiable {
         case .collapsible(let b): return "collapsible-\(b.title)"
         case .status(let b): return "status-\(b.title)"
         case .location(let b): return "location-\(b.label)"
+        case .video(let b): return "video-\(b.url)"
         case .unknown: return "unknown"
         }
     }
@@ -55,6 +57,7 @@ public enum ContentBlock: Codable, Equatable, Identifiable {
         case "collapsible": self = .collapsible(try CollapsibleBlock(from: decoder))
         case "status": self = .status(try StatusBlock(from: decoder))
         case "location": self = .location(try LocationBlock(from: decoder))
+        case "video": self = .video(try VideoBlock(from: decoder))
         default: self = .unknown
         }
     }
@@ -73,6 +76,7 @@ public enum ContentBlock: Codable, Equatable, Identifiable {
         case .collapsible(let b): try b.encode(to: encoder)
         case .status(let b): try b.encode(to: encoder)
         case .location(let b): try b.encode(to: encoder)
+        case .video(let b): try b.encode(to: encoder)
         case .unknown: break
         }
     }
@@ -174,6 +178,16 @@ public struct LocationBlock: Codable, Equatable {
     public var longitude: Double
     public var label: String
     public var zoom: Int?
+}
+
+public struct VideoBlock: Codable, Equatable {
+    public let type: String
+    public var url: String
+    public var title: String?
+    public var caption: String?
+    public var thumbnailUrl: String?
+    public var autoplay: Bool?
+    public var mimeType: String?
 }
 
 // MARK: - Parsing Helper

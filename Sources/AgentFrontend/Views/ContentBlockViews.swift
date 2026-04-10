@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 #if os(iOS)
 import UIKit
 #else
@@ -37,6 +38,7 @@ public struct ContentBlockRenderer: View {
         case .collapsible(let b): CollapsibleBlockView(block: b)
         case .status(let b): StatusBlockView(block: b)
         case .location(let b): LocationBlockView(block: b)
+        case .video(let b): VideoBlockView(block: b)
         case .unknown: EmptyView()
         }
     }
@@ -435,4 +437,58 @@ struct LocationBlockView: View {
     }
 }
 
+// MARK: - Video
+
+struct VideoBlockView: View {
+    let block: VideoBlock
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let title = block.title {
+                Text(title).font(.subheadline).fontWeight(.semibold)
+            }
+            if let player = player {
+                VideoPlayer(player: player)
+                    .frame(height: 220)
+                    .cornerRadius(8)
+                    .onDisappear { player.pause() }
+            } else if let thumbnailUrl = block.thumbnailUrl, let url = URL(string: thumbnailUrl) {
+                ZStack {
+                    AsyncImage(url: url) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: { Color.gray.opacity(0.2) }
+                    .frame(height: 220).clipped().cornerRadius(8)
+
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.white.opacity(0.9))
+                        .shadow(radius: 4)
+                }
+                .onTapGesture { loadPlayer() }
+            } else {
+                ZStack {
+                    Color.black.opacity(0.1).frame(height: 220).cornerRadius(8)
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary)
+                }
+                .onTapGesture { loadPlayer() }
+            }
+            if let caption = block.caption {
+                Text(caption).font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        .onAppear {
+            if block.autoplay == true { loadPlayer() }
+        }
+    }
+
+    private func loadPlayer() {
+        guard let url = URL(string: block.url) else { return }
+        let p = AVPlayer(url: url)
+        self.player = p
+        p.play()
+    }
+}
 

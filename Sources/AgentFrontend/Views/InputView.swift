@@ -1,4 +1,6 @@
 import SwiftUI
+import AVFoundation
+import Speech
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -13,6 +15,11 @@ public struct InputView: View {
     @State private var inputText: String = ""
     @State private var attachedFiles: [FileAttachment] = []
     @State private var showFilePicker: Bool = false
+    @State private var isRecording: Bool = false
+    @State private var speechRecognizer = SFSpeechRecognizer()
+    @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    @State private var recognitionTask: SFSpeechRecognitionTask?
+    @State private var audioEngine = AVAudioEngine()
     
     public var body: some View {
         VStack(spacing: 0) {
@@ -31,6 +38,15 @@ public struct InputView: View {
                         Image(systemName: "paperclip")
                             .font(.title3)
                             .foregroundColor(.secondary)
+                    }
+                }
+                
+                // Voice input button
+                if config.enableVoice {
+                    Button(action: { toggleRecording() }) {
+                        Image(systemName: isRecording ? "mic.fill" : "mic")
+                            .font(.title3)
+                            .foregroundColor(isRecording ? .red : .secondary)
                     }
                 }
                 
@@ -89,6 +105,67 @@ public struct InputView: View {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         #endif
+    }
+    
+    private func toggleRecording() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+    
+    private func startRecording() {
+        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else { return }
+        
+        SFSpeechRecognizer.requestAuthorization { status in
+            guard status == .authorized else { return }
+            
+            DispatchQueue.main.async {
+                do {
+                    let request = SFSpeechAudioBufferRecognitionRequest()
+                    request.shouldReportPartialResults = true
+                    self.recognitionRequest = request
+                    
+                    let audioSession = AVAudioSession.sharedInstance()
+                    try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+                    try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+                    
+                    let inputNode = audioEngine.inputNode
+                    let recordingFormat = inputNode.outputFormat(forBus: 0)
+                    inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+                        request.append(buffer)
+                    }
+                    
+                    audioEngine.prepare()
+                    try audioEngine.start()
+                    isRecording = true
+                    
+                    recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
+                        if let result = result {
+                            DispatchQueue.main.async {
+                                self.inputText = result.bestTranscription.formattedString
+                            }
+                        }
+                        if error != nil || (result?.isFinal == true) {
+                            DispatchQueue.main.async { self.stopRecording() }
+                        }
+                    }
+                } catch {
+                    stopRecording()
+                }
+            }
+        }
+    }
+    
+    private func stopRecording() {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        recognitionRequest = nil
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        isRecording = false
     }
     
     @ViewBuilder
