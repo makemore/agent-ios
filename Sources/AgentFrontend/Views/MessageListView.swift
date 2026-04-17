@@ -334,7 +334,11 @@ public struct MessageListView: View {
 
                 // Messages
                 ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                    let isToolMsg = message.type == .toolCall || message.type == .toolResult
+                    let isToolMsg = message.type == .toolCall
+                        || message.type == .toolResult
+                        || message.type == .subAgentStart
+                        || message.type == .subAgentEnd
+                        || message.type == .agentContext
                     if isToolMsg && !config.showToolMessages {
                         EmptyView()
                     } else if editingIndex == index {

@@ -39,8 +39,9 @@ public struct ChatWidgetConfig {
     /// Enable debug mode (show debug info like tool call args, raw events)
     public var enableDebugMode: Bool
 
-    /// Show tool call/result messages in the chat thread.
-    /// When false, tool events are still processed internally but not rendered as visible messages.
+    /// Show tool call/result and sub-agent orchestration messages in the chat thread.
+    /// Covers `.toolCall`, `.toolResult`, `.subAgentStart`, `.subAgentEnd`, and `.agentContext`.
+    /// When false, these events are still processed internally but not rendered as visible messages.
     public var showToolMessages: Bool
 
     /// Render assistant messages as markdown (bold, italic, lists, headers, code blocks, links).

@@ -41,6 +41,10 @@ public class ChatViewModel: ObservableObject {
     /// Set true when server signals stream end — lets the drain catch up
     /// at a higher rate without flushing everything instantly.
     private var streamingDone: Bool = false
+    /// ID of the in-flight streaming message. Tracked explicitly so we can
+    /// find and update it even after non-streaming messages (tool calls,
+    /// content blocks, sub-agent events) have been appended after it.
+    private var currentStreamingMessageId: String?
 
     // MARK: - Dependencies
 
@@ -356,6 +360,7 @@ public class ChatViewModel: ObservableObject {
         guard let url = URL(string: urlString) else { return }
 
         assistantContent = ""
+        currentStreamingMessageId = nil
         resetStreamBuffer()
 
         let client = SSEClient()
@@ -446,6 +451,7 @@ public class ChatViewModel: ObservableObject {
         } ?? false
         if !lastIsStreaming {
             assistantContent = ""
+            currentStreamingMessageId = nil
             resetStreamBuffer()
         }
 
@@ -468,20 +474,30 @@ public class ChatViewModel: ObservableObject {
             return
         }
 
-        // No drain active (non-streaming mode or replay) — apply directly.
+        // No drain active — either non-streaming mode, replay, or the
+        // stream was already finalized by a non-delta event. Apply the
+        // authoritative text to the tracked streaming message (if any)
+        // and then close out the streaming session so subsequent deltas
+        // (e.g. from the main agent after a sub-agent) create a fresh bubble.
         assistantContent = content
         upsertStreamingMessage(content: assistantContent)
+        currentStreamingMessageId = nil
+        assistantContent = ""
     }
 
     /// Create or update the in-flight streaming assistant message.
+    /// Uses `currentStreamingMessageId` to locate the message even when
+    /// non-streaming messages (tool calls, content blocks, sub-agent
+    /// events) have been appended after it.
     private func upsertStreamingMessage(content: String) {
-        if let lastIndex = messages.indices.last,
-           messages[lastIndex].role == .assistant,
-           messages[lastIndex].id.hasPrefix("assistant-stream-") {
-            messages[lastIndex].content = content
+        if let id = currentStreamingMessageId,
+           let idx = messages.firstIndex(where: { $0.id == id }) {
+            messages[idx].content = content
         } else {
+            let id = "assistant-stream-\(Date().timeIntervalSince1970)"
+            currentStreamingMessageId = id
             messages.append(Message(
-                id: "assistant-stream-\(Date().timeIntervalSince1970)",
+                id: id,
                 role: .assistant,
                 content: content,
                 type: .message
