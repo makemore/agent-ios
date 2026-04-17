@@ -30,6 +30,15 @@ public class ChatViewModel: ObservableObject {
     private var assistantContent: String = ""
     private var hasRestoredConversation: Bool = false
 
+    // MARK: - Streaming buffer
+    // Decouples network receive rate from visual display rate. OpenAI emits
+    // tokens in bursts (silence, then 5+ tokens in one TCP packet); rendering
+    // those bursts directly causes visible stutter. We buffer incoming deltas
+    // and drain them at a steady cadence so the displayed text flows smoothly.
+    private var streamBuffer: String = ""
+    private var drainTimer: Timer?
+    private let drainInterval: TimeInterval = 0.02   // 50 Hz
+
     // MARK: - Dependencies
 
     private let config: ChatWidgetConfig
@@ -337,6 +346,7 @@ public class ChatViewModel: ObservableObject {
         guard let url = URL(string: urlString) else { return }
 
         assistantContent = ""
+        resetStreamBuffer()
 
         let client = SSEClient()
         sseClient = client
@@ -416,10 +426,12 @@ public class ChatViewModel: ObservableObject {
         } ?? false
         if !lastIsStreaming {
             assistantContent = ""
+            resetStreamBuffer()
         }
 
-        assistantContent += delta
-        upsertStreamingMessage(content: assistantContent)
+        // Enqueue into buffer; drain timer reveals chars at a steady rate.
+        streamBuffer.append(delta)
+        startDrainTimerIfNeeded()
     }
 
     /// Handle an `assistant.message` event — the final authoritative text
@@ -429,6 +441,9 @@ public class ChatViewModel: ObservableObject {
     private func handleAssistantMessage(_ payload: [String: Any]) {
         guard let content = payload["content"] as? String else { return }
 
+        // Authoritative final content — drop any pending buffered chars and
+        // snap the visible message to the server's canonical version.
+        resetStreamBuffer()
         assistantContent = content
         upsertStreamingMessage(content: assistantContent)
     }
@@ -545,7 +560,56 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
+
+    // MARK: - Stream buffer helpers
+
+    /// Start the drain timer if it isn't already running.
+    private func startDrainTimerIfNeeded() {
+        guard drainTimer == nil else { return }
+        drainTimer = Timer.scheduledTimer(withTimeInterval: drainInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.drainTick() }
+        }
+    }
+
+    /// Move a slice of buffered chars into the visible message.
+    /// Rate is adaptive: small buffer reveals slowly (readable), large buffer
+    /// drains faster so a long response never lags far behind the server.
+    private func drainTick() {
+        guard !streamBuffer.isEmpty else {
+            drainTimer?.invalidate()
+            drainTimer = nil
+            return
+        }
+        let pending = streamBuffer.count
+        let take = max(2, min(pending / 10, 8))      // 2..8 chars per 20ms
+        let slice = streamBuffer.prefix(take)
+        streamBuffer.removeFirst(slice.count)
+        assistantContent.append(contentsOf: slice)
+        upsertStreamingMessage(content: assistantContent)
+    }
+
+    /// Drain all remaining buffered chars and stop the timer.
+    private func flushStreamBuffer() {
+        if !streamBuffer.isEmpty {
+            assistantContent.append(streamBuffer)
+            streamBuffer.removeAll(keepingCapacity: false)
+            upsertStreamingMessage(content: assistantContent)
+        }
+        drainTimer?.invalidate()
+        drainTimer = nil
+    }
+
+    /// Drop buffered chars and stop the timer (used on stream start / auth).
+    private func resetStreamBuffer() {
+        streamBuffer.removeAll(keepingCapacity: false)
+        drainTimer?.invalidate()
+        drainTimer = nil
+    }
+
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
+        // Ensure any buffered chars are shown before we tear down the stream.
+        flushStreamBuffer()
+
         if type == "run.failed" {
             let errMsg = payload["error"] as? String ?? "Agent run failed"
             error = errMsg
