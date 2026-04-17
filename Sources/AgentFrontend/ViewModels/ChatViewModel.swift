@@ -384,7 +384,17 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSSEEvent(_ event: SSEEvent) {
-        guard let json = event.json(), let payload = json["payload"] as? [String: Any] else { return }
+        guard let json = event.json(), let payload = json["payload"] as? [String: Any] else {
+            #if DEBUG
+            print("[AgentFrontend][ChatVM] dropping event type=\(event.type) — no payload")
+            #endif
+            return
+        }
+
+        #if DEBUG
+        let payloadKeys = Array(payload.keys).sorted().joined(separator: ",")
+        print("[AgentFrontend][ChatVM] dispatch type=\(event.type) payload_keys=[\(payloadKeys)]")
+        #endif
 
         // Notify callback
         config.onEvent?(event.type, payload)
@@ -479,7 +489,24 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
+    /// If a streaming message is in flight (drain timer active or buffer
+    /// non-empty), flush all remaining text into the current streaming
+    /// bubble and reset the accumulator. Must be called BEFORE inserting
+    /// any non-delta message (tool call, sub-agent start/end, content
+    /// blocks) — otherwise the orphaned drain timer creates a duplicate
+    /// bubble when it next fires and finds the last message is no longer
+    /// the streaming one.
+    private func finalizeStreamingMessageIfNeeded() {
+        guard drainTimer != nil || !streamBuffer.isEmpty else { return }
+        flushStreamBuffer()
+        // Reset so the next delta stream (e.g. from the main agent after
+        // a sub-agent completes) starts with a fresh accumulator and does
+        // not duplicate the finalized text in a new bubble.
+        assistantContent = ""
+    }
+
     private func handleToolCall(_ payload: [String: Any]) {
+        finalizeStreamingMessageIfNeeded()
         let name = payload["name"] as? String ?? "tool"
         messages.append(Message(
             id: "tool-call-\(Date().timeIntervalSince1970)",
@@ -495,6 +522,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleToolResult(_ payload: [String: Any]) {
+        finalizeStreamingMessageIfNeeded()
         let result = payload["result"] as? [String: Any]
         let isError = result?["error"] != nil
         let content = isError ? "❌ \(result?["error"] ?? "Error")" : "✓ Done"
@@ -513,6 +541,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSubAgentStart(_ payload: [String: Any]) {
+        finalizeStreamingMessageIfNeeded()
         let agentName = payload["agent_name"] as? String ?? payload["sub_agent_key"] as? String ?? "sub-agent"
         messages.append(Message(
             id: "sub-agent-start-\(Date().timeIntervalSince1970)",
@@ -528,6 +557,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSubAgentEnd(_ payload: [String: Any]) {
+        finalizeStreamingMessageIfNeeded()
         let agentName = payload["agent_name"] as? String ?? "Sub-agent"
         messages.append(Message(
             id: "sub-agent-end-\(Date().timeIntervalSince1970)",
@@ -542,9 +572,30 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleContentBlocks(_ payload: [String: Any]) {
-        guard let blocksArray = payload["blocks"] as? [[String: Any]] else { return }
+        finalizeStreamingMessageIfNeeded()
+        guard let blocksArray = payload["blocks"] as? [[String: Any]] else {
+            #if DEBUG
+            print("[AgentFrontend][ChatVM] content.blocks: payload has no 'blocks' array — keys=\(Array(payload.keys))")
+            #endif
+            return
+        }
+        #if DEBUG
+        let rawTypes = blocksArray.compactMap { $0["type"] as? String }
+        print("[AgentFrontend][ChatVM] content.blocks: \(blocksArray.count) raw block(s) types=\(rawTypes) tool=\(payload["tool_name"] ?? "-")")
+        #endif
         let blocks = ContentBlock.parse(from: blocksArray)
-        guard !blocks.isEmpty else { return }
+        #if DEBUG
+        print("[AgentFrontend][ChatVM] content.blocks: parsed \(blocks.count) typed block(s)")
+        if blocks.count != blocksArray.count {
+            print("[AgentFrontend][ChatVM] content.blocks: WARNING — parse dropped \(blocksArray.count - blocks.count) block(s); check ContentBlock Codable schema")
+        }
+        #endif
+        guard !blocks.isEmpty else {
+            #if DEBUG
+            print("[AgentFrontend][ChatVM] content.blocks: dropping — parsed to empty")
+            #endif
+            return
+        }
 
         messages.append(Message(
             id: "content-blocks-\(Date().timeIntervalSince1970)",
@@ -560,6 +611,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleCustomEvent(_ payload: [String: Any]) {
+        finalizeStreamingMessageIfNeeded()
         if payload["type"] as? String == "agent_context" {
             let agentName = payload["agent_name"] as? String ?? "Sub-agent"
             messages.append(Message(
@@ -628,12 +680,9 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
-        // Let the drain timer finish smoothly at its elevated catch-up rate;
-        // flushing all remaining chars would produce a visible end-of-reply
-        // leap. The timer self-invalidates when the buffer empties.
-        streamingDone = true
-
         if type == "run.failed" {
+            // Finalize so the error message doesn't orphan a streaming bubble.
+            finalizeStreamingMessageIfNeeded()
             let errMsg = payload["error"] as? String ?? "Agent run failed"
             error = errMsg
             messages.append(Message(
@@ -642,6 +691,12 @@ public class ChatViewModel: ObservableObject {
                 content: "❌ Error: \(errMsg)",
                 type: .error
             ))
+        } else {
+            // Success / cancelled / timed-out: let the drain timer finish
+            // smoothly at its elevated catch-up rate; flushing all remaining
+            // chars would produce a visible end-of-reply leap. The timer
+            // self-invalidates when the buffer empties.
+            streamingDone = true
         }
 
         isLoading = false

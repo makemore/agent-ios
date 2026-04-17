@@ -480,12 +480,23 @@ struct VideoBlockView: View {
             }
         }
         .onAppear {
+            #if DEBUG
+            print("[AgentFrontend][VideoBlock] onAppear url=\(block.url) autoplay=\(block.autoplay ?? false) title=\(block.title ?? "-")")
+            #endif
             if block.autoplay == true { loadPlayer() }
         }
     }
 
     private func loadPlayer() {
-        guard let url = URL(string: block.url) else { return }
+        guard let url = URL(string: block.url) else {
+            #if DEBUG
+            print("[AgentFrontend][VideoBlock] loadPlayer FAILED — invalid URL: \(block.url)")
+            #endif
+            return
+        }
+        #if DEBUG
+        print("[AgentFrontend][VideoBlock] loadPlayer starting AVPlayer for \(url)")
+        #endif
         let p = AVPlayer(url: url)
         self.player = p
         p.play()

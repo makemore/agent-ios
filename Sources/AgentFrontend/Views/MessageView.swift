@@ -23,6 +23,11 @@ public struct MessageView: View {
     public var body: some View {
         // Content blocks: render as standalone rich content
         if isContentBlocks, let blocks = message.metadata?.contentBlocks, !blocks.isEmpty {
+            let _: Void = {
+                #if DEBUG
+                print("[AgentFrontend][MessageView] rendering ContentBlockRenderer with \(blocks.count) block(s)")
+                #endif
+            }()
             ContentBlockRenderer(blocks: blocks, config: config, onAction: onBlockAction)
                 .padding(.horizontal, 12)
         } else {
