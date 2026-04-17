@@ -37,7 +37,10 @@ public class ChatViewModel: ObservableObject {
     // and drain them at a steady cadence so the displayed text flows smoothly.
     private var streamBuffer: String = ""
     private var drainTimer: Timer?
-    private let drainInterval: TimeInterval = 0.02   // 50 Hz
+    private let drainInterval: TimeInterval = 0.025  // 40 Hz
+    /// Set true when server signals stream end — lets the drain catch up
+    /// at a higher rate without flushing everything instantly.
+    private var streamingDone: Bool = false
 
     // MARK: - Dependencies
 
@@ -441,9 +444,14 @@ public class ChatViewModel: ObservableObject {
     private func handleAssistantMessage(_ payload: [String: Any]) {
         guard let content = payload["content"] as? String else { return }
 
-        // Authoritative final content — drop any pending buffered chars and
-        // snap the visible message to the server's canonical version.
-        resetStreamBuffer()
+        // If deltas are still draining, the same content is already queued
+        // in streamBuffer; snapping here would produce a visible leap to the
+        // end. Ignore and let the drain finish smoothly instead.
+        if drainTimer != nil || !streamBuffer.isEmpty {
+            return
+        }
+
+        // No drain active (non-streaming mode or replay) — apply directly.
         assistantContent = content
         upsertStreamingMessage(content: assistantContent)
     }
@@ -578,10 +586,15 @@ public class ChatViewModel: ObservableObject {
         guard !streamBuffer.isEmpty else {
             drainTimer?.invalidate()
             drainTimer = nil
+            streamingDone = false
             return
         }
         let pending = streamBuffer.count
-        let take = max(2, min(pending / 10, 8))      // 2..8 chars per 20ms
+        // Steady readable typewriter pace (~40 chars/sec) when in sync with
+        // the stream; accelerate only when the buffer grows large or the
+        // server has finished and we need to catch up without a tail lag.
+        let cap = streamingDone ? 10 : 4
+        let take = max(1, min(pending / 80, cap))
         let slice = streamBuffer.prefix(take)
         streamBuffer.removeFirst(slice.count)
         assistantContent.append(contentsOf: slice)
@@ -604,11 +617,14 @@ public class ChatViewModel: ObservableObject {
         streamBuffer.removeAll(keepingCapacity: false)
         drainTimer?.invalidate()
         drainTimer = nil
+        streamingDone = false
     }
 
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
-        // Ensure any buffered chars are shown before we tear down the stream.
-        flushStreamBuffer()
+        // Let the drain timer finish smoothly at its elevated catch-up rate;
+        // flushing all remaining chars would produce a visible end-of-reply
+        // leap. The timer self-invalidates when the buffer empties.
+        streamingDone = true
 
         if type == "run.failed" {
             let errMsg = payload["error"] as? String ?? "Agent run failed"

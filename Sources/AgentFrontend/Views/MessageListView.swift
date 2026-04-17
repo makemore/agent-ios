@@ -53,6 +53,12 @@ public struct MessageListView: View {
     /// Last time we triggered a streaming scroll — used to throttle during
     /// high-frequency token deltas so animations don't overlap and stutter.
     @State private var lastStreamScrollAt: Date = .distantPast
+    /// Identity of the message whose content we were tracking last tick.
+    /// When this changes, the list gained/replaced a message (user submit,
+    /// assistant start) — the count handler scrolls unanimated. We must skip
+    /// the animated scroll here to avoid the layout-transaction bleed that
+    /// makes newly-inserted rows fly into position.
+    @State private var lastStreamedMessageId: String?
 
     public var body: some View {
         ScrollViewReader { proxy in
@@ -110,10 +116,18 @@ public struct MessageListView: View {
                     }
                 }
                 // Streaming: assistant is typing — keep its reply in view.
-                // Token deltas arrive ~60/sec; throttle to ~10 scrolls/sec with
-                // a matching linear animation so each glide completes before the
-                // next begins (non-overlapping, non-easing → no stutter).
+                // Scope this strictly to same-message content growth. If the
+                // last-message identity changed in this tick, a new message
+                // was just inserted and the count handler has already scrolled
+                // (without animation). Animating here would get attached to
+                // the LazyVStack's insertion transaction and make the new row
+                // visibly fly into place.
                 .onChange(of: messages.last?.content) { _ in
+                    let currentId = messages.last?.id
+                    let idChanged = currentId != lastStreamedMessageId
+                    lastStreamedMessageId = currentId
+                    guard !idChanged else { return }
+
                     guard shouldAutoScroll else { return }
                     let now = Date()
                     guard now.timeIntervalSince(lastStreamScrollAt) >= 0.1 else { return }
