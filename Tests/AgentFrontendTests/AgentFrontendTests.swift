@@ -436,5 +436,78 @@ final class AgentFrontendTests: XCTestCase {
         XCTAssertEqual(decoded.count, 1)
         XCTAssertEqual(decoded[0], original)
     }
+
+    // MARK: - Scroll Decision Tests
+
+    func testScrollDecisionInitialLoadPinsBottom() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 0, newCount: 12,
+            lastMessageIsUser: false, isNearBottom: false, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom)
+    }
+
+    func testScrollDecisionUserSubmitForcePinsRegardlessOfNearBottom() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: true, isNearBottom: false, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom)
+    }
+
+    func testScrollDecisionAssistantAppendNearBottomPins() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: false, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom)
+    }
+
+    func testScrollDecisionAssistantAppendScrolledUpDoesNothing() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: false, isNearBottom: false, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .none)
+    }
+
+    func testScrollDecisionPrependPreservesAnchor() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 10, newCount: 20,
+            lastMessageIsUser: false, isNearBottom: false,
+            pendingAnchorId: "msg-99"
+        )
+        XCTAssertEqual(action, .preserveTopAnchor(id: "msg-99"))
+    }
+
+    func testScrollDecisionPrependWithoutPriorMessagesFallsThroughToPin() {
+        // Edge case: oldCount==0 with a pending anchor. Treat as initial load,
+        // not as prepend. (Anchor should have been cleared by the caller, but
+        // test the pure logic anyway.)
+        let action = ScrollDecision.onCountChange(
+            oldCount: 0, newCount: 5,
+            lastMessageIsUser: false, isNearBottom: false,
+            pendingAnchorId: "msg-0"
+        )
+        XCTAssertEqual(action, .pinBottom)
+    }
+
+    func testScrollDecisionCountUnchangedDoesNothing() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 5, newCount: 5,
+            lastMessageIsUser: true, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .none)
+    }
+
+    func testScrollDecisionCountDecreasedDoesNothing() {
+        // Retry/edit truncates messages. The decision layer does not
+        // re-position the user; SwiftUI keeps the current scroll.
+        let action = ScrollDecision.onCountChange(
+            oldCount: 10, newCount: 7,
+            lastMessageIsUser: true, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .none)
+    }
 }
 
