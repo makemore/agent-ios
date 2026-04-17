@@ -118,11 +118,15 @@ public class SSEClient {
         
         guard let eventData = data else { return nil }
         
-        return SSEEvent(
+        let ev = SSEEvent(
             type: eventType ?? "message",
             data: eventData,
             id: id
         )
+        #if DEBUG
+        print("[AgentFrontend][SSE] event type=\(ev.type) bytes=\(eventData.count)")
+        #endif
+        return ev
     }
 }
 

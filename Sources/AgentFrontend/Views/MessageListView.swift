@@ -3,7 +3,11 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Preference key to report the bottom anchor's position within the scroll view
+/// Preference key reporting the bottom-anchor's y-position within the scroll
+/// view's named coordinate space. `minY` here is relative to the viewport
+/// origin, so the value is approximately `viewportHeight` when the anchor is
+/// at the bottom of the visible area, and `viewportHeight + scrolledUpBy` when
+/// the user has scrolled away from the bottom.
 private struct BottomAnchorPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -11,7 +15,7 @@ private struct BottomAnchorPreferenceKey: PreferenceKey {
     }
 }
 
-/// Preference key to report the scroll view's visible height
+/// Preference key reporting the scroll container's visible height.
 private struct ScrollViewHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -19,15 +23,83 @@ private struct ScrollViewHeightPreferenceKey: PreferenceKey {
     }
 }
 
-/// Message list view with smart scroll behavior matching agent-frontend
+/// Pure decision layer for scroll behaviour. Kept free of SwiftUI types so it
+/// can be exercised by unit tests without a running view hierarchy. The view
+/// body translates the returned action into a `proxy.scrollTo` call.
+enum ScrollAction: Equatable {
+    case none
+    /// Pin the bottom anchor to the viewport bottom. `delayMs` is the wait
+    /// before committing; used to let the UIKit keyboard-hide animation
+    /// (~250ms) and post-insertion layout settle before scrolling. A
+    /// too-early scroll lands on an intermediate geometry and drifts as the
+    /// animations complete.
+    case pinBottom(delayMs: UInt64)
+    case preserveTopAnchor(id: String)
+}
+
+enum ScrollDecision {
+    /// Delay applied to a user-submit pin, in milliseconds. Covers the iOS
+    /// keyboard dismissal (~250ms) plus a buffer for LazyVStack measurement
+    /// of the just-inserted row. The keyboard animation is a UIKit
+    /// safe-area inset transition that lives outside SwiftUI's Transaction
+    /// system, so we cannot suppress it; we wait past it instead.
+    static let userSubmitDelayMs: UInt64 = 400
+
+    /// Decide what (if anything) to do in response to a messages-count change.
+    /// All inputs are tick-local view state — no ambient globals — so the same
+    /// inputs always yield the same action.
+    static func onCountChange(
+        oldCount: Int,
+        newCount: Int,
+        lastMessageIsUser: Bool,
+        isNearBottom: Bool,
+        pendingAnchorId: String?
+    ) -> ScrollAction {
+        // Pagination prepend: a load-earlier commit.
+        if newCount > oldCount, oldCount > 0, let anchor = pendingAnchorId {
+            return .preserveTopAnchor(id: anchor)
+        }
+        // First messages arriving in an empty view (conversation restore).
+        if oldCount == 0, newCount > 0 {
+            return .pinBottom(delayMs: 0)
+        }
+        // Append at the tail.
+        if newCount > oldCount {
+            // A user-submit always pins and waits past the keyboard-hide
+            // animation. Assistant appends while near-bottom pin immediately.
+            if lastMessageIsUser {
+                return .pinBottom(delayMs: userSubmitDelayMs)
+            }
+            if isNearBottom {
+                return .pinBottom(delayMs: 0)
+            }
+        }
+        return .none
+    }
+}
+
+/// Message list view with smart scroll behaviour.
 ///
-/// Key behaviours (matching the web frontend):
-/// - Auto-scrolls to bottom only when the user is already near the bottom.
-/// - Loading older messages preserves scroll position (anchors to first visible).
-/// - New messages simply appear at the bottom with no insertion animation —
-///   animating the LazyVStack height causes the visible content to "fly" upward
-///   as the container grows, so we intentionally keep everything instant.
-/// - Streaming content keeps the assistant reply anchored to the bottom.
+/// Scroll architecture (see PR description for the audit that motivated it):
+/// - Scroll intent is explicit at each decision point, not derived from a live
+///   preference heuristic that can flicker during layout transitions.
+/// - A single target — `bottom-anchor` — is used for every pin-to-bottom. The
+///   Thinking indicator is never a scroll target and carries no `.id`.
+/// - Pin commits always run inside a `disablesAnimations` transaction so they
+///   cannot inherit an ambient SwiftUI animation from a row transition.
+/// - Implicit structural animations on row insertion are suppressed via
+///   `.animation(nil, value: messages.count)` and `.animation(nil, value:
+///   isLoading)` on the `LazyVStack`. This prevents the ~150ms insert
+///   animation from coinciding with the 250ms UIKit keyboard-hide
+///   safe-area transition on submit.
+/// - A user-submit force-pins and waits `ScrollDecision.userSubmitDelayMs`
+///   (400ms) before committing, so the scroll lands on the post-keyboard,
+///   post-insertion final layout rather than an intermediate geometry.
+/// - A second commit fires 80ms after any pin to catch residual layout drift.
+/// - Streaming scrolls are unanimated and throttled to 30Hz; animated
+///   streaming produced interpolation restarts that manifested as stutter.
+/// - "Is user near bottom" is sampled at the moment of decision from the two
+///   preference values; it is not a live gate that can flicker mid-keyboard.
 public struct MessageListView: View {
     let messages: [Message]
     let isLoading: Bool
@@ -40,25 +112,28 @@ public struct MessageListView: View {
 
     @State private var editingIndex: Int?
     @State private var editText: String = ""
-    /// Whether auto-scroll to bottom is active (true when user is near bottom)
-    @State private var shouldAutoScroll: Bool = true
-    /// The message ID to anchor to after loading older messages
-    @State private var anchorMessageId: String?
-    /// Previous message count — used to detect when older messages are prepended
+
+    // MARK: Scroll tracking state
+
+    /// Raw bottom-anchor y in the "messageScroll" named coordinate space.
+    @State private var bottomAnchorY: CGFloat = 0
+    /// Raw viewport height of the scroll container.
+    @State private var viewportHeight: CGFloat = 0
+    /// Message count snapshot at the previous count-change tick.
     @State private var previousMessageCount: Int = 0
-    /// Tracks whether we've already handled the initial scroll for this view instance
-    @State private var hasPerformedInitialScroll: Bool = false
-    /// Tracks the scroll view's visible height (set via preference)
-    @State private var scrollViewVisibleHeight: CGFloat = 0
-    /// Last time we triggered a streaming scroll — used to throttle during
-    /// high-frequency token deltas so animations don't overlap and stutter.
+    /// Anchor id set by the "Load earlier" button; consumed on the next
+    /// count-change. Reset on every count-change (not just the prepend branch)
+    /// so a failed pagination cannot leak the anchor into a later append.
+    @State private var anchorMessageId: String?
+    /// Identity of the last-rendered message; used to separate streaming
+    /// (same id, content grew) from insertion (new id).
+    @State private var lastRenderedMessageId: String?
+    /// 30 Hz throttle window for streaming follow-scrolls — cheap SSE-burst
+    /// guard, not a correctness knob (scrolls are unanimated, so no tail).
     @State private var lastStreamScrollAt: Date = .distantPast
-    /// Identity of the message whose content we were tracking last tick.
-    /// When this changes, the list gained/replaced a message (user submit,
-    /// assistant start) — the count handler scrolls unanimated. We must skip
-    /// the animated scroll here to avoid the layout-transaction bleed that
-    /// makes newly-inserted rows fly into position.
-    @State private var lastStreamedMessageId: String?
+    /// Coalesces multiple pin requests within a runloop window into one
+    /// scrollTo call, so redundant triggers cannot stack.
+    @State private var pinInFlight: Bool = false
 
     public var body: some View {
         ScrollViewReader { proxy in
@@ -72,103 +147,150 @@ public struct MessageListView: View {
                         )
                     }
                 )
-                .onPreferenceChange(BottomAnchorPreferenceKey.self) { bottomY in
-                    guard scrollViewVisibleHeight > 0 else { return }
-                    shouldAutoScroll = bottomY - scrollViewVisibleHeight < 100
-                }
-                .onPreferenceChange(ScrollViewHeightPreferenceKey.self) { height in
-                    scrollViewVisibleHeight = height
-                }
-                // New messages appended OR old messages prepended
+                .onPreferenceChange(BottomAnchorPreferenceKey.self) { bottomAnchorY = $0 }
+                .onPreferenceChange(ScrollViewHeightPreferenceKey.self) { viewportHeight = $0 }
                 .onChange(of: messages.count) { newCount in
-                    let oldCount = previousMessageCount
-                    previousMessageCount = newCount
-
-                    // Prepend path: older messages loaded — anchor to first previously-visible
-                    if newCount > oldCount && oldCount > 0, let anchor = anchorMessageId {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            proxy.scrollTo(anchor, anchor: .top)
-                            anchorMessageId = nil
-                        }
-                        return
-                    }
-
-                    // Initial load (conversation restored)
-                    if oldCount == 0 && newCount > 0 {
-                        hasPerformedInitialScroll = true
-                        scrollToBottomImmediate(proxy: proxy)
-                        return
-                    }
-
-                    // Append path — user sent or assistant replied.
-                    // Snap to bottom on the next frame so the new row is laid out first.
-                    if shouldAutoScroll {
-                        scrollToBottomImmediate(proxy: proxy)
-                    }
+                    handleCountChange(newCount: newCount, proxy: proxy)
                 }
-                // Initial load finished (isLoading → false)
-                .onChange(of: isLoading) { loading in
-                    if !loading && hasPerformedInitialScroll && !messages.isEmpty {
-                        scrollToBottomImmediate(proxy: proxy)
-                    } else if loading && shouldAutoScroll {
-                        // Assistant is about to respond — keep the bottom pinned
-                        scrollToBottomImmediate(proxy: proxy)
-                    }
-                }
-                // Streaming: assistant is typing — keep its reply in view.
-                // Scope this strictly to same-message content growth. If the
-                // last-message identity changed in this tick, a new message
-                // was just inserted and the count handler has already scrolled
-                // (without animation). Animating here would get attached to
-                // the LazyVStack's insertion transaction and make the new row
-                // visibly fly into place.
                 .onChange(of: messages.last?.content) { _ in
-                    let currentId = messages.last?.id
-                    let idChanged = currentId != lastStreamedMessageId
-                    lastStreamedMessageId = currentId
-                    guard !idChanged else { return }
-
-                    guard shouldAutoScroll else { return }
-                    let now = Date()
-                    guard now.timeIntervalSince(lastStreamScrollAt) >= 0.1 else { return }
-                    lastStreamScrollAt = now
-                    withAnimation(.linear(duration: 0.1)) {
-                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                    }
+                    handleContentChange(proxy: proxy)
                 }
-                // Pin to bottom whenever the view becomes visible (tab return,
-                // navigation arrival, initial load). SwiftUI restores the scroll
-                // position for preserved views, so a zero-delay scrollTo would
-                // often lose the race. A short asyncAfter lets the restore pass
-                // complete first so our scroll lands on the latest message.
-                //
-                // Note: onAppear does not fire on app resume from background
-                // when the chat view was already visible, so this preserves the
-                // "don't move if they left the app mid-scroll" behaviour.
                 .onAppear {
-                    guard !messages.isEmpty else { return }
                     previousMessageCount = messages.count
-                    shouldAutoScroll = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                    }
+                    lastRenderedMessageId = messages.last?.id
+                    guard !messages.isEmpty else { return }
+                    requestPinBottom(proxy: proxy, delayMs: 0)
                 }
         }
     }
 
-    /// Jump to the bottom without any animation. We dispatch async so the
-    /// scroll runs on the next runloop tick — after SwiftUI has laid out the
-    /// newly-inserted row and the bottom anchor has been re-measured. Calling
-    /// scrollTo synchronously inside onChange often scrolls to the previous
-    /// bottom position because the new message has not been laid out yet.
-    private func scrollToBottomImmediate(proxy: ScrollViewProxy) {
-        let target = isLoading ? "loading" : "bottom-anchor"
-        DispatchQueue.main.async {
-            proxy.scrollTo(target, anchor: .bottom)
+    // MARK: Scroll decision handlers
+
+    private var isNearBottom: Bool {
+        // Treat unmeasured viewport as at-bottom: the first frame after mount
+        // has no preference values yet and we always want to land at bottom.
+        guard viewportHeight > 0 else { return true }
+        return bottomAnchorY - viewportHeight < 100
+    }
+
+    private func handleCountChange(newCount: Int, proxy: ScrollViewProxy) {
+        let oldCount = previousMessageCount
+        previousMessageCount = newCount
+        // Always consume any pending pagination anchor, even if this isn't a
+        // prepend: if pagination failed or the user submitted instead, we want
+        // a clean slate for the next load-more.
+        let pendingAnchor = anchorMessageId
+        anchorMessageId = nil
+
+        let action = ScrollDecision.onCountChange(
+            oldCount: oldCount,
+            newCount: newCount,
+            lastMessageIsUser: messages.last?.role == .user,
+            isNearBottom: isNearBottom,
+            pendingAnchorId: pendingAnchor
+        )
+        // Keep the identity tracker in sync so the streaming handler, which
+        // fires immediately after this one on content changes, can distinguish
+        // "same message grew" from "new message inserted".
+        lastRenderedMessageId = messages.last?.id
+
+        switch action {
+        case .none:
+            return
+        case .pinBottom(let delayMs):
+            requestPinBottom(proxy: proxy, delayMs: delayMs)
+        case .preserveTopAnchor(let id):
+            commitPreserveTopAnchor(proxy: proxy, id: id)
         }
     }
 
-    /// Dismiss the keyboard by resigning first responder
+    private func handleContentChange(proxy: ScrollViewProxy) {
+        let currentId = messages.last?.id
+        let idChanged = currentId != lastRenderedMessageId
+        lastRenderedMessageId = currentId
+        // Identity change: a new message was inserted — the count handler has
+        // already committed the appropriate scroll. Do not layer a second.
+        guard !idChanged else { return }
+        // Follow the streaming reply only if the user hasn't scrolled away.
+        guard isNearBottom else { return }
+        // 30 Hz throttle — cheap guard against SSE bursts, not a correctness
+        // knob. Instant (unanimated) scrolls produce no visual jank at this
+        // rate; the previous `linear(0.1)` animation is what produced the
+        // "sticking/glitching" because overlapping token arrivals restarted
+        // the interpolation mid-flight.
+        let now = Date()
+        guard now.timeIntervalSince(lastStreamScrollAt) >= 0.033 else { return }
+        lastStreamScrollAt = now
+        commitPinNow(proxy: proxy)
+    }
+
+    // MARK: Scroll commit primitives
+
+    /// Coalesced pin-to-bottom with optional delay.
+    ///
+    /// `delayMs = 0` is the hot path (initial load, pagination, streaming):
+    /// two `Task.yield()`s let the LazyVStack's post-insertion layout pass
+    /// settle, then we commit.
+    ///
+    /// `delayMs > 0` is the user-submit path. When the user taps send, three
+    /// animations fire concurrently:
+    ///   1. UIKit keyboard dismissal (~250ms, safe-area inset transition,
+    ///      lives *outside* SwiftUI's Transaction system — `disablesAnimations`
+    ///      cannot touch it).
+    ///   2. SwiftUI structural insert animation for the user row.
+    ///   3. SwiftUI structural insert animation for the "Thinking…" row.
+    /// A scrollTo fired while any of these is in flight computes against an
+    /// intermediate geometry; once the keyboard settles, the scroll position
+    /// is stale and the just-inserted row appears to fly off-screen. Waiting
+    /// past the longest animation (the keyboard) and then committing lands
+    /// on the final geometry. We also re-commit 80ms later as belt-and-
+    /// suspenders against any residual row-measurement drift.
+    private func requestPinBottom(proxy: ScrollViewProxy, delayMs: UInt64) {
+        guard !pinInFlight else { return }
+        pinInFlight = true
+        Task { @MainActor in
+            if delayMs > 0 {
+                try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+            } else {
+                await Task.yield()
+                await Task.yield()
+            }
+            commitPinNow(proxy: proxy)
+            // Second commit catches any residual layout drift (e.g. a tall
+            // row that finished measuring just after the first commit).
+            // No-op if already at bottom.
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            commitPinNow(proxy: proxy)
+            pinInFlight = false
+        }
+    }
+
+    /// Low-level pin commit. Always runs inside a `disablesAnimations`
+    /// transaction so it cannot inherit an ambient SwiftUI animation from a
+    /// view transition or implicit insert.
+    private func commitPinNow(proxy: ScrollViewProxy) {
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            proxy.scrollTo("bottom-anchor", anchor: .bottom)
+        }
+    }
+
+    /// Scroll the previously-first-visible message back to the top after a
+    /// pagination prepend, so the user's reading position is preserved.
+    private func commitPreserveTopAnchor(proxy: ScrollViewProxy, id: String) {
+        Task { @MainActor in
+            await Task.yield()
+            await Task.yield()
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                proxy.scrollTo(id, anchor: .top)
+            }
+        }
+    }
+
+    /// Dismiss the keyboard by resigning first responder.
     private func dismissKeyboard() {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(
@@ -212,7 +334,11 @@ public struct MessageListView: View {
 
                 // Messages
                 ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                    let isToolMsg = message.type == .toolCall || message.type == .toolResult
+                    let isToolMsg = message.type == .toolCall
+                        || message.type == .toolResult
+                        || message.type == .subAgentStart
+                        || message.type == .subAgentEnd
+                        || message.type == .agentContext
                     if isToolMsg && !config.showToolMessages {
                         EmptyView()
                     } else if editingIndex == index {
@@ -241,7 +367,12 @@ public struct MessageListView: View {
                     }
                 }
 
-                // Loading indicator
+                // Loading indicator. No `.transition(...)` and no `.id` here:
+                // the row is never a scroll target, and an implicit insert
+                // animation would coincide with the keyboard-dismissal safe-
+                // area transition and produce a visible layout bleed. The
+                // parent's `.animation(nil, value: isLoading)` (below) further
+                // suppresses any implicit insert animation.
                 if isLoading {
                     HStack {
                         ProgressView().progressViewStyle(CircularProgressViewStyle())
@@ -250,8 +381,6 @@ public struct MessageListView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding()
-                    .id("loading")
-                    .transition(.opacity)
                 }
 
                 // Bottom anchor — reports its position for scroll tracking
@@ -265,6 +394,16 @@ public struct MessageListView: View {
                 .id("bottom-anchor")
             }
             .padding()
+            // Suppress SwiftUI's implicit structural-change animation on the
+            // two value-changes that drive scroll targeting: a new message
+            // and the Thinking-row toggle. Without this, inserting a row
+            // fades/slides it in over ~150ms, which coincides with the
+            // 250ms UIKit keyboard-dismiss safe-area animation on submit
+            // and produces the "fly-off" drift. Structural changes now
+            // apply instantly; the scroll commit (delayed past the keyboard
+            // animation) lands on the final, stable layout.
+            .animation(nil, value: messages.count)
+            .animation(nil, value: isLoading)
         }
         #if os(iOS)
         .scrollDismissesKeyboard(.interactively)
@@ -328,3 +467,98 @@ struct EditMessageView: View {
         .shadow(radius: 2)
     }
 }
+
+#if DEBUG
+/// Scripted harness that reproduces the submit / streaming / terminate cycle
+/// without the network or a running ChatViewModel. Lives beside the view so
+/// regressions in the scroll state machine surface in Xcode previews.
+///
+/// Steps:
+///  - t=0.0s: mount with 15 prior messages, scrolled to bottom.
+///  - t=0.5s: "user submit" — append a user message and flip `isLoading` true
+///            in the same tick (the combination that triggers the fly-off).
+///  - t=2.0s: insert a streaming assistant message and grow its content over
+///            5 seconds to exercise streaming follow-scroll.
+///  - t=7.5s: flip `isLoading` false (terminal event).
+///  - Tap "reset" to re-run the sequence.
+///
+/// Manual verification: at every point, the latest visible message should be
+/// just above the bottom safe-area inset. No row should ever fly off-screen.
+struct MessageListScrollHarness: View {
+    @State private var messages: [Message] = MessageListScrollHarness.seed()
+    @State private var isLoading: Bool = false
+    @State private var running: Bool = false
+
+    static func seed() -> [Message] {
+        (1...15).map { i in
+            Message(
+                id: "seed-\(i)",
+                role: i.isMultiple(of: 2) ? .assistant : .user,
+                content: "Seed message \(i) — lorem ipsum dolor sit amet."
+            )
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            MessageListView(
+                messages: messages,
+                isLoading: isLoading,
+                hasMoreMessages: false,
+                loadingMoreMessages: false,
+                config: ChatWidgetConfig(),
+                onLoadMore: {},
+                onRetry: { _ in },
+                onEdit: { _, _ in }
+            )
+            HStack {
+                Button("Run submit+stream") { runScript() }
+                    .disabled(running)
+                Button("Reset") {
+                    messages = Self.seed()
+                    isLoading = false
+                    running = false
+                }
+            }
+            .padding()
+        }
+    }
+
+    private func runScript() {
+        running = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            // Submit: user message + isLoading true in the same tick.
+            isLoading = true
+            messages.append(Message(
+                id: "user-\(Date().timeIntervalSince1970)",
+                role: .user,
+                content: "What does the scroll harness do?"
+            ))
+
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            let streamId = "assistant-stream-\(Date().timeIntervalSince1970)"
+            messages.append(Message(id: streamId, role: .assistant, content: ""))
+
+            let tokens = "The scroll harness scripts a deterministic submit, streaming reply, and terminal event so regressions in the MessageListView scroll state machine surface without a backend. It exists precisely because prior scroll fixes kept hiding races that only manifested under real network timing."
+            for ch in tokens {
+                try? await Task.sleep(nanoseconds: 30_000_000)
+                if let idx = messages.firstIndex(where: { $0.id == streamId }) {
+                    messages[idx].content.append(ch)
+                }
+            }
+
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            isLoading = false
+            running = false
+        }
+    }
+}
+
+struct MessageListView_Previews: PreviewProvider {
+    static var previews: some View {
+        MessageListScrollHarness()
+            .previewDisplayName("Scroll harness — submit / stream / terminate")
+    }
+}
+#endif

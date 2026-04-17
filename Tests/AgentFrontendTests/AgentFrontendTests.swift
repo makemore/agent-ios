@@ -436,5 +436,84 @@ final class AgentFrontendTests: XCTestCase {
         XCTAssertEqual(decoded.count, 1)
         XCTAssertEqual(decoded[0], original)
     }
+
+    // MARK: - Scroll Decision Tests
+
+    func testScrollDecisionInitialLoadPinsBottomImmediately() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 0, newCount: 12,
+            lastMessageIsUser: false, isNearBottom: false, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom(delayMs: 0))
+    }
+
+    func testScrollDecisionUserSubmitDelaysForKeyboardAnimation() {
+        // The submit path must wait past the UIKit keyboard-hide animation
+        // (~250ms) before committing, otherwise the scroll lands on an
+        // intermediate geometry and the row flies off. The exact delay value
+        // is load-bearing — changing it is a deliberate behavioural change.
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: true, isNearBottom: false, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom(delayMs: ScrollDecision.userSubmitDelayMs))
+        XCTAssertGreaterThanOrEqual(ScrollDecision.userSubmitDelayMs, 300)
+    }
+
+    func testScrollDecisionAssistantAppendNearBottomPinsImmediately() {
+        // No keyboard to wait on for an assistant-driven append.
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: false, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom(delayMs: 0))
+    }
+
+    func testScrollDecisionAssistantAppendScrolledUpDoesNothing() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: false, isNearBottom: false, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .none)
+    }
+
+    func testScrollDecisionPrependPreservesAnchor() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 10, newCount: 20,
+            lastMessageIsUser: false, isNearBottom: false,
+            pendingAnchorId: "msg-99"
+        )
+        XCTAssertEqual(action, .preserveTopAnchor(id: "msg-99"))
+    }
+
+    func testScrollDecisionPrependWithoutPriorMessagesFallsThroughToPin() {
+        // Edge case: oldCount==0 with a pending anchor. Treat as initial load,
+        // not as prepend. (Anchor should have been cleared by the caller, but
+        // test the pure logic anyway.)
+        let action = ScrollDecision.onCountChange(
+            oldCount: 0, newCount: 5,
+            lastMessageIsUser: false, isNearBottom: false,
+            pendingAnchorId: "msg-0"
+        )
+        XCTAssertEqual(action, .pinBottom(delayMs: 0))
+    }
+
+    func testScrollDecisionCountUnchangedDoesNothing() {
+        let action = ScrollDecision.onCountChange(
+            oldCount: 5, newCount: 5,
+            lastMessageIsUser: true, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .none)
+    }
+
+    func testScrollDecisionCountDecreasedDoesNothing() {
+        // Retry/edit truncates messages. The decision layer does not
+        // re-position the user; SwiftUI keeps the current scroll.
+        let action = ScrollDecision.onCountChange(
+            oldCount: 10, newCount: 7,
+            lastMessageIsUser: true, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .none)
+    }
 }
 
