@@ -136,11 +136,21 @@ public struct MessageListView: View {
                         proxy.scrollTo("bottom-anchor", anchor: .bottom)
                     }
                 }
-                // Fallback: first appearance with messages already loaded (e.g. tab return)
+                // Pin to bottom whenever the view becomes visible (tab return,
+                // navigation arrival, initial load). SwiftUI restores the scroll
+                // position for preserved views, so a zero-delay scrollTo would
+                // often lose the race. A short asyncAfter lets the restore pass
+                // complete first so our scroll lands on the latest message.
+                //
+                // Note: onAppear does not fire on app resume from background
+                // when the chat view was already visible, so this preserves the
+                // "don't move if they left the app mid-scroll" behaviour.
                 .onAppear {
-                    if !messages.isEmpty {
-                        previousMessageCount = messages.count
-                        scrollToBottomImmediate(proxy: proxy)
+                    guard !messages.isEmpty else { return }
+                    previousMessageCount = messages.count
+                    shouldAutoScroll = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
                     }
                 }
         }
