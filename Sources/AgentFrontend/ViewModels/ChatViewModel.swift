@@ -370,6 +370,9 @@ public class ChatViewModel: ObservableObject {
         config.onEvent?(event.type, payload)
 
         switch event.type {
+        case "assistant.delta":
+            handleAssistantDelta(payload)
+
         case "assistant.message":
             handleAssistantMessage(payload)
 
@@ -399,21 +402,48 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Handle an `assistant.delta` event — a single chunk of streamed text.
+    /// Backend emits many of these in sequence when STREAM_RESPONSES is on,
+    /// each with `{"delta": "<words>"}`. We accumulate them into the current
+    /// streaming assistant message for a typewriter effect.
+    private func handleAssistantDelta(_ payload: [String: Any]) {
+        guard let delta = payload["delta"] as? String else { return }
+
+        // Start a fresh accumulator if the last message isn't an in-flight
+        // streaming assistant message (e.g. a tool.call was just inserted).
+        let lastIsStreaming = messages.last.map {
+            $0.role == .assistant && $0.id.hasPrefix("assistant-stream-")
+        } ?? false
+        if !lastIsStreaming {
+            assistantContent = ""
+        }
+
+        assistantContent += delta
+        upsertStreamingMessage(content: assistantContent)
+    }
+
+    /// Handle an `assistant.message` event — the final authoritative text
+    /// emitted after any deltas (or on its own when streaming is off).
+    /// We *replace* the accumulator with the full content so the message is
+    /// correct whether or not the client received every delta.
     private func handleAssistantMessage(_ payload: [String: Any]) {
         guard let content = payload["content"] as? String else { return }
 
-        assistantContent += content
+        assistantContent = content
+        upsertStreamingMessage(content: assistantContent)
+    }
 
-        // Update or create streaming message
+    /// Create or update the in-flight streaming assistant message.
+    private func upsertStreamingMessage(content: String) {
         if let lastIndex = messages.indices.last,
            messages[lastIndex].role == .assistant,
            messages[lastIndex].id.hasPrefix("assistant-stream-") {
-            messages[lastIndex].content = assistantContent
+            messages[lastIndex].content = content
         } else {
             messages.append(Message(
                 id: "assistant-stream-\(Date().timeIntervalSince1970)",
                 role: .assistant,
-                content: assistantContent,
+                content: content,
                 type: .message
             ))
         }
