@@ -28,11 +28,23 @@ private struct ScrollViewHeightPreferenceKey: PreferenceKey {
 /// body translates the returned action into a `proxy.scrollTo` call.
 enum ScrollAction: Equatable {
     case none
-    case pinBottom
+    /// Pin the bottom anchor to the viewport bottom. `delayMs` is the wait
+    /// before committing; used to let the UIKit keyboard-hide animation
+    /// (~250ms) and post-insertion layout settle before scrolling. A
+    /// too-early scroll lands on an intermediate geometry and drifts as the
+    /// animations complete.
+    case pinBottom(delayMs: UInt64)
     case preserveTopAnchor(id: String)
 }
 
 enum ScrollDecision {
+    /// Delay applied to a user-submit pin, in milliseconds. Covers the iOS
+    /// keyboard dismissal (~250ms) plus a buffer for LazyVStack measurement
+    /// of the just-inserted row. The keyboard animation is a UIKit
+    /// safe-area inset transition that lives outside SwiftUI's Transaction
+    /// system, so we cannot suppress it; we wait past it instead.
+    static let userSubmitDelayMs: UInt64 = 400
+
     /// Decide what (if anything) to do in response to a messages-count change.
     /// All inputs are tick-local view state — no ambient globals — so the same
     /// inputs always yield the same action.
@@ -49,14 +61,17 @@ enum ScrollDecision {
         }
         // First messages arriving in an empty view (conversation restore).
         if oldCount == 0, newCount > 0 {
-            return .pinBottom
+            return .pinBottom(delayMs: 0)
         }
         // Append at the tail.
         if newCount > oldCount {
-            // A user-submit always pins — by definition the user wants to see
-            // what they just sent, regardless of where they were scrolled.
-            if lastMessageIsUser || isNearBottom {
-                return .pinBottom
+            // A user-submit always pins and waits past the keyboard-hide
+            // animation. Assistant appends while near-bottom pin immediately.
+            if lastMessageIsUser {
+                return .pinBottom(delayMs: userSubmitDelayMs)
+            }
+            if isNearBottom {
+                return .pinBottom(delayMs: 0)
             }
         }
         return .none
@@ -69,13 +84,22 @@ enum ScrollDecision {
 /// - Scroll intent is explicit at each decision point, not derived from a live
 ///   preference heuristic that can flicker during layout transitions.
 /// - A single target — `bottom-anchor` — is used for every pin-to-bottom. The
-///   `loading` indicator is never a scroll target (it is lazy and transient).
-/// - Pin commits wait two runloop turns and run inside a transaction with
-///   `disablesAnimations = true`, so in-flight keyboard / view-transition
-///   animations cannot bleed into the scroll position.
+///   Thinking indicator is never a scroll target and carries no `.id`.
+/// - Pin commits always run inside a `disablesAnimations` transaction so they
+///   cannot inherit an ambient SwiftUI animation from a row transition.
+/// - Implicit structural animations on row insertion are suppressed via
+///   `.animation(nil, value: messages.count)` and `.animation(nil, value:
+///   isLoading)` on the `LazyVStack`. This prevents the ~150ms insert
+///   animation from coinciding with the 250ms UIKit keyboard-hide
+///   safe-area transition on submit.
+/// - A user-submit force-pins and waits `ScrollDecision.userSubmitDelayMs`
+///   (400ms) before committing, so the scroll lands on the post-keyboard,
+///   post-insertion final layout rather than an intermediate geometry.
+/// - A second commit fires 80ms after any pin to catch residual layout drift.
+/// - Streaming scrolls are unanimated and throttled to 30Hz; animated
+///   streaming produced interpolation restarts that manifested as stutter.
 /// - "Is user near bottom" is sampled at the moment of decision from the two
 ///   preference values; it is not a live gate that can flicker mid-keyboard.
-/// - A user-submit force-pins regardless of the near-bottom sample.
 public struct MessageListView: View {
     let messages: [Message]
     let isLoading: Bool
@@ -104,7 +128,8 @@ public struct MessageListView: View {
     /// Identity of the last-rendered message; used to separate streaming
     /// (same id, content grew) from insertion (new id).
     @State private var lastRenderedMessageId: String?
-    /// 10 Hz throttle window for animated streaming follow-scrolls.
+    /// 30 Hz throttle window for streaming follow-scrolls — cheap SSE-burst
+    /// guard, not a correctness knob (scrolls are unanimated, so no tail).
     @State private var lastStreamScrollAt: Date = .distantPast
     /// Coalesces multiple pin requests within a runloop window into one
     /// scrollTo call, so redundant triggers cannot stack.
@@ -134,7 +159,7 @@ public struct MessageListView: View {
                     previousMessageCount = messages.count
                     lastRenderedMessageId = messages.last?.id
                     guard !messages.isEmpty else { return }
-                    requestPinBottom(proxy: proxy, animated: false)
+                    requestPinBottom(proxy: proxy, delayMs: 0)
                 }
         }
     }
@@ -172,8 +197,8 @@ public struct MessageListView: View {
         switch action {
         case .none:
             return
-        case .pinBottom:
-            requestPinBottom(proxy: proxy, animated: false)
+        case .pinBottom(let delayMs):
+            requestPinBottom(proxy: proxy, delayMs: delayMs)
         case .preserveTopAnchor(let id):
             commitPreserveTopAnchor(proxy: proxy, id: id)
         }
@@ -188,45 +213,66 @@ public struct MessageListView: View {
         guard !idChanged else { return }
         // Follow the streaming reply only if the user hasn't scrolled away.
         guard isNearBottom else { return }
+        // 30 Hz throttle — cheap guard against SSE bursts, not a correctness
+        // knob. Instant (unanimated) scrolls produce no visual jank at this
+        // rate; the previous `linear(0.1)` animation is what produced the
+        // "sticking/glitching" because overlapping token arrivals restarted
+        // the interpolation mid-flight.
         let now = Date()
-        guard now.timeIntervalSince(lastStreamScrollAt) >= 0.1 else { return }
+        guard now.timeIntervalSince(lastStreamScrollAt) >= 0.033 else { return }
         lastStreamScrollAt = now
-        requestPinBottom(proxy: proxy, animated: true)
+        commitPinNow(proxy: proxy)
     }
 
     // MARK: Scroll commit primitives
 
-    /// Single pin-to-bottom commit point. Coalesces multiple requests that
-    /// arrive within the same runloop window into one scrollTo call.
+    /// Coalesced pin-to-bottom with optional delay.
     ///
-    /// Why two `Task.yield()` turns: SwiftUI's layout pass for the inserted
-    /// row, and any safe-area adjustment for a dismissing keyboard, settle
-    /// over one-to-two runloop turns. A scrollTo that fires too early lands on
-    /// the pre-insertion bottom position.
+    /// `delayMs = 0` is the hot path (initial load, pagination, streaming):
+    /// two `Task.yield()`s let the LazyVStack's post-insertion layout pass
+    /// settle, then we commit.
     ///
-    /// Why the explicit `disablesAnimations` transaction: a dispatched scroll
-    /// would otherwise inherit any ambient animation transaction that happens
-    /// to be active (a keyboard-dismissal inset animation, a row transition).
-    /// Disabling animations on this specific transaction makes the pin
-    /// position deterministic regardless of what else is animating.
-    private func requestPinBottom(proxy: ScrollViewProxy, animated: Bool) {
+    /// `delayMs > 0` is the user-submit path. When the user taps send, three
+    /// animations fire concurrently:
+    ///   1. UIKit keyboard dismissal (~250ms, safe-area inset transition,
+    ///      lives *outside* SwiftUI's Transaction system — `disablesAnimations`
+    ///      cannot touch it).
+    ///   2. SwiftUI structural insert animation for the user row.
+    ///   3. SwiftUI structural insert animation for the "Thinking…" row.
+    /// A scrollTo fired while any of these is in flight computes against an
+    /// intermediate geometry; once the keyboard settles, the scroll position
+    /// is stale and the just-inserted row appears to fly off-screen. Waiting
+    /// past the longest animation (the keyboard) and then committing lands
+    /// on the final geometry. We also re-commit 80ms later as belt-and-
+    /// suspenders against any residual row-measurement drift.
+    private func requestPinBottom(proxy: ScrollViewProxy, delayMs: UInt64) {
         guard !pinInFlight else { return }
         pinInFlight = true
         Task { @MainActor in
-            await Task.yield()
-            await Task.yield()
-            pinInFlight = false
-            if animated {
-                withAnimation(.linear(duration: 0.1)) {
-                    proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                }
+            if delayMs > 0 {
+                try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
             } else {
-                var tx = Transaction()
-                tx.disablesAnimations = true
-                withTransaction(tx) {
-                    proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                }
+                await Task.yield()
+                await Task.yield()
             }
+            commitPinNow(proxy: proxy)
+            // Second commit catches any residual layout drift (e.g. a tall
+            // row that finished measuring just after the first commit).
+            // No-op if already at bottom.
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            commitPinNow(proxy: proxy)
+            pinInFlight = false
+        }
+    }
+
+    /// Low-level pin commit. Always runs inside a `disablesAnimations`
+    /// transaction so it cannot inherit an ambient SwiftUI animation from a
+    /// view transition or implicit insert.
+    private func commitPinNow(proxy: ScrollViewProxy) {
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            proxy.scrollTo("bottom-anchor", anchor: .bottom)
         }
     }
 
@@ -317,10 +363,12 @@ public struct MessageListView: View {
                     }
                 }
 
-                // Loading indicator. No `.transition(...)` here: an ambient
-                // animation transaction (keyboard dismissal, for instance) can
-                // attach to a transition and produce a visible layout bleed
-                // when `isLoading` flips during submit.
+                // Loading indicator. No `.transition(...)` and no `.id` here:
+                // the row is never a scroll target, and an implicit insert
+                // animation would coincide with the keyboard-dismissal safe-
+                // area transition and produce a visible layout bleed. The
+                // parent's `.animation(nil, value: isLoading)` (below) further
+                // suppresses any implicit insert animation.
                 if isLoading {
                     HStack {
                         ProgressView().progressViewStyle(CircularProgressViewStyle())
@@ -329,7 +377,6 @@ public struct MessageListView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding()
-                    .id("loading")
                 }
 
                 // Bottom anchor — reports its position for scroll tracking
@@ -343,6 +390,16 @@ public struct MessageListView: View {
                 .id("bottom-anchor")
             }
             .padding()
+            // Suppress SwiftUI's implicit structural-change animation on the
+            // two value-changes that drive scroll targeting: a new message
+            // and the Thinking-row toggle. Without this, inserting a row
+            // fades/slides it in over ~150ms, which coincides with the
+            // 250ms UIKit keyboard-dismiss safe-area animation on submit
+            // and produces the "fly-off" drift. Structural changes now
+            // apply instantly; the scroll commit (delayed past the keyboard
+            // animation) lands on the final, stable layout.
+            .animation(nil, value: messages.count)
+            .animation(nil, value: isLoading)
         }
         #if os(iOS)
         .scrollDismissesKeyboard(.interactively)

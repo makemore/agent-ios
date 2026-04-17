@@ -439,28 +439,34 @@ final class AgentFrontendTests: XCTestCase {
 
     // MARK: - Scroll Decision Tests
 
-    func testScrollDecisionInitialLoadPinsBottom() {
+    func testScrollDecisionInitialLoadPinsBottomImmediately() {
         let action = ScrollDecision.onCountChange(
             oldCount: 0, newCount: 12,
             lastMessageIsUser: false, isNearBottom: false, pendingAnchorId: nil
         )
-        XCTAssertEqual(action, .pinBottom)
+        XCTAssertEqual(action, .pinBottom(delayMs: 0))
     }
 
-    func testScrollDecisionUserSubmitForcePinsRegardlessOfNearBottom() {
+    func testScrollDecisionUserSubmitDelaysForKeyboardAnimation() {
+        // The submit path must wait past the UIKit keyboard-hide animation
+        // (~250ms) before committing, otherwise the scroll lands on an
+        // intermediate geometry and the row flies off. The exact delay value
+        // is load-bearing — changing it is a deliberate behavioural change.
         let action = ScrollDecision.onCountChange(
             oldCount: 8, newCount: 9,
             lastMessageIsUser: true, isNearBottom: false, pendingAnchorId: nil
         )
-        XCTAssertEqual(action, .pinBottom)
+        XCTAssertEqual(action, .pinBottom(delayMs: ScrollDecision.userSubmitDelayMs))
+        XCTAssertGreaterThanOrEqual(ScrollDecision.userSubmitDelayMs, 300)
     }
 
-    func testScrollDecisionAssistantAppendNearBottomPins() {
+    func testScrollDecisionAssistantAppendNearBottomPinsImmediately() {
+        // No keyboard to wait on for an assistant-driven append.
         let action = ScrollDecision.onCountChange(
             oldCount: 8, newCount: 9,
             lastMessageIsUser: false, isNearBottom: true, pendingAnchorId: nil
         )
-        XCTAssertEqual(action, .pinBottom)
+        XCTAssertEqual(action, .pinBottom(delayMs: 0))
     }
 
     func testScrollDecisionAssistantAppendScrolledUpDoesNothing() {
@@ -489,7 +495,7 @@ final class AgentFrontendTests: XCTestCase {
             lastMessageIsUser: false, isNearBottom: false,
             pendingAnchorId: "msg-0"
         )
-        XCTAssertEqual(action, .pinBottom)
+        XCTAssertEqual(action, .pinBottom(delayMs: 0))
     }
 
     func testScrollDecisionCountUnchangedDoesNothing() {
