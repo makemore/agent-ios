@@ -21,11 +21,12 @@ private struct ScrollViewHeightPreferenceKey: PreferenceKey {
 
 /// Message list view with smart scroll behavior matching agent-frontend
 ///
-/// Key behaviors (matching the web frontend):
-/// - Auto-scrolls to bottom only when user is already near the bottom
-/// - Loading older messages preserves scroll position (anchors to first visible message)
-/// - Scroll-to-top triggers load-more automatically
-/// - Always scrolls to bottom on initial load or first messages
+/// Key behaviours (matching the web frontend):
+/// - Auto-scrolls to bottom only when the user is already near the bottom.
+/// - Loading older messages preserves scroll position (anchors to first visible).
+/// - New messages animate in with a slide+fade transition from the bottom;
+///   the scroll is not animated so the previous content stays put visually.
+/// - Streaming content keeps the assistant reply anchored to the bottom.
 public struct MessageListView: View {
     let messages: [Message]
     let isLoading: Bool
@@ -44,58 +45,37 @@ public struct MessageListView: View {
     @State private var anchorMessageId: String?
     /// Previous message count — used to detect when older messages are prepended
     @State private var previousMessageCount: Int = 0
-    /// Incremented to request a non-animated scroll-to-bottom on next body evaluation
-    @State private var scrollToBottomRequest: Int = 0
     /// Tracks whether we've already handled the initial scroll for this view instance
     @State private var hasPerformedInitialScroll: Bool = false
+    /// Tracks the scroll view's visible height (set via preference)
+    @State private var scrollViewVisibleHeight: CGFloat = 0
 
     public var body: some View {
-        let _ = print("[📜 MessageListView] body evaluated — messages.count=\(messages.count), isLoading=\(isLoading), previousMessageCount=\(previousMessageCount), scrollRequest=\(scrollToBottomRequest)")
         ScrollViewReader { proxy in
             scrollContent(proxy: proxy)
                 .coordinateSpace(name: "messageScroll")
-                // Track the scroll view's visible height
                 .background(
                     GeometryReader { geo in
-                        Color.clear
-                            .preference(
-                                key: ScrollViewHeightPreferenceKey.self,
-                                value: geo.size.height
-                            )
+                        Color.clear.preference(
+                            key: ScrollViewHeightPreferenceKey.self,
+                            value: geo.size.height
+                        )
                     }
                 )
                 .onPreferenceChange(BottomAnchorPreferenceKey.self) { bottomY in
-                    let scrollViewHeight = scrollViewVisibleHeight
-                    if scrollViewHeight > 0 {
-                        let newValue = bottomY - scrollViewHeight < 100
-                        if newValue != shouldAutoScroll {
-                            print("[📜 MessageListView] shouldAutoScroll changed: \(shouldAutoScroll) → \(newValue) (bottomY=\(bottomY), visibleH=\(scrollViewHeight))")
-                        }
-                        shouldAutoScroll = newValue
-                    }
+                    guard scrollViewVisibleHeight > 0 else { return }
+                    shouldAutoScroll = bottomY - scrollViewVisibleHeight < 100
                 }
                 .onPreferenceChange(ScrollViewHeightPreferenceKey.self) { height in
-                    if height != scrollViewVisibleHeight {
-                        print("[📜 MessageListView] scrollViewVisibleHeight changed: \(scrollViewVisibleHeight) → \(height)")
-                    }
                     scrollViewVisibleHeight = height
                 }
-                // Reactive scroll-to-bottom: when scrollToBottomRequest changes,
-                // read the CURRENT isLoading/messages state (no stale captures)
-                .onChange(of: scrollToBottomRequest) { _ in
-                    let target = isLoading ? "loading" : "bottom-anchor"
-                    print("[📜 MessageListView] onChange(scrollToBottomRequest) → scrolling to '\(target)', isLoading=\(isLoading), messages.count=\(messages.count)")
-                    proxy.scrollTo(target, anchor: .bottom)
-                }
-                // When messages count changes
+                // New messages appended OR old messages prepended
                 .onChange(of: messages.count) { newCount in
                     let oldCount = previousMessageCount
                     previousMessageCount = newCount
-                    print("[📜 MessageListView] onChange(messages.count): oldCount=\(oldCount) → newCount=\(newCount), shouldAutoScroll=\(shouldAutoScroll), anchorMessageId=\(anchorMessageId ?? "nil")")
 
-                    // Older messages were prepended — anchor to the first previously-visible message
+                    // Prepend path: older messages loaded — anchor to first previously-visible
                     if newCount > oldCount && oldCount > 0, let anchor = anchorMessageId {
-                        print("[📜 MessageListView] → PREPEND path: anchoring to \(anchor)")
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                             proxy.scrollTo(anchor, anchor: .top)
                             anchorMessageId = nil
@@ -103,59 +83,60 @@ public struct MessageListView: View {
                         return
                     }
 
-                    // Initial load (conversation restored or first messages)
+                    // Initial load (conversation restored)
                     if oldCount == 0 && newCount > 0 {
-                        print("[📜 MessageListView] → INITIAL LOAD path: requesting scroll to bottom")
                         hasPerformedInitialScroll = true
-                        // Request scroll — will fire onChange(scrollToBottomRequest)
-                        // which reads current state, avoiding stale captures
-                        scrollToBottomRequest += 1
+                        scrollToBottomImmediate(proxy: proxy)
                         return
                     }
 
-                    // New messages appended (user sent or assistant replied)
+                    // Append path — user sent or assistant replied.
+                    // Snap to bottom instantly; the message's own transition animates the entry.
                     if shouldAutoScroll {
-                        print("[📜 MessageListView] → APPEND path: auto-scrolling to bottom")
-                        scrollToBottom(proxy: proxy)
-                    } else {
-                        print("[📜 MessageListView] → APPEND path: NOT scrolling (shouldAutoScroll=false)")
+                        scrollToBottomImmediate(proxy: proxy)
                     }
                 }
-                // When isLoading transitions to false after initial load,
-                // the "bottom-anchor" is now in the view tree — scroll to it
+                // Initial load finished (isLoading → false)
                 .onChange(of: isLoading) { loading in
-                    print("[📜 MessageListView] onChange(isLoading): \(loading), shouldAutoScroll=\(shouldAutoScroll), hasPerformedInitialScroll=\(hasPerformedInitialScroll)")
                     if !loading && hasPerformedInitialScroll && !messages.isEmpty {
-                        print("[📜 MessageListView] → isLoading became false after initial load, scrolling to bottom")
-                        scrollToBottomRequest += 1
-                    }
-                    if loading && shouldAutoScroll {
-                        scrollToBottom(proxy: proxy)
+                        scrollToBottomImmediate(proxy: proxy)
+                    } else if loading && shouldAutoScroll {
+                        // Assistant is about to respond — keep the bottom pinned
+                        scrollToBottomImmediate(proxy: proxy)
                     }
                 }
-                // Auto-scroll when streaming content updates (assistant typing)
+                // Streaming: assistant is typing — keep its reply in view with a subtle animation
                 .onChange(of: messages.last?.content) { _ in
-                    if shouldAutoScroll {
-                        scrollToBottom(proxy: proxy)
+                    guard shouldAutoScroll else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
                     }
                 }
-                // Fallback: when the view first appears with messages already loaded
-                // (e.g. tab switch back to chat), scroll to bottom immediately
+                // Fallback: first appearance with messages already loaded (e.g. tab return)
                 .onAppear {
-                    print("[📜 MessageListView] onAppear — messages.count=\(messages.count), previousMessageCount=\(previousMessageCount)")
                     if !messages.isEmpty {
                         previousMessageCount = messages.count
-                        print("[📜 MessageListView] → onAppear: messages already loaded, requesting scroll to bottom")
-                        scrollToBottomRequest += 1
+                        scrollToBottomImmediate(proxy: proxy)
                     }
                 }
         }
     }
 
+    /// Jump to the bottom without any animation — used when appending new messages
+    /// so the previous content doesn't visually fly off-screen. The new message's
+    /// insertion transition (slide + fade) provides the motion.
+    private func scrollToBottomImmediate(proxy: ScrollViewProxy) {
+        let target = isLoading ? "loading" : "bottom-anchor"
+        proxy.scrollTo(target, anchor: .bottom)
+    }
+
     /// Dismiss the keyboard by resigning first responder
     private func dismissKeyboard() {
         #if canImport(UIKit)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil, from: nil, for: nil
+        )
         #endif
     }
 
@@ -172,14 +153,11 @@ public struct MessageListView: View {
                         onLoadMore()
                     } label: {
                         if loadingMoreMessages {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle())
+                            ProgressView().progressViewStyle(CircularProgressViewStyle())
                         } else {
                             HStack(spacing: 4) {
-                                Image(systemName: "arrow.up")
-                                    .font(.caption2)
-                                Text("Load earlier messages")
-                                    .font(.caption)
+                                Image(systemName: "arrow.up").font(.caption2)
+                                Text("Load earlier messages").font(.caption)
                             }
                             .foregroundColor(config.primaryColor)
                         }
@@ -196,7 +174,6 @@ public struct MessageListView: View {
 
                 // Messages
                 ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                    // Hide tool messages when showToolMessages is disabled
                     let isToolMsg = message.type == .toolCall || message.type == .toolResult
                     if isToolMsg && !config.showToolMessages {
                         EmptyView()
@@ -207,9 +184,7 @@ public struct MessageListView: View {
                                 onEdit(index, editText)
                                 editingIndex = nil
                             },
-                            onCancel: {
-                                editingIndex = nil
-                            }
+                            onCancel: { editingIndex = nil }
                         )
                     } else {
                         MessageView(
@@ -225,29 +200,38 @@ public struct MessageListView: View {
                             } : nil
                         )
                         .id(message.id)
+                        // Slide up + fade in from the input area when a new message
+                        // appears. No removal animation — messages don't disappear normally.
+                        .transition(
+                            .asymmetric(
+                                insertion: .move(edge: .bottom).combined(with: .opacity),
+                                removal: .opacity
+                            )
+                        )
                     }
                 }
+                // Animate inserts/removes within the message list
+                .animation(.spring(response: 0.35, dampingFraction: 0.85), value: messages.count)
 
                 // Loading indicator
                 if isLoading {
                     HStack {
-                        ProgressView()
-                            .progressViewStyle(CircularProgressViewStyle())
+                        ProgressView().progressViewStyle(CircularProgressViewStyle())
                         Text("Thinking...")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                     .padding()
                     .id("loading")
+                    .transition(.opacity)
                 }
 
                 // Bottom anchor — reports its position for scroll tracking
                 GeometryReader { geo in
-                    Color.clear
-                        .preference(
-                            key: BottomAnchorPreferenceKey.self,
-                            value: geo.frame(in: .named("messageScroll")).minY
-                        )
+                    Color.clear.preference(
+                        key: BottomAnchorPreferenceKey.self,
+                        value: geo.frame(in: .named("messageScroll")).minY
+                    )
                 }
                 .frame(height: 1)
                 .id("bottom-anchor")
@@ -259,44 +243,25 @@ public struct MessageListView: View {
         #endif
         // Tap on message list area dismisses keyboard without swallowing child taps
         .simultaneousGesture(
-            TapGesture().onEnded { _ in
-                dismissKeyboard()
-            }
+            TapGesture().onEnded { _ in dismissKeyboard() }
         )
-    }
-
-    /// Tracks the scroll view's visible height (set via preference)
-    @State private var scrollViewVisibleHeight: CGFloat = 0
-
-    /// Scroll to the bottom-most content (used for append/streaming — reads current state inline)
-    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = true) {
-        let target = isLoading ? "loading" : "bottom-anchor"
-        print("[📜 MessageListView] scrollToBottom → target='\(target)', animated=\(animated), isLoading=\(isLoading)")
-        let action = {
-            proxy.scrollTo(target, anchor: .bottom)
-        }
-        if animated {
-            withAnimation(.easeOut(duration: 0.2)) { action() }
-        } else {
-            action()
-        }
     }
 }
 
 /// Empty state view
 struct EmptyStateView: View {
     let config: ChatWidgetConfig
-    
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 48))
                 .foregroundColor(config.primaryColor.opacity(0.5))
-            
+
             Text(config.emptyStateTitle)
                 .font(.headline)
                 .foregroundColor(.primary)
-            
+
             Text(config.emptyStateMessage)
                 .font(.subheadline)
                 .foregroundColor(.secondary)
@@ -311,7 +276,7 @@ struct EditMessageView: View {
     @Binding var text: String
     let onSave: () -> Void
     let onCancel: () -> Void
-    
+
     var body: some View {
         VStack(spacing: 8) {
             TextEditor(text: $text)
@@ -319,7 +284,7 @@ struct EditMessageView: View {
                 .padding(8)
                 .background(PlatformColors.systemGray6)
                 .cornerRadius(8)
-            
+
             HStack {
                 Button("Cancel", action: onCancel)
                     .foregroundColor(.secondary)
@@ -335,4 +300,3 @@ struct EditMessageView: View {
         .shadow(radius: 2)
     }
 }
-
