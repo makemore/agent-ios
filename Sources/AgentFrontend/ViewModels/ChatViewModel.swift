@@ -139,15 +139,22 @@ public class ChatViewModel: ObservableObject {
     /// Cancel the current run
     public func cancelRun() async {
         guard let runId = currentRunId, isLoading else { return }
-        
+
         do {
             try await apiClient.cancelRun(id: runId)
-            
+
             sseClient?.disconnect()
             sseClient = nil
+            // Drop any buffered-but-not-yet-drained characters and stop the
+            // typewriter timer. Without this, the drain timer keeps revealing
+            // whatever the server sent before the disconnect — the user sees
+            // text continuing to type for seconds after tapping Stop. This
+            // differs from the natural-end path (`handleTerminalEvent`) which
+            // deliberately lets the drain finish smoothly.
+            resetStreamBuffer()
             isLoading = false
             currentRunId = nil
-            
+
             // Add cancelled message
             messages.append(Message(
                 role: .system,
