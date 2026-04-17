@@ -37,7 +37,7 @@ public class ChatViewModel: ObservableObject {
     // and drain them at a steady cadence so the displayed text flows smoothly.
     private var streamBuffer: String = ""
     private var drainTimer: Timer?
-    private let drainInterval: TimeInterval = 0.025  // 40 Hz
+    private let drainInterval: TimeInterval = 0.03   // ~33 Hz
     /// Set true when server signals stream end — lets the drain catch up
     /// at a higher rate without flushing everything instantly.
     private var streamingDone: Bool = false
@@ -590,11 +590,11 @@ public class ChatViewModel: ObservableObject {
             return
         }
         let pending = streamBuffer.count
-        // Steady readable typewriter pace (~40 chars/sec) when in sync with
+        // Steady readable typewriter pace (~33 chars/sec) when in sync with
         // the stream; accelerate only when the buffer grows large or the
         // server has finished and we need to catch up without a tail lag.
-        let cap = streamingDone ? 10 : 4
-        let take = max(1, min(pending / 80, cap))
+        let cap = streamingDone ? 6 : 2
+        let take = max(1, min(pending / 120, cap))
         let slice = streamBuffer.prefix(take)
         streamBuffer.removeFirst(slice.count)
         assistantContent.append(contentsOf: slice)
