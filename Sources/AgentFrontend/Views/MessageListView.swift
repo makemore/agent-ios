@@ -50,6 +50,9 @@ public struct MessageListView: View {
     @State private var hasPerformedInitialScroll: Bool = false
     /// Tracks the scroll view's visible height (set via preference)
     @State private var scrollViewVisibleHeight: CGFloat = 0
+    /// Last time we triggered a streaming scroll — used to throttle during
+    /// high-frequency token deltas so animations don't overlap and stutter.
+    @State private var lastStreamScrollAt: Date = .distantPast
 
     public var body: some View {
         ScrollViewReader { proxy in
@@ -106,10 +109,16 @@ public struct MessageListView: View {
                         scrollToBottomImmediate(proxy: proxy)
                     }
                 }
-                // Streaming: assistant is typing — keep its reply in view with a subtle animation
+                // Streaming: assistant is typing — keep its reply in view.
+                // Token deltas arrive ~60/sec; throttle to ~10 scrolls/sec with
+                // a matching linear animation so each glide completes before the
+                // next begins (non-overlapping, non-easing → no stutter).
                 .onChange(of: messages.last?.content) { _ in
                     guard shouldAutoScroll else { return }
-                    withAnimation(.easeOut(duration: 0.15)) {
+                    let now = Date()
+                    guard now.timeIntervalSince(lastStreamScrollAt) >= 0.1 else { return }
+                    lastStreamScrollAt = now
+                    withAnimation(.linear(duration: 0.1)) {
                         proxy.scrollTo("bottom-anchor", anchor: .bottom)
                     }
                 }

@@ -30,8 +30,10 @@ public struct InputView: View {
                 attachedFilesView
             }
             
-            // Input row
-            HStack(alignment: .bottom, spacing: 8) {
+            // Input row — center alignment keeps icons visually on the text
+            // baseline of the pill even though the TextField's padding makes
+            // the pill taller than the icons. Matches iMessage/WhatsApp behaviour.
+            HStack(alignment: .center, spacing: 8) {
                 // File attachment button
                 if config.enableFiles {
                     Button(action: { showFilePicker = true }) {
