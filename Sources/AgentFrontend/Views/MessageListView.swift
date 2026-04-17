@@ -24,8 +24,9 @@ private struct ScrollViewHeightPreferenceKey: PreferenceKey {
 /// Key behaviours (matching the web frontend):
 /// - Auto-scrolls to bottom only when the user is already near the bottom.
 /// - Loading older messages preserves scroll position (anchors to first visible).
-/// - New messages animate in with a slide+fade transition from the bottom;
-///   the scroll is not animated so the previous content stays put visually.
+/// - New messages simply appear at the bottom with no insertion animation —
+///   animating the LazyVStack height causes the visible content to "fly" upward
+///   as the container grows, so we intentionally keep everything instant.
 /// - Streaming content keeps the assistant reply anchored to the bottom.
 public struct MessageListView: View {
     let messages: [Message]
@@ -91,7 +92,7 @@ public struct MessageListView: View {
                     }
 
                     // Append path — user sent or assistant replied.
-                    // Snap to bottom instantly; the message's own transition animates the entry.
+                    // Snap to bottom on the next frame so the new row is laid out first.
                     if shouldAutoScroll {
                         scrollToBottomImmediate(proxy: proxy)
                     }
@@ -122,12 +123,16 @@ public struct MessageListView: View {
         }
     }
 
-    /// Jump to the bottom without any animation — used when appending new messages
-    /// so the previous content doesn't visually fly off-screen. The new message's
-    /// insertion transition (slide + fade) provides the motion.
+    /// Jump to the bottom without any animation. We dispatch async so the
+    /// scroll runs on the next runloop tick — after SwiftUI has laid out the
+    /// newly-inserted row and the bottom anchor has been re-measured. Calling
+    /// scrollTo synchronously inside onChange often scrolls to the previous
+    /// bottom position because the new message has not been laid out yet.
     private func scrollToBottomImmediate(proxy: ScrollViewProxy) {
         let target = isLoading ? "loading" : "bottom-anchor"
-        proxy.scrollTo(target, anchor: .bottom)
+        DispatchQueue.main.async {
+            proxy.scrollTo(target, anchor: .bottom)
+        }
     }
 
     /// Dismiss the keyboard by resigning first responder
@@ -200,18 +205,8 @@ public struct MessageListView: View {
                             } : nil
                         )
                         .id(message.id)
-                        // Slide up + fade in from the input area when a new message
-                        // appears. No removal animation — messages don't disappear normally.
-                        .transition(
-                            .asymmetric(
-                                insertion: .move(edge: .bottom).combined(with: .opacity),
-                                removal: .opacity
-                            )
-                        )
                     }
                 }
-                // Animate inserts/removes within the message list
-                .animation(.spring(response: 0.35, dampingFraction: 0.85), value: messages.count)
 
                 // Loading indicator
                 if isLoading {
