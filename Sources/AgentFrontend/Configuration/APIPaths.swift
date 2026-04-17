@@ -42,7 +42,7 @@ public struct APIPaths {
         anonymousSession: String = "/api/accounts/anonymous-session/",
         conversations: String = "/api/agent-runtime/conversations/",
         runs: String = "/api/agent-runtime/runs/",
-        runEvents: String = "/api/agent-runtime/runs/{runId}/events/",
+        runEvents: String = "/api/agent-runtime/runs/{runId}/stream/",
         cancelRun: String? = nil,
         simulateCustomer: String = "/api/agent-runtime/simulate-customer/",
         ttsVoices: String = "/api/tts/voices/",
