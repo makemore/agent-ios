@@ -45,6 +45,37 @@ public class ChatViewModel: ObservableObject {
     /// find and update it even after non-streaming messages (tool calls,
     /// content blocks, sub-agent events) have been appended after it.
     private var currentStreamingMessageId: String?
+    /// Set true when an `assistant.message` finalises the current turn's
+    /// bubble. While true, any further `assistant.delta` events are dropped
+    /// because they are late-arriving tokens for a turn that has already
+    /// been delivered in full — replaying them would produce a duplicate
+    /// typewriter bubble below the finalised one.
+    /// Reset on any non-streaming event (tool call, tool result, content
+    /// block, sub-agent start/end, custom, terminal), which marks the
+    /// boundary of a new turn.
+    private var turnFinalized: Bool = false
+
+    // MARK: - Sub-agent echo suppression
+    /// When a sub-agent finishes streaming its final answer, we snapshot
+    /// that text here. The parent agent typically receives the sub-agent's
+    /// response as a tool result and re-streams it verbatim as its own
+    /// `assistant.delta` events — which without dedup would produce a
+    /// duplicate bubble below the sub-agent's one. Keeping this lets us
+    /// recognise the echo while still letting the sub-agent's live
+    /// narration (intermediate tool-use text, cards, etc.) render.
+    /// Cleared when the parent's stream either diverges from the snapshot
+    /// or is finalised by `assistant.message`, and on turn boundaries
+    /// where continuing to compare would be meaningless (new tool call,
+    /// new sub-agent, terminal event, new SSE stream).
+    private var pendingEchoReference: String?
+    /// Accumulates the parent's delta text while we're still deciding
+    /// whether its output is an echo of the sub-agent. Chars in here
+    /// are not yet committed to any visible bubble.
+    private var pendingEchoBuffer: String = ""
+    /// Once the parent's stream has diverged from the snapshot (said
+    /// something different, or added content beyond it), we stop
+    /// comparing and treat subsequent deltas as a normal stream.
+    private var pendingEchoDiverged: Bool = false
 
     // MARK: - Dependencies
 
@@ -361,7 +392,9 @@ public class ChatViewModel: ObservableObject {
 
         assistantContent = ""
         currentStreamingMessageId = nil
+        turnFinalized = false
         resetStreamBuffer()
+        clearPendingEcho()
 
         let client = SSEClient()
         sseClient = client
@@ -444,14 +477,60 @@ public class ChatViewModel: ObservableObject {
     private func handleAssistantDelta(_ payload: [String: Any]) {
         guard let delta = payload["delta"] as? String else { return }
 
-        // Start a fresh accumulator if the last message isn't an in-flight
-        // streaming assistant message (e.g. a tool.call was just inserted).
-        let lastIsStreaming = messages.last.map {
-            $0.role == .assistant && $0.id.hasPrefix("assistant-stream-")
-        } ?? false
-        if !lastIsStreaming {
+        // Drop late-arriving deltas for a turn whose authoritative
+        // `assistant.message` has already been applied. Otherwise they
+        // spawn a second bubble that types out content we've already
+        // shown in full. A new turn is signalled by a non-streaming
+        // event (tool/video/sub-agent), which resets `turnFinalized`.
+        if turnFinalized { return }
+
+        // Sub-agent echo suppression. After a sub-agent finishes streaming
+        // its final answer, the parent typically re-streams the exact same
+        // text as its own deltas (it's echoing the tool result). Buffer the
+        // parent's output silently while it still matches the sub-agent's
+        // snapshot as a prefix — only render if it diverges (parent genuinely
+        // adds something) or extends past the snapshot.
+        if let reference = pendingEchoReference, !pendingEchoDiverged {
+            pendingEchoBuffer.append(delta)
+            if reference.hasPrefix(pendingEchoBuffer) {
+                // Still tracking the sub-agent's content — don't render.
+                return
+            }
+            // Diverged. Decide how much of what we've buffered to show.
+            pendingEchoDiverged = true
+            pendingEchoReference = nil
+            let replay: String
+            if pendingEchoBuffer.hasPrefix(reference) {
+                // Parent extended the sub-agent's answer. Show only the
+                // novel tail as a fresh bubble below.
+                replay = String(pendingEchoBuffer.dropFirst(reference.count))
+            } else {
+                // Parent said something different from the first char —
+                // render everything it has sent so far.
+                replay = pendingEchoBuffer
+            }
+            pendingEchoBuffer = ""
+            if replay.isEmpty { return }
+            // Start a new streaming bubble for the parent's own content.
+            // `currentStreamingMessageId` was nilled by the sub_agent.end's
+            // closeStreamingSession, so the drain will open a fresh bubble.
             assistantContent = ""
-            currentStreamingMessageId = nil
+            resetStreamBuffer()
+            streamBuffer.append(replay)
+            startDrainTimerIfNeeded()
+            return
+        }
+
+        // `currentStreamingMessageId` is the only reliable signal that we
+        // are still inside an active streaming session. Peering at
+        // `messages.last.id.hasPrefix("assistant-stream-")` is misleading
+        // because a just-snapped bubble (from `assistant.message` after
+        // the session was closed by a tool/video/sub-agent insertion)
+        // shares that prefix but its session is already over — the next
+        // stream belongs to a new turn and must create a fresh bubble
+        // below it, not target the finalised one.
+        if currentStreamingMessageId == nil {
+            assistantContent = ""
             resetStreamBuffer()
         }
 
@@ -467,22 +546,60 @@ public class ChatViewModel: ObservableObject {
     private func handleAssistantMessage(_ payload: [String: Any]) {
         guard let content = payload["content"] as? String else { return }
 
+        // Mark the turn finalised *unconditionally* — this is the server's
+        // authoritative "this turn is done" signal. Any `assistant.delta`
+        // that arrives later (whether because some providers flush a
+        // trailing token burst after the final-message event, or because
+        // the main agent re-streams the same content it already received
+        // via a sub-agent tool result) must be dropped to avoid a second
+        // typewriter bubble below the one we're about to finalise.
+        turnFinalized = true
+
+        // Sub-agent echo resolution. If we were still comparing the parent's
+        // stream against a sub-agent snapshot when the final message lands,
+        // the snapshot's bubble already shows the authoritative text —
+        // anything matching (or shorter than) the reference must NOT produce
+        // a second bubble; anything extending it shows only the tail.
+        if let reference = pendingEchoReference {
+            clearPendingEcho()
+            if content == reference || reference.hasPrefix(content) {
+                // Pure echo or partial echo — sub-agent bubble covers it.
+                return
+            }
+            if content.hasPrefix(reference) {
+                // Parent extended the answer. Render only the novel suffix
+                // as a fresh bubble below the sub-agent's one.
+                let suffix = String(content.dropFirst(reference.count))
+                if suffix.isEmpty { return }
+                assistantContent = suffix
+                upsertStreamingMessage(content: assistantContent)
+                closeStreamingSession()
+                turnFinalized = true
+                return
+            }
+            // Parent said something genuinely different — fall through to
+            // the normal finalisation path so the full content is rendered.
+        }
+
         // If deltas are still draining, the same content is already queued
         // in streamBuffer; snapping here would produce a visible leap to the
-        // end. Ignore and let the drain finish smoothly instead.
+        // end. Let the drain finish smoothly — the turn-finalised flag is
+        // already set so any post-drain stragglers will be dropped.
         if drainTimer != nil || !streamBuffer.isEmpty {
             return
         }
 
         // No drain active — either non-streaming mode, replay, or the
-        // stream was already finalized by a non-delta event. Apply the
-        // authoritative text to the tracked streaming message (if any)
-        // and then close out the streaming session so subsequent deltas
-        // (e.g. from the main agent after a sub-agent) create a fresh bubble.
+        // stream was already finalised by a non-delta event. Apply the
+        // authoritative text to the tracked streaming message; if that
+        // session was already closed (e.g. by a preceding content.blocks
+        // or tool.result insertion), upsert creates a fresh bubble below.
         assistantContent = content
         upsertStreamingMessage(content: assistantContent)
-        currentStreamingMessageId = nil
-        assistantContent = ""
+        // Preserve `turnFinalized` across the close — a non-streaming
+        // event (tool/video/sub-agent) is what resets it for the next turn.
+        closeStreamingSession()
+        turnFinalized = true
     }
 
     /// Create or update the in-flight streaming assistant message.
@@ -505,24 +622,42 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
-    /// If a streaming message is in flight (drain timer active or buffer
-    /// non-empty), flush all remaining text into the current streaming
-    /// bubble and reset the accumulator. Must be called BEFORE inserting
-    /// any non-delta message (tool call, sub-agent start/end, content
-    /// blocks) — otherwise the orphaned drain timer creates a duplicate
-    /// bubble when it next fires and finds the last message is no longer
-    /// the streaming one.
-    private func finalizeStreamingMessageIfNeeded() {
-        guard drainTimer != nil || !streamBuffer.isEmpty else { return }
-        flushStreamBuffer()
-        // Reset so the next delta stream (e.g. from the main agent after
-        // a sub-agent completes) starts with a fresh accumulator and does
-        // not duplicate the finalized text in a new bubble.
+    /// Close out the current streaming session before inserting any
+    /// non-delta message (tool call, tool result, sub-agent start/end,
+    /// content blocks, custom events, terminal errors).
+    ///
+    /// Two things must happen atomically here:
+    ///   1. **Flush any pending buffer** into the current streaming bubble
+    ///      so the user sees the full text the server had already sent —
+    ///      otherwise the bubble is truncated mid-sentence.
+    ///   2. **Forget the streaming bubble's ID** (`currentStreamingMessageId`)
+    ///      so the next text event — whether `assistant.message` (snap)
+    ///      or a run of `assistant.delta`s (typewriter) — creates a
+    ///      *new* bubble **below** the non-streaming insertion rather
+    ///      than reaching back up and overwriting the old bubble above it.
+    ///
+    /// Skipping step 2 produces the "message appears all at once AND the
+    /// typewriter keeps typing below" double-render bug: the authoritative
+    /// `assistant.message` lands on the old bubble (above the video card)
+    /// while subsequent deltas spawn a fresh bubble below.
+    private func closeStreamingSession() {
+        if drainTimer != nil || !streamBuffer.isEmpty {
+            flushStreamBuffer()
+        }
+        currentStreamingMessageId = nil
         assistantContent = ""
+        streamingDone = false
+        // A non-streaming event marks a turn boundary — subsequent deltas
+        // belong to a new turn and must flow into a fresh bubble.
+        turnFinalized = false
     }
 
     private func handleToolCall(_ payload: [String: Any]) {
-        finalizeStreamingMessageIfNeeded()
+        closeStreamingSession()
+        // A new tool call by the parent means it's doing more work rather
+        // than echoing a finished sub-agent — any stashed echo reference
+        // is stale now.
+        clearPendingEcho()
         let name = payload["name"] as? String ?? "tool"
         messages.append(Message(
             id: "tool-call-\(Date().timeIntervalSince1970)",
@@ -538,7 +673,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleToolResult(_ payload: [String: Any]) {
-        finalizeStreamingMessageIfNeeded()
+        closeStreamingSession()
         let result = payload["result"] as? [String: Any]
         let isError = result?["error"] != nil
         let content = isError ? "❌ \(result?["error"] ?? "Error")" : "✓ Done"
@@ -557,7 +692,10 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSubAgentStart(_ payload: [String: Any]) {
-        finalizeStreamingMessageIfNeeded()
+        closeStreamingSession()
+        // A new sub-agent invocation supersedes any pending echo reference
+        // from a previous one.
+        clearPendingEcho()
         let agentName = payload["agent_name"] as? String ?? payload["sub_agent_key"] as? String ?? "sub-agent"
         messages.append(Message(
             id: "sub-agent-start-\(Date().timeIntervalSince1970)",
@@ -573,7 +711,12 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSubAgentEnd(_ payload: [String: Any]) {
-        finalizeStreamingMessageIfNeeded()
+        closeStreamingSession()
+        // After the session is closed the sub-agent's final streamed text is
+        // committed to its bubble — capture it as the echo reference so the
+        // parent agent's upcoming re-stream of the same response can be
+        // suppressed while still letting the sub-agent's narration render.
+        let echoReference = lastStreamedAssistantText()
         let agentName = payload["agent_name"] as? String ?? "Sub-agent"
         messages.append(Message(
             id: "sub-agent-end-\(Date().timeIntervalSince1970)",
@@ -585,10 +728,15 @@ public class ChatViewModel: ObservableObject {
                 agentName: payload["agent_name"] as? String
             )
         ))
+        if let text = echoReference, !text.isEmpty {
+            pendingEchoReference = text
+            pendingEchoBuffer = ""
+            pendingEchoDiverged = false
+        }
     }
 
     private func handleContentBlocks(_ payload: [String: Any]) {
-        finalizeStreamingMessageIfNeeded()
+        closeStreamingSession()
         guard let blocksArray = payload["blocks"] as? [[String: Any]] else {
             #if DEBUG
             print("[AgentFrontend][ChatVM] content.blocks: payload has no 'blocks' array — keys=\(Array(payload.keys))")
@@ -627,7 +775,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleCustomEvent(_ payload: [String: Any]) {
-        finalizeStreamingMessageIfNeeded()
+        closeStreamingSession()
         if payload["type"] as? String == "agent_context" {
             let agentName = payload["agent_name"] as? String ?? "Sub-agent"
             messages.append(Message(
@@ -695,10 +843,34 @@ public class ChatViewModel: ObservableObject {
         streamingDone = false
     }
 
+    /// Reset the sub-agent echo-suppression state. Called at turn
+    /// boundaries where continuing to compare the parent's stream
+    /// against a prior sub-agent snapshot would be meaningless.
+    private func clearPendingEcho() {
+        pendingEchoReference = nil
+        pendingEchoBuffer = ""
+        pendingEchoDiverged = false
+    }
+
+    /// Content of the most recent assistant message bubble, used as the
+    /// echo-suppression reference when a sub-agent has just ended.
+    /// Intermediate tool-call, tool-result, content-block and sub-agent
+    /// markers are skipped — we want the last actual streamed answer.
+    private func lastStreamedAssistantText() -> String? {
+        for msg in messages.reversed() {
+            if msg.role == .assistant && msg.type == .message && !msg.content.isEmpty {
+                return msg.content
+            }
+        }
+        return nil
+    }
+
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
         if type == "run.failed" {
-            // Finalize so the error message doesn't orphan a streaming bubble.
-            finalizeStreamingMessageIfNeeded()
+            // Close out the stream so the error message doesn't orphan a
+            // streaming bubble or cause subsequent text to overwrite it.
+            closeStreamingSession()
+            clearPendingEcho()
             let errMsg = payload["error"] as? String ?? "Agent run failed"
             error = errMsg
             messages.append(Message(
@@ -713,6 +885,10 @@ public class ChatViewModel: ObservableObject {
             // chars would produce a visible end-of-reply leap. The timer
             // self-invalidates when the buffer empties.
             streamingDone = true
+            // The run is over — any still-pending echo reference can't be
+            // resolved by another event and would only leak into the next
+            // turn if not cleared.
+            clearPendingEcho()
         }
 
         isLoading = false
@@ -724,18 +900,35 @@ public class ChatViewModel: ObservableObject {
     private func mapApiMessage(_ m: APIMessage) -> [Message] {
         let timestamp = m.timestamp ?? Date()
 
-        // Tool result messages (role: "tool")
+        // Tool result messages (role: "tool"). If the backend persisted
+        // contentBlocks on the tool message we synthesise an extra bubble so
+        // the rich UI (videos, cards, etc.) re-renders on conversation reload.
         if m.role == "tool" {
-            return [Message(
+            var out: [Message] = [Message(
                 role: .system,
                 content: "✓ Done",
                 timestamp: timestamp,
                 type: .toolResult,
                 metadata: MessageMetadata(
+                    toolName: m.metadata?.toolName,
                     toolCallId: m.toolCallId,
                     result: m.content
                 )
             )]
+            if let blocks = m.metadata?.contentBlocks, !blocks.isEmpty {
+                out.append(Message(
+                    role: .assistant,
+                    content: "",
+                    timestamp: timestamp,
+                    type: .contentBlocks,
+                    metadata: MessageMetadata(
+                        toolName: m.metadata?.toolName,
+                        toolCallId: m.toolCallId,
+                        contentBlocks: blocks
+                    )
+                ))
+            }
+            return out
         }
 
         // Assistant messages with tool calls

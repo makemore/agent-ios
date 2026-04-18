@@ -42,13 +42,28 @@ public struct APIMessage: Codable {
     public var timestamp: Date?
     public var toolCalls: [ToolCall]?
     public var toolCallId: String?
-    
+    public var metadata: APIMessageMetadata?
+
     enum CodingKeys: String, CodingKey {
         case role
         case content
         case timestamp
         case toolCalls = "tool_calls"
         case toolCallId = "tool_call_id"
+        case metadata
+    }
+}
+
+/// Metadata carried on an API message. The backend persists rich UI data
+/// (e.g. contentBlocks from tool results) here so conversations can be
+/// re-rendered faithfully on reload without replaying the SSE stream.
+public struct APIMessageMetadata: Codable {
+    public var contentBlocks: [ContentBlock]?
+    public var toolName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case contentBlocks
+        case toolName = "tool_name"
     }
 }
 

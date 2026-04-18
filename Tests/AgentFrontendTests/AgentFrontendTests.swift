@@ -110,8 +110,46 @@ final class AgentFrontendTests: XCTestCase {
         XCTAssertNotEqual(message1, message3)
     }
     
+    // MARK: - APIMessage metadata decoding
+
+    func testAPIMessageDecodesContentBlocksInMetadata() throws {
+        // Mirror the shape the backend emits on conversation reload: a tool
+        // message whose metadata carries persisted contentBlocks.
+        let json = """
+        {
+          "role": "tool",
+          "content": "Found a calming video",
+          "tool_call_id": "call_vid",
+          "metadata": {
+            "tool_name": "get_video",
+            "contentBlocks": [
+              {"type": "video", "url": "https://example.com/a.mp4", "title": "Calm"}
+            ]
+          }
+        }
+        """.data(using: .utf8)!
+
+        let msg = try JSONDecoder().decode(APIMessage.self, from: json)
+        XCTAssertEqual(msg.role, "tool")
+        XCTAssertEqual(msg.toolCallId, "call_vid")
+        XCTAssertEqual(msg.metadata?.toolName, "get_video")
+        guard case .video(let v) = msg.metadata?.contentBlocks?.first else {
+            return XCTFail("expected video block")
+        }
+        XCTAssertEqual(v.url, "https://example.com/a.mp4")
+        XCTAssertEqual(v.title, "Calm")
+    }
+
+    func testAPIMessageWithoutMetadataDecodesCleanly() throws {
+        let json = """
+        { "role": "user", "content": "hi" }
+        """.data(using: .utf8)!
+        let msg = try JSONDecoder().decode(APIMessage.self, from: json)
+        XCTAssertNil(msg.metadata)
+    }
+
     // MARK: - Task State Tests
-    
+
     func testTaskStateTransitions() {
         XCTAssertEqual(TaskState.notStarted.next, .inProgress)
         XCTAssertEqual(TaskState.inProgress.next, .complete)

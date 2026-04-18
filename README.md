@@ -165,6 +165,14 @@ Sources/AgentFrontend/
 
 ## Changelog
 
+### 0.5.0
+
+**Rich-content persistence & sub-agent echo suppression**
+
+- **Content blocks persist across reload** — video cards, widgets, and other rich tool-result blocks are now reconstructed from message metadata when a conversation is reloaded, matching what was shown during the live session. Requires `agent-runtime-core >= 0.10.6`, which stores `contentBlocks` on the tool message's `metadata`.
+- **Sub-agent echo suppression** — after a sub-agent finishes streaming its final answer the parent agent typically re-streams the same text verbatim as its own deltas. The client now snapshots the sub-agent's last streamed content at `sub_agent.end` and silently buffers parent deltas while they still match the snapshot as a prefix, suppressing the duplicate bubble. If the parent genuinely diverges or extends past the snapshot, only the novel tail renders as a fresh bubble.
+- **Turn finalisation watermark** — drops late-arriving `assistant.delta` events after an authoritative `assistant.message` has landed for the same turn. Prevents a second bubble from materialising with content we've already shown in full.
+
 ### 0.4.0
 
 **Scroll redesign & streaming fixes**
