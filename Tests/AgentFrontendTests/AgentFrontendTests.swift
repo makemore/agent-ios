@@ -553,5 +553,30 @@ final class AgentFrontendTests: XCTestCase {
         )
         XCTAssertEqual(action, .none)
     }
+
+    // MARK: - VideoBlockView full-screen callback
+
+    func testVideoBlockViewFullScreenCallbackDefaultsNil() {
+        let block = VideoBlock(
+            type: "video",
+            url: "https://example.com/a.mp4",
+            title: nil, caption: nil, thumbnailUrl: nil, autoplay: nil, mimeType: nil
+        )
+        let view = VideoBlockView(block: block)
+        XCTAssertNil(view.onFullScreenChange)
+    }
+
+    func testVideoBlockViewForwardsFullScreenCallback() {
+        var received: [Bool] = []
+        let block = VideoBlock(
+            type: "video",
+            url: "https://example.com/a.mp4",
+            title: "T", caption: nil, thumbnailUrl: nil, autoplay: nil, mimeType: nil
+        )
+        let view = VideoBlockView(block: block, onFullScreenChange: { received.append($0) })
+        view.onFullScreenChange?(true)
+        view.onFullScreenChange?(false)
+        XCTAssertEqual(received, [true, false])
+    }
 }
 

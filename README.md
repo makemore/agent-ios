@@ -165,6 +165,13 @@ Sources/AgentFrontend/
 
 ## Changelog
 
+### 0.5.1
+
+**Full-screen video playback**
+
+- **`VideoBlockView` full-screen mode** — video blocks now render with an expand control that promotes playback to a full-screen cover. The same `AVPlayer` instance is shared between inline and full-screen presentations so playback position and state are preserved across the transition.
+- **`onFullScreenChange` callback** — new optional closure on `VideoBlockView` fires with `true` when entering full-screen and `false` when exiting. Host apps can use this to manage orientation locks or other chrome; orientation handling is deliberately left to the host.
+
 ### 0.5.0
 
 **Rich-content persistence & sub-agent echo suppression**

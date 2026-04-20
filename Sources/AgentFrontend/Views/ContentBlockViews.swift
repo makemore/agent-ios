@@ -441,39 +441,34 @@ struct LocationBlockView: View {
 
 struct VideoBlockView: View {
     let block: VideoBlock
+    var onFullScreenChange: ((Bool) -> Void)? = nil
+
     @State private var player: AVPlayer?
+    @State private var isFullScreen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let title = block.title {
                 Text(title).font(.subheadline).fontWeight(.semibold)
             }
-            if let player = player {
-                VideoPlayer(player: player)
-                    .frame(height: 220)
-                    .cornerRadius(8)
-                    .onDisappear { player.pause() }
-            } else if let thumbnailUrl = block.thumbnailUrl, let url = URL(string: thumbnailUrl) {
-                ZStack {
-                    AsyncImage(url: url) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: { Color.gray.opacity(0.2) }
-                    .frame(height: 220).clipped().cornerRadius(8)
-
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 48))
-                        .foregroundColor(.white.opacity(0.9))
-                        .shadow(radius: 4)
+            ZStack(alignment: .topTrailing) {
+                inlinePlayer
+                #if os(iOS)
+                if player != nil {
+                    Button {
+                        isFullScreen = true
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                    }
+                    .padding(8)
+                    .accessibilityLabel("Enter full screen")
                 }
-                .onTapGesture { loadPlayer() }
-            } else {
-                ZStack {
-                    Color.black.opacity(0.1).frame(height: 220).cornerRadius(8)
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary)
-                }
-                .onTapGesture { loadPlayer() }
+                #endif
             }
             if let caption = block.caption {
                 Text(caption).font(.caption2).foregroundColor(.secondary)
@@ -484,6 +479,52 @@ struct VideoBlockView: View {
             print("[AgentFrontend][VideoBlock] onAppear url=\(block.url) autoplay=\(block.autoplay ?? false) title=\(block.title ?? "-")")
             #endif
             if block.autoplay == true { loadPlayer() }
+        }
+        .onDisappear {
+            // Pause when the block leaves the hierarchy. .fullScreenCover
+            // overlays the presenting view without removing it, so this does
+            // not fire during the full-screen transition — playback position
+            // is preserved on enter/exit.
+            player?.pause()
+        }
+        #if os(iOS)
+        .fullScreenCover(
+            isPresented: $isFullScreen,
+            onDismiss: { onFullScreenChange?(false) }
+        ) {
+            VideoFullScreenView(player: player)
+                .onAppear { onFullScreenChange?(true) }
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var inlinePlayer: some View {
+        if let player = player {
+            VideoPlayer(player: player)
+                .frame(height: 220)
+                .cornerRadius(8)
+        } else if let thumbnailUrl = block.thumbnailUrl, let url = URL(string: thumbnailUrl) {
+            ZStack {
+                AsyncImage(url: url) { image in
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: { Color.gray.opacity(0.2) }
+                .frame(height: 220).clipped().cornerRadius(8)
+
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.white.opacity(0.9))
+                    .shadow(radius: 4)
+            }
+            .onTapGesture { loadPlayer() }
+        } else {
+            ZStack {
+                Color.black.opacity(0.1).frame(height: 220).cornerRadius(8)
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.secondary)
+            }
+            .onTapGesture { loadPlayer() }
         }
     }
 
@@ -502,4 +543,46 @@ struct VideoBlockView: View {
         p.play()
     }
 }
+
+#if os(iOS)
+private struct VideoFullScreenView: View {
+    let player: AVPlayer?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.ignoresSafeArea()
+            VideoPlayerRepresentable(player: player)
+                .ignoresSafeArea()
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundColor(.white.opacity(0.9))
+                    .shadow(radius: 4)
+            }
+            .padding()
+            .accessibilityLabel("Close full screen")
+        }
+    }
+}
+
+private struct VideoPlayerRepresentable: UIViewControllerRepresentable {
+    let player: AVPlayer?
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        vc.player = player
+        vc.view.backgroundColor = .black
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+        if uiViewController.player !== player {
+            uiViewController.player = player
+        }
+    }
+}
+#endif
 
