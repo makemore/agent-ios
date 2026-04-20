@@ -137,9 +137,15 @@ public struct ChatWidgetConfig {
     
     /// Event callback for SSE events
     public var onEvent: ((String, [String: Any]) -> Void)?
-    
+
     /// Auth error callback
     public var onAuthError: ((Error) -> Void)?
+
+    /// Video full-screen toggle callback. Invoked with `true` when a `VideoBlockView`
+    /// enters full-screen playback and `false` when it exits. Host apps can use this
+    /// to manage orientation locks or other chrome. Orientation handling is intentionally
+    /// left to the host.
+    public var onVideoFullScreenChange: ((Bool) -> Void)?
     
     // MARK: - Initialization
     
@@ -186,6 +192,7 @@ public struct ChatWidgetConfig {
         self.elevenLabsApiKey = nil
         self.onEvent = nil
         self.onAuthError = nil
+        self.onVideoFullScreenChange = nil
     }
 }
 

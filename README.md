@@ -170,7 +170,7 @@ Sources/AgentFrontend/
 **Full-screen video playback**
 
 - **`VideoBlockView` full-screen mode** — video blocks now render with an expand control that promotes playback to a full-screen cover. The same `AVPlayer` instance is shared between inline and full-screen presentations so playback position and state are preserved across the transition.
-- **`onFullScreenChange` callback** — new optional closure on `VideoBlockView` fires with `true` when entering full-screen and `false` when exiting. Host apps can use this to manage orientation locks or other chrome; orientation handling is deliberately left to the host.
+- **`ChatWidgetConfig.onVideoFullScreenChange`** — new optional closure on `ChatWidgetConfig` fires with `true` when a video enters full-screen and `false` when it exits. The `ContentBlockRenderer` threads this down into every `VideoBlockView` it renders, so host apps only need to set it in one place. Host apps can use this to manage orientation locks or other chrome; orientation handling is deliberately left to the host.
 
 ### 0.5.0
 

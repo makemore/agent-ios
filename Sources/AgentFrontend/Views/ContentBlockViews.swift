@@ -38,7 +38,7 @@ public struct ContentBlockRenderer: View {
         case .collapsible(let b): CollapsibleBlockView(block: b)
         case .status(let b): StatusBlockView(block: b)
         case .location(let b): LocationBlockView(block: b)
-        case .video(let b): VideoBlockView(block: b)
+        case .video(let b): VideoBlockView(block: b, onFullScreenChange: config.onVideoFullScreenChange)
         case .unknown: EmptyView()
         }
     }

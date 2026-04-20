@@ -578,5 +578,21 @@ final class AgentFrontendTests: XCTestCase {
         view.onFullScreenChange?(false)
         XCTAssertEqual(received, [true, false])
     }
+
+    // MARK: - ChatWidgetConfig video full-screen wiring
+
+    func testChatWidgetConfigVideoFullScreenDefaultsNil() {
+        let config = ChatWidgetConfig()
+        XCTAssertNil(config.onVideoFullScreenChange)
+    }
+
+    func testChatWidgetConfigVideoFullScreenIsAssignable() {
+        var received: [Bool] = []
+        var config = ChatWidgetConfig()
+        config.onVideoFullScreenChange = { received.append($0) }
+        config.onVideoFullScreenChange?(true)
+        config.onVideoFullScreenChange?(false)
+        XCTAssertEqual(received, [true, false])
+    }
 }
 
