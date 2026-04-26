@@ -81,6 +81,7 @@ public class APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("camel", forHTTPHeaderField: "X-Api-Format")
         
         let (data, response) = try await session.data(for: request)
 
@@ -157,6 +158,10 @@ public class APIClient {
         for (key, value) in authHeaders(token: token) {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // Opt in to the camelCase JSON wire format on backends that
+        // support per-request format negotiation. Backends that do not
+        // recognise the header simply ignore it.
+        request.setValue("camel", forHTTPHeaderField: "X-Api-Format")
         
         if let body = body {
             request.httpBody = body
