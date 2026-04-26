@@ -4,17 +4,23 @@ import Foundation
 public class SSEClient {
     private var task: URLSessionDataTask?
     private var buffer = ""
-    
+
     public var onEvent: ((SSEEvent) -> Void)?
     public var onError: ((Error) -> Void)?
     public var onComplete: (() -> Void)?
-    
+
+    /// Hook for tests to inject a `URLProtocol` (or otherwise mutate the
+    /// session configuration) into every `URLSession` this client builds
+    /// internally. No-op by default in production.
+    public static var sessionConfigurator: ((URLSessionConfiguration) -> Void)?
+
     private let session: URLSession
-    
+
     public init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300 // 5 minutes
         config.timeoutIntervalForResource = 300
+        Self.sessionConfigurator?(config)
         self.session = URLSession(configuration: config)
     }
     
@@ -61,7 +67,9 @@ public class SSEClient {
             }
         }
         
-        let streamSession = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let streamConfig = URLSessionConfiguration.default
+        Self.sessionConfigurator?(streamConfig)
+        let streamSession = URLSession(configuration: streamConfig, delegate: delegate, delegateQueue: nil)
         task = streamSession.dataTask(with: request)
         task?.resume()
     }

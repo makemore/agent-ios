@@ -20,6 +20,12 @@ public struct InputView: View {
     @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     @State private var recognitionTask: SFSpeechRecognitionTask?
     @State private var audioEngine = AVAudioEngine()
+    /// Monotonic token so late callbacks from a cancelled/superseded
+    /// recognition task cannot repopulate `inputText` after a send/stop.
+    /// `SFSpeechRecognitionTask`'s result block can deliver a final
+    /// transcription on the main queue *after* `cancel()` returns, which
+    /// is the race that caused the input field to refill after submit.
+    @State private var recordingSession: Int = 0
     
     public var body: some View {
         VStack(spacing: 0) {
@@ -67,7 +73,7 @@ public struct InputView: View {
                             .font(.title3)
                             .foregroundColor(.white)
                             .frame(width: 36, height: 36)
-                            .background(Color.red)
+                            .background(Color(hex: "#a85d5d"))
                             .clipShape(Circle())
                     }
                 } else {
@@ -99,6 +105,11 @@ public struct InputView: View {
     
     private func sendMessage() {
         guard canSend else { return }
+        // Invalidate any in-flight recognition callbacks before clearing
+        // so a late result cannot rewrite the field. Tear down the audio
+        // engine if still recording.
+        recordingSession &+= 1
+        if isRecording { stopRecording() }
         onSend(inputText, attachedFiles)
         inputText = ""
         attachedFiles = []
@@ -143,14 +154,20 @@ public struct InputView: View {
                     try audioEngine.start()
                     isRecording = true
                     
+                    recordingSession &+= 1
+                    let session = recordingSession
                     recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
                         if let result = result {
                             DispatchQueue.main.async {
+                                guard self.recordingSession == session else { return }
                                 self.inputText = result.bestTranscription.formattedString
                             }
                         }
                         if error != nil || (result?.isFinal == true) {
-                            DispatchQueue.main.async { self.stopRecording() }
+                            DispatchQueue.main.async {
+                                guard self.recordingSession == session else { return }
+                                self.stopRecording()
+                            }
                         }
                     }
                 } catch {
@@ -161,6 +178,9 @@ public struct InputView: View {
     }
     
     private func stopRecording() {
+        // Bump first so any callback that fires between cancel() and the
+        // next runloop tick is filtered out by the `session` guard.
+        recordingSession &+= 1
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()

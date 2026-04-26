@@ -170,7 +170,7 @@ public struct MessageListView: View {
         // Treat unmeasured viewport as at-bottom: the first frame after mount
         // has no preference values yet and we always want to land at bottom.
         guard viewportHeight > 0 else { return true }
-        return bottomAnchorY - viewportHeight < 100
+        return bottomAnchorY - viewportHeight < config.nearBottomThresholdPt
     }
 
     private func handleCountChange(newCount: Int, proxy: ScrollViewProxy) {
@@ -211,6 +211,9 @@ public struct MessageListView: View {
         // Identity change: a new message was inserted — the count handler has
         // already committed the appropriate scroll. Do not layer a second.
         guard !idChanged else { return }
+        // Host-app opt-out: when streaming follow is disabled the list stays
+        // put and the user controls scrolling while the reply generates.
+        guard config.followStreamingEnabled else { return }
         // Follow the streaming reply only if the user hasn't scrolled away.
         guard isNearBottom else { return }
         // 30 Hz throttle — cheap guard against SSE bursts, not a correctness

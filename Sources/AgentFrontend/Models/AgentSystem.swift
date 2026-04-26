@@ -33,14 +33,6 @@ public struct AgentSystem: Identifiable, Codable, Equatable {
         self.versions = versions
         self.activeVersion = activeVersion
     }
-
-    enum CodingKeys: String, CodingKey {
-        case id, slug, name, description
-        case isActive = "is_active"
-        case entryAgent = "entry_agent"
-        case members, versions
-        case activeVersion = "active_version"
-    }
 }
 
 /// Summary of an agent definition (used in system listings)
@@ -53,13 +45,6 @@ public struct AgentDefinitionSummary: Identifiable, Codable, Equatable {
     public var isActive: Bool
     public var activeVersion: String?
     public var versions: [AgentVersionSummary]?
-
-    enum CodingKeys: String, CodingKey {
-        case id, slug, name, description, icon
-        case isActive = "is_active"
-        case activeVersion = "active_version"
-        case versions
-    }
 }
 
 /// Summary of an agent version
@@ -70,13 +55,6 @@ public struct AgentVersionSummary: Identifiable, Codable, Equatable {
     public var isDraft: Bool
     public var model: String?
     public var createdAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case id, version, model
-        case isActive = "is_active"
-        case isDraft = "is_draft"
-        case createdAt = "created_at"
-    }
 }
 
 /// A member agent within a system
@@ -96,14 +74,6 @@ public struct AgentSystemVersionSummary: Identifiable, Codable, Equatable {
     public var isDraft: Bool
     public var releaseNotes: String?
     public var publishedAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case id, version
-        case isActive = "is_active"
-        case isDraft = "is_draft"
-        case releaseNotes = "release_notes"
-        case publishedAt = "published_at"
-    }
 }
 
 /// Response wrapper for paginated system lists

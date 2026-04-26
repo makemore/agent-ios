@@ -21,14 +21,6 @@ public struct AgentModel: Identifiable, Codable, Equatable {
         self.description = description
         self.supportsThinking = supportsThinking
     }
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case provider
-        case description
-        case supportsThinking = "supports_thinking"
-    }
 }
 
 /// Models list response
@@ -57,14 +49,6 @@ public struct TaskItem: Identifiable, Codable, Equatable {
         self.description = description
         self.state = state
         self.parentId = parentId
-    }
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case description
-        case state
-        case parentId = "parent_id"
     }
 }
 
@@ -118,13 +102,7 @@ public struct TaskProgress: Codable {
     public var total: Int
     public var completed: Int
     public var percentComplete: Double
-    
-    enum CodingKeys: String, CodingKey {
-        case total
-        case completed
-        case percentComplete = "percent_complete"
-    }
-    
+
     public init(total: Int = 0, completed: Int = 0) {
         self.total = total
         self.completed = completed

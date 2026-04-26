@@ -10,7 +10,7 @@ extension APIClient {
         let path = "\(config.apiPaths.conversations)?agent_key=\(config.agentKey.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? config.agentKey)"
         let request = buildRequest(path: path, method: "GET", token: token)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -38,7 +38,7 @@ extension APIClient {
         let path = "\(config.apiPaths.conversations)\(id)/?limit=\(limit)&offset=\(offset)"
         let request = buildRequest(path: path, method: "GET", token: token)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -70,35 +70,35 @@ extension APIClient {
         let token = try await getOrCreateSession()
 
         var body: [String: Any] = [
-            "agent_key": agentKeyOverride ?? config.agentKey,
+            "agentKey": agentKeyOverride ?? config.agentKey,
             "messages": messages,
-            "metadata": config.metadata.merging(["journey_type": config.defaultJourneyType]) { _, new in new }
+            "metadata": config.metadata.merging(["journeyType": config.defaultJourneyType]) { _, new in new }
         ]
-        
+
         if let conversationId = conversationId {
-            body["conversation_id"] = conversationId
+            body["conversationId"] = conversationId
         }
-        
+
         if let model = model {
             body["model"] = model
         }
-        
+
         if thinking {
             body["thinking"] = true
         }
-        
+
         if let index = supersedeFromMessageIndex {
-            body["supersede_from_message_index"] = index
+            body["supersedeFromMessageIndex"] = index
         }
 
         if let systemVersionId = systemVersionId {
-            body["system_version_id"] = systemVersionId
+            body["systemVersionId"] = systemVersionId
         }
         
         let jsonData = try JSONSerialization.data(withJSONObject: body)
         let request = buildRequest(path: config.apiPaths.runs, method: "POST", body: jsonData, token: token)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -109,7 +109,7 @@ extension APIClient {
             clearSession()
             if let newToken = try await getOrCreateSession(forceRefresh: true) {
                 let retryRequest = buildRequest(path: config.apiPaths.runs, method: "POST", body: jsonData, token: newToken)
-                let (retryData, retryResponse) = try await URLSession.shared.data(for: retryRequest)
+                let (retryData, retryResponse) = try await session.data(for: retryRequest)
                 
                 guard let retryHttpResponse = retryResponse as? HTTPURLResponse, retryHttpResponse.statusCode == 200 || retryHttpResponse.statusCode == 201 else {
                     throw APIError.unauthorized
@@ -137,7 +137,7 @@ extension APIClient {
         let path = config.apiPaths.cancelRunUrl(for: id)
         let request = buildRequest(path: path, method: "POST", token: token)
         
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await session.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             throw APIError.cancelFailed
@@ -152,7 +152,7 @@ extension APIClient {
         let path = config.apiPaths.systems
         let request = buildRequest(path: path, method: "GET", token: token)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             throw APIError.httpError(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0)

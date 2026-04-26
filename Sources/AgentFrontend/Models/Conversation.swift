@@ -24,15 +24,6 @@ public struct Conversation: Identifiable, Codable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case title
-        case messages
-        case hasMore = "has_more"
-        case createdAt = "created_at"
-        case updatedAt = "updated_at"
-    }
 }
 
 /// API message format (for decoding from backend)
@@ -43,15 +34,6 @@ public struct APIMessage: Codable {
     public var toolCalls: [ToolCall]?
     public var toolCallId: String?
     public var metadata: APIMessageMetadata?
-
-    enum CodingKeys: String, CodingKey {
-        case role
-        case content
-        case timestamp
-        case toolCalls = "tool_calls"
-        case toolCallId = "tool_call_id"
-        case metadata
-    }
 }
 
 /// Metadata carried on an API message. The backend persists rich UI data
@@ -60,11 +42,6 @@ public struct APIMessage: Codable {
 public struct APIMessageMetadata: Codable {
     public var contentBlocks: [ContentBlock]?
     public var toolName: String?
-
-    enum CodingKeys: String, CodingKey {
-        case contentBlocks
-        case toolName = "tool_name"
-    }
 }
 
 /// Tool call from API
@@ -84,11 +61,6 @@ public struct ToolCall: Codable {
 public struct AgentRun: Codable {
     public let id: String
     public var conversationId: String?
-    
-    enum CodingKeys: String, CodingKey {
-        case id
-        case conversationId = "conversation_id"
-    }
 }
 
 /// Conversation list response

@@ -30,6 +30,8 @@ public struct MessageView: View {
             }()
             ContentBlockRenderer(blocks: blocks, config: config, onAction: onBlockAction)
                 .padding(.horizontal, 12)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
         } else {
         HStack(alignment: .top, spacing: 8) {
             if isUser { Spacer(minLength: 40) }
@@ -74,6 +76,8 @@ public struct MessageView: View {
 
             if !isUser { Spacer(minLength: 40) }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
         } // end else (non-content-blocks)
     }
 
@@ -94,7 +98,7 @@ public struct MessageView: View {
             
             // Content — markdown for assistant messages, plain text for user/system
             if !isUser && !isSystem && !isToolMessage && config.enableMarkdown {
-                MarkdownTextView(content: message.content, foregroundColor: messageTextColor)
+                MarkdownTextView(content: message.content, foregroundColor: messageTextColor, linkColor: config.primaryColor)
             } else {
                 Text(message.content)
                     .font(.body)

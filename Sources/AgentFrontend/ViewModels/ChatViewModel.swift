@@ -77,6 +77,16 @@ public class ChatViewModel: ObservableObject {
     /// comparing and treat subsequent deltas as a normal stream.
     private var pendingEchoDiverged: Bool = false
 
+    // MARK: - Stream completion awaiter
+    /// Resolved when the in-flight SSE stream reaches a terminal state
+    /// (run.succeeded / run.failed / run.cancelled / transport error). Lets
+    /// `sendMessage` actually wait for the run to finish before returning so
+    /// callers using `await vm.sendMessage("a"); await vm.sendMessage("b")`
+    /// don't lose the second message to the `guard !isLoading` check.
+    /// Single-shot: only one stream is in flight at a time because
+    /// `sendMessage` is gated by `isLoading`.
+    private var streamContinuation: CheckedContinuation<Void, Never>?
+
     // MARK: - Dependencies
 
     private let config: ChatWidgetConfig
@@ -144,6 +154,8 @@ public class ChatViewModel: ObservableObject {
             // Create the run
             let apiMessages: [[String: Any]] = [["role": "user", "content": content.trimmingCharacters(in: .whitespacesAndNewlines)]]
             
+            print("[ChatViewModel] createRun sending conversationId=\(conversationId ?? "nil")")
+
             let run = try await apiClient.createRun(
                 conversationId: conversationId,
                 messages: apiMessages,
@@ -153,9 +165,11 @@ public class ChatViewModel: ObservableObject {
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
                 systemVersionId: selectedSystemVersionId
             )
-            
+
+            print("[ChatViewModel] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
+
             currentRunId = run.id
-            
+
             // Update conversation ID if new
             if conversationId == nil, let newConvId = run.conversationId {
                 conversationId = newConvId
@@ -189,6 +203,10 @@ public class ChatViewModel: ObservableObject {
             resetStreamBuffer()
             isLoading = false
             currentRunId = nil
+            // Wake the awaiter inside `subscribeToEvents` — disconnecting
+            // the SSE client doesn't fire `onComplete`, so without this any
+            // outstanding `await sendMessage(...)` would hang forever.
+            resumeStreamContinuation()
 
             // Add cancelled message
             messages.append(Message(
@@ -405,20 +423,41 @@ public class ChatViewModel: ObservableObject {
             }
         }
 
-        client.onError = { [weak self] error in
-            Task { @MainActor in
-                self?.isLoading = false
-                self?.error = error.localizedDescription
-            }
-        }
+        // Suspend until the stream reaches a terminal state. Resolution
+        // happens in `onError`, `onComplete`, or `cancelRun` — whichever
+        // fires first. `resumeStreamContinuation` is single-shot so a late
+        // callback after cancellation is a no-op.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.streamContinuation = continuation
 
-        client.onComplete = { [weak self] in
-            Task { @MainActor in
-                self?.isLoading = false
+            client.onError = { [weak self] error in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    self.isLoading = false
+                    self.error = error.localizedDescription
+                    self.resumeStreamContinuation()
+                }
             }
-        }
 
-        client.connect(url: url, headers: apiClient.authHeaders())
+            client.onComplete = { [weak self] in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    self.isLoading = false
+                    self.resumeStreamContinuation()
+                }
+            }
+
+            client.connect(url: url, headers: apiClient.authHeaders())
+        }
+    }
+
+    /// Single-shot resume of the in-flight stream awaiter. Safe to call
+    /// from `onComplete`, `onError`, and `cancelRun`; only the first call
+    /// resumes the continuation, subsequent calls are no-ops.
+    private func resumeStreamContinuation() {
+        guard let continuation = streamContinuation else { return }
+        streamContinuation = nil
+        continuation.resume()
     }
 
     private func handleSSEEvent(_ event: SSEEvent) {
@@ -521,15 +560,25 @@ public class ChatViewModel: ObservableObject {
             return
         }
 
-        // `currentStreamingMessageId` is the only reliable signal that we
-        // are still inside an active streaming session. Peering at
-        // `messages.last.id.hasPrefix("assistant-stream-")` is misleading
-        // because a just-snapped bubble (from `assistant.message` after
-        // the session was closed by a tool/video/sub-agent insertion)
-        // shares that prefix but its session is already over — the next
-        // stream belongs to a new turn and must create a fresh bubble
-        // below it, not target the finalised one.
-        if currentStreamingMessageId == nil {
+        // Detect a *fresh* stream session — one where there's nothing
+        // already in-flight to belong to. We can't rely on
+        // `currentStreamingMessageId` alone: that ID is only assigned on
+        // the first `drainTick`, so when multiple deltas arrive within the
+        // same runloop turn (network bursts where several SSE events sit
+        // in the same TCP read, or replay in tests) the later deltas would
+        // all see a nil ID and wipe each other's contribution to the
+        // buffer. Treat any of: an existing bubble, a running drain, or
+        // un-drained buffered text as proof we're still mid-session.
+        // Peering at `messages.last.id.hasPrefix("assistant-stream-")` is
+        // also misleading because a just-snapped bubble (from
+        // `assistant.message` after the session was closed by a
+        // tool/video/sub-agent insertion) shares that prefix but its
+        // session is already over — the next stream belongs to a new turn
+        // and must create a fresh bubble below it.
+        let hasActiveSession = currentStreamingMessageId != nil
+            || drainTimer != nil
+            || !streamBuffer.isEmpty
+        if !hasActiveSession {
             assistantContent = ""
             resetStreamBuffer()
         }
@@ -805,6 +854,9 @@ public class ChatViewModel: ObservableObject {
     /// Move a slice of buffered chars into the visible message.
     /// Rate is adaptive: small buffer reveals slowly (readable), large buffer
     /// drains faster so a long response never lags far behind the server.
+    /// A short word-boundary lookahead lets short words land as a unit
+    /// instead of being cut into 2-char pulses, which reads as much
+    /// smoother at the same effective char-per-second rate.
     private func drainTick() {
         guard !streamBuffer.isEmpty else {
             drainTimer?.invalidate()
@@ -817,10 +869,33 @@ public class ChatViewModel: ObservableObject {
         // the stream; accelerate only when the buffer grows large or the
         // server has finished and we need to catch up without a tail lag.
         let cap = streamingDone ? 6 : 2
-        let take = max(1, min(pending / 120, cap))
-        let slice = streamBuffer.prefix(take)
-        streamBuffer.removeFirst(slice.count)
-        assistantContent.append(contentsOf: slice)
+        var take = max(1, min(pending / 120, cap))
+
+        // Word-boundary preference: if the slice would end mid-word, look
+        // ahead a few chars and extend through the next whitespace so the
+        // word lands whole. Long words (no space within the lookahead
+        // window) still reveal at the base rate, preserving the
+        // typewriter feel for them.
+        if take < pending {
+            let lastIdx = streamBuffer.index(streamBuffer.startIndex, offsetBy: take - 1)
+            if !streamBuffer[lastIdx].isWhitespace {
+                let lookahead = min(pending - take, 5)
+                var probe = take
+                for _ in 0..<lookahead {
+                    let idx = streamBuffer.index(streamBuffer.startIndex, offsetBy: probe)
+                    probe += 1
+                    if streamBuffer[idx].isWhitespace {
+                        take = probe
+                        break
+                    }
+                }
+            }
+        }
+
+        let endIdx = streamBuffer.index(streamBuffer.startIndex, offsetBy: take)
+        let slice = String(streamBuffer[..<endIdx])
+        streamBuffer.removeFirst(take)
+        assistantContent.append(slice)
         upsertStreamingMessage(content: assistantContent)
     }
 

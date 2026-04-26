@@ -119,9 +119,9 @@ final class AgentFrontendTests: XCTestCase {
         {
           "role": "tool",
           "content": "Found a calming video",
-          "tool_call_id": "call_vid",
+          "toolCallId": "call_vid",
           "metadata": {
-            "tool_name": "get_video",
+            "toolName": "get_video",
             "contentBlocks": [
               {"type": "video", "url": "https://example.com/a.mp4", "title": "Calm"}
             ]

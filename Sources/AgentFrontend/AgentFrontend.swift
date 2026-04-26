@@ -58,7 +58,7 @@ public extension ChatWidgetConfig {
         backendUrl: String,
         agentKey: String,
         title: String = "Chat Assistant",
-        primaryColor: Color = Color(hex: "#0066cc")
+        primaryColor: Color = Color(hex: "#4a6b8e")
     ) -> ChatWidgetConfig {
         var config = ChatWidgetConfig(backendUrl: backendUrl, agentKey: agentKey)
         config.title = title

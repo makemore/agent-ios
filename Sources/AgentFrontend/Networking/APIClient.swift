@@ -5,23 +5,40 @@ public class APIClient {
     let config: ChatWidgetConfig
     let storage: StorageService
     private var authToken: String?
-    
+
+    /// Hook for tests to inject a `URLProtocol` (or otherwise mutate the
+    /// session configuration) into the `URLSession` this client uses for
+    /// every request. No-op by default in production. Mirrors the same
+    /// pattern on `SSEClient` so a test setup can route the entire HTTP
+    /// surface through a single mock.
+    public static var sessionConfigurator: ((URLSessionConfiguration) -> Void)?
+
+    /// The session used for all HTTP requests. Defaults to a fresh
+    /// session built from `URLSessionConfiguration.default` so the
+    /// `sessionConfigurator` hook can install custom protocols. Tests
+    /// don't need to know this exists — setting `sessionConfigurator`
+    /// before constructing the client is enough.
+    let session: URLSession
+
     private lazy var decoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
-    
+
     private lazy var encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }()
-    
+
     public init(config: ChatWidgetConfig, storage: StorageService) {
         self.config = config
         self.storage = storage
         self.authToken = config.authToken
+        let cfg = URLSessionConfiguration.default
+        Self.sessionConfigurator?(cfg)
+        self.session = URLSession(configuration: cfg)
     }
     
     // MARK: - Authentication
@@ -65,8 +82,8 @@ public class APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
+        let (data, response) = try await session.data(for: request)
+
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             throw APIError.sessionCreationFailed
         }

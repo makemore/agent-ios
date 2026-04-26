@@ -16,6 +16,7 @@ import SwiftUI
 struct MarkdownTextView: View {
     let content: String
     let foregroundColor: Color
+    var linkColor: Color = Color(hex: "#4a6b8e")
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -203,7 +204,7 @@ struct MarkdownTextView: View {
             Text(attributed)
                 .font(.body)
                 .foregroundColor(foregroundColor)
-                .tint(Color.blue)
+                .tint(linkColor)
         } else {
             // Fallback to plain text if markdown parsing fails
             Text(text)
