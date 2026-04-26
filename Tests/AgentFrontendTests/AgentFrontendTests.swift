@@ -50,7 +50,7 @@ final class AgentFrontendTests: XCTestCase {
         let paths = APIPaths()
         let url = paths.runEventsUrl(for: "abc123")
         
-        XCTAssertEqual(url, "/api/agent-runtime/runs/abc123/events/")
+        XCTAssertEqual(url, "/api/agent-runtime/runs/abc123/stream/")
     }
     
     func testCancelRunUrl() {

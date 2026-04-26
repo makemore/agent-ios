@@ -4,6 +4,12 @@ import Foundation
 public class SSEClient {
     private var task: URLSessionDataTask?
     private var buffer = ""
+    /// Set by `disconnect()` so the URLSession completion callback can tell
+    /// "we asked for this" (NSURLErrorCancelled is expected, surface as
+    /// `onComplete`) from a genuine network failure (surface as `onError`).
+    /// Without this, calling `disconnect()` after a terminal SSE event
+    /// produces a "cancelled" banner flash before the next run starts.
+    private var expectingDisconnect = false
 
     public var onEvent: ((SSEEvent) -> Void)?
     public var onError: ((Error) -> Void)?
@@ -14,45 +20,22 @@ public class SSEClient {
     /// internally. No-op by default in production.
     public static var sessionConfigurator: ((URLSessionConfiguration) -> Void)?
 
-    private let session: URLSession
+    public init() {}
 
-    public init() {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 300 // 5 minutes
-        config.timeoutIntervalForResource = 300
-        Self.sessionConfigurator?(config)
-        self.session = URLSession(configuration: config)
-    }
-    
     /// Connect to an SSE endpoint
     public func connect(url: URL, headers: [String: String] = [:]) {
         var request = URLRequest(url: url)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        
+
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        
-        task = session.dataTask(with: request) { [weak self] data, response, error in
-            if let error = error {
-                DispatchQueue.main.async {
-                    self?.onError?(error)
-                }
-                return
-            }
-            
-            guard let data = data, let text = String(data: data, encoding: .utf8) else {
-                return
-            }
-            
-            self?.processData(text)
-        }
-        
-        // Use streaming delegate for real-time updates
-        let streamTask = session.dataTask(with: request)
-        
-        // Create a custom delegate to handle streaming
+
+        // Reset on every connect — a previous run may have set the flag
+        // during teardown.
+        expectingDisconnect = false
+
         let delegate = SSEStreamDelegate { [weak self] data in
             if let text = String(data: data, encoding: .utf8) {
                 self?.processData(text)
@@ -63,19 +46,32 @@ public class SSEClient {
             }
         } onError: { [weak self] error in
             DispatchQueue.main.async {
-                self?.onError?(error)
+                guard let self = self else { return }
+                // Deliberate teardown after a terminal event (`disconnect()`
+                // sets `expectingDisconnect`) — URLSession reports this as
+                // NSURLErrorCancelled. Surface as a clean completion so the
+                // awaiter wakes but no error banner appears.
+                if self.expectingDisconnect ||
+                   (error as? URLError)?.code == .cancelled {
+                    self.onComplete?()
+                    return
+                }
+                self.onError?(error)
             }
         }
-        
+
         let streamConfig = URLSessionConfiguration.default
+        streamConfig.timeoutIntervalForRequest = 300 // 5 minutes
+        streamConfig.timeoutIntervalForResource = 300
         Self.sessionConfigurator?(streamConfig)
         let streamSession = URLSession(configuration: streamConfig, delegate: delegate, delegateQueue: nil)
         task = streamSession.dataTask(with: request)
         task?.resume()
     }
-    
+
     /// Disconnect from the SSE endpoint
     public func disconnect() {
+        expectingDisconnect = true
         task?.cancel()
         task = nil
         buffer = ""
