@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 
 /// Main chat widget view — provides the chat flow (messages, error banner, input).
 /// Navigation, headers, and sidebars are app-level concerns.

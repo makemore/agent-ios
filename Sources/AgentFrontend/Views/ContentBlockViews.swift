@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import AgentClient
 #if os(iOS)
 import UIKit
 #else

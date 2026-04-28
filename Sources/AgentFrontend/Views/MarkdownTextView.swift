@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 
 /// Lightweight markdown renderer for assistant message bubbles.
 ///

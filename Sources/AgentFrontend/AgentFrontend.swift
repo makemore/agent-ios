@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 
 /// Main entry point for the AgentFrontend chat widget
 public struct AgentFrontend {

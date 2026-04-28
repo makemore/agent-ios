@@ -148,22 +148,58 @@ let widget = AgentFrontend.createChatWidget(
 )
 ```
 
+## Two Products
+
+The package ships two library products:
+
+| Product | What it contains | Depends on |
+|---------|-----------------|------------|
+| **AgentClient** | Models, networking, SSE, configuration, storage | Foundation only |
+| **AgentFrontend** | SwiftUI chat widget + view layer | AgentClient |
+
+Existing consumers that `import AgentFrontend` continue to work unchanged — AgentFrontend re-exports AgentClient's types transitively.
+
+To use only the headless core (e.g. to build a custom UI):
+
+```swift
+dependencies: [
+    .package(path: "/path/to/agent-ios"),
+],
+targets: [
+    .target(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "AgentClient", package: "AgentFrontend"),
+        ]
+    ),
+]
+```
+
 ## Project Structure
 
 ```
-Sources/AgentFrontend/
-├── AgentFrontend.swift          # Public API entry point
+Sources/AgentClient/
 ├── Configuration/               # ChatWidgetConfig, APIPaths, AuthStrategy
-├── Models/                      # Message, Conversation, AgentModel, TaskItem
+├── Models/                      # Message, Conversation, AgentModel, ContentBlock
 ├── Networking/                  # APIClient, SSEClient, APIError
 ├── Services/                    # StorageService protocol + implementations
-├── Utilities/                   # Color+Hex, PlatformColors
-├── ViewModels/                  # ChatViewModel
+├── Utilities/                   # Color+Hex
+└── ViewModels/                  # ChatViewModel
+
+Sources/AgentFrontend/
+├── AgentFrontend.swift          # Public API entry point
+├── Utilities/                   # PlatformColors
 └── Views/                       # ChatWidgetView, MessageView, InputView, etc.
 ```
 
 
 ## Changelog
+
+### 0.6.0
+
+**Core / UI split**
+
+- **Two library products** — the package now ships `AgentClient` (models, networking, SSE, configuration, storage, view models) and `AgentFrontend` (SwiftUI views). Existing consumers that depend on `AgentFrontend` are unaffected. New consumers can depend on `AgentClient` alone to build a custom UI without pulling in SwiftUI views.
 
 ### 0.5.1
 

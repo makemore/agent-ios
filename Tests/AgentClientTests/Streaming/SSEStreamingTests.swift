@@ -1,5 +1,5 @@
 import XCTest
-@testable import AgentFrontend
+@testable import AgentClient
 
 /// End-to-end Level-A streaming tests. These wire the *real*
 /// `ChatViewModel`, `APIClient` and `SSEClient` together but route every

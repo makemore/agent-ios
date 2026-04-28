@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 #if canImport(UIKit)
 import UIKit
 #endif

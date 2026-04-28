@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AgentClient
 import Speech
 #if canImport(UIKit)
 import UIKit

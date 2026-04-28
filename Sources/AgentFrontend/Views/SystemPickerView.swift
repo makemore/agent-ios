@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 
 /// Modal view for selecting which agent system and version the conversation uses
 struct SystemPickerView: View {

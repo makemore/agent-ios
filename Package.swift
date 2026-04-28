@@ -11,6 +11,10 @@ let package = Package(
     ],
     products: [
         .library(
+            name: "AgentClient",
+            targets: ["AgentClient"]
+        ),
+        .library(
             name: "AgentFrontend",
             targets: ["AgentFrontend"]
         ),
@@ -18,9 +22,19 @@ let package = Package(
     dependencies: [],
     targets: [
         .target(
-            name: "AgentFrontend",
+            name: "AgentClient",
             dependencies: [],
+            path: "Sources/AgentClient"
+        ),
+        .target(
+            name: "AgentFrontend",
+            dependencies: ["AgentClient"],
             path: "Sources/AgentFrontend"
+        ),
+        .testTarget(
+            name: "AgentClientTests",
+            dependencies: ["AgentClient"],
+            path: "Tests/AgentClientTests"
         ),
         .testTarget(
             name: "AgentFrontendTests",

@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 
 /// Task list view
 public struct TaskListView: View {
