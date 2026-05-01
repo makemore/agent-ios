@@ -866,11 +866,17 @@ public class ChatViewModel: ObservableObject {
     // MARK: - Stream buffer helpers
 
     /// Start the drain timer if it isn't already running.
+    /// The timer is added to `.common` RunLoop modes so it continues to fire
+    /// while the user is touch-scrolling (UITrackingRunLoopMode). Without this,
+    /// `Timer.scheduledTimer` only registers for `.default` mode and the
+    /// typewriter effect freezes whenever a scroll gesture is active.
     private func startDrainTimerIfNeeded() {
         guard drainTimer == nil else { return }
-        drainTimer = Timer.scheduledTimer(withTimeInterval: drainInterval, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: drainInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.drainTick() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        drainTimer = timer
     }
 
     /// Move a slice of buffered chars into the visible message.
