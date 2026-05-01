@@ -65,7 +65,8 @@ extension APIClient {
         thinking: Bool = false,
         supersedeFromMessageIndex: Int? = nil,
         agentKeyOverride: String? = nil,
-        systemVersionId: String? = nil
+        systemVersionId: String? = nil,
+        ephemeral: Bool = false
     ) async throws -> AgentRun {
         let token = try await getOrCreateSession()
 
@@ -93,6 +94,10 @@ extension APIClient {
 
         if let systemVersionId = systemVersionId {
             body["systemVersionId"] = systemVersionId
+        }
+
+        if ephemeral {
+            body["ephemeral"] = true
         }
         
         let jsonData = try JSONSerialization.data(withJSONObject: body)

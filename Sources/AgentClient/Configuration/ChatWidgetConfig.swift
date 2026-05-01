@@ -69,6 +69,10 @@ public struct ChatWidgetConfig {
     /// Show system picker (settings cog)
     public var showSystemPicker: Bool
 
+    /// Ephemeral mode: conversation history stays on the client.
+    /// The server only holds run data for a short pickup window.
+    public var ephemeral: Bool
+
     /// Follow the assistant's streaming reply by auto-scrolling to the
     /// bottom on every token. When `false` the list stays put while the
     /// reply is being generated and the user controls scrolling. The
@@ -189,6 +193,7 @@ public struct ChatWidgetConfig {
         self.showModelSelector = false
         self.showTasksTab = true
         self.showSystemPicker = true
+        self.ephemeral = false
         self.followStreamingEnabled = true
         self.nearBottomThresholdPt = 100
         self.authStrategy = nil

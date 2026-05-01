@@ -122,6 +122,9 @@ public class ChatViewModel: ObservableObject {
         guard !hasRestoredConversation else { return }
         hasRestoredConversation = true
 
+        // Ephemeral mode: nothing to restore from the server.
+        if config.ephemeral { return }
+
         if let savedId = storage.get(config.conversationIdKey) {
             await loadConversation(savedId)
         }
@@ -151,9 +154,20 @@ public class ChatViewModel: ObservableObject {
         messages.append(userMessage)
         
         do {
-            // Create the run
-            let apiMessages: [[String: Any]] = [["role": "user", "content": content.trimmingCharacters(in: .whitespacesAndNewlines)]]
-            
+            // In ephemeral mode send the full conversation history so the
+            // server has complete context (it won't load from the DB).
+            let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let apiMessages: [[String: Any]]
+            if config.ephemeral {
+                let history: [[String: Any]] = messages
+                    .filter { $0.role == .user || $0.role == .assistant }
+                    .dropLast()  // the user message we just appended is re-added below
+                    .map { ["role": $0.role.rawValue, "content": $0.content] }
+                apiMessages = history + [["role": "user", "content": trimmedContent]]
+            } else {
+                apiMessages = [["role": "user", "content": trimmedContent]]
+            }
+
             print("[ChatViewModel] createRun sending conversationId=\(conversationId ?? "nil")")
 
             let run = try await apiClient.createRun(
@@ -163,7 +177,8 @@ public class ChatViewModel: ObservableObject {
                 thinking: thinking,
                 supersedeFromMessageIndex: supersedeFromMessageIndex,
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
-                systemVersionId: selectedSystemVersionId
+                systemVersionId: selectedSystemVersionId,
+                ephemeral: config.ephemeral
             )
 
             print("[ChatViewModel] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
@@ -301,6 +316,13 @@ public class ChatViewModel: ObservableObject {
 
     /// Load a specific conversation
     public func loadConversation(_ convId: String) async {
+        // Ephemeral mode: conversation is local-only, nothing to fetch.
+        if config.ephemeral {
+            conversationId = convId
+            isLoading = false
+            return
+        }
+
         isLoading = true
         messages = []
         conversationId = convId
