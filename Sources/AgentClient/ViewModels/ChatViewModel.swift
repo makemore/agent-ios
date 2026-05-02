@@ -87,6 +87,15 @@ public class ChatViewModel: ObservableObject {
     /// `sendMessage` is gated by `isLoading`.
     private var streamContinuation: CheckedContinuation<Void, Never>?
 
+    // MARK: - Ephemeral Memories
+    // Client-side memories (facts/preferences) persisted locally and
+    // sent to the server with each ephemeral run. Updated via the
+    // `memory.update` SSE event.
+    private static let memoriesStorageKey = "chat_widget_memories"
+
+    /// Current in-memory cache of client-side memories.
+    private var clientMemories: [[String: String]] = []
+
     // MARK: - Dependencies
 
     private let config: ChatWidgetConfig
@@ -114,6 +123,13 @@ public class ChatViewModel: ObservableObject {
         }
         if let savedVersionId = storage.get(config.systemVersionIdKey) {
             self.selectedSystemVersionId = savedVersionId
+        }
+
+        // Load persisted client-side memories (ephemeral mode)
+        if let memoriesJson = storage.get(Self.memoriesStorageKey),
+           let data = memoriesJson.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] {
+            clientMemories = parsed
         }
     }
 
@@ -178,7 +194,8 @@ public class ChatViewModel: ObservableObject {
                 supersedeFromMessageIndex: supersedeFromMessageIndex,
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
                 systemVersionId: selectedSystemVersionId,
-                ephemeral: config.ephemeral
+                ephemeral: config.ephemeral,
+                memories: config.ephemeral ? clientMemories : nil
             )
 
             print("[ChatViewModel] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
@@ -523,6 +540,9 @@ public class ChatViewModel: ObservableObject {
         case "custom":
             handleCustomEvent(payload)
 
+        case "memory.update":
+            handleMemoryUpdate(payload)
+
         case "run.succeeded", "run.failed", "run.cancelled", "run.timed_out":
             handleTerminalEvent(event.type, payload)
 
@@ -862,6 +882,41 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Handle a `memory.update` event — the server extracted memories from
+    /// the conversation and is sending them back for client-side persistence.
+    private func handleMemoryUpdate(_ payload: [String: Any]) {
+        guard let memoriesArray = payload["memories"] as? [[String: Any]] else { return }
+
+        for mem in memoriesArray {
+            guard let key = mem["key"] as? String else { continue }
+            let action = mem["action"] as? String ?? "upsert"
+
+            if action == "delete" {
+                clientMemories.removeAll { $0["key"] == key }
+            } else {
+                // Upsert: remove old entry with same key, then append
+                clientMemories.removeAll { $0["key"] == key }
+                var entry: [String: String] = ["key": key]
+                if let value = mem["value"] as? String {
+                    entry["value"] = value
+                }
+                if let type = mem["type"] as? String {
+                    entry["type"] = type
+                }
+                clientMemories.append(entry)
+            }
+        }
+
+        // Persist to local storage
+        if let data = try? JSONSerialization.data(withJSONObject: clientMemories),
+           let json = String(data: data, encoding: .utf8) {
+            storage.set(Self.memoriesStorageKey, value: json)
+        }
+
+        #if DEBUG
+        print("[AgentFrontend][ChatVM] memory.update: \(clientMemories.count) memories persisted")
+        #endif
+    }
 
     // MARK: - Stream buffer helpers
 
