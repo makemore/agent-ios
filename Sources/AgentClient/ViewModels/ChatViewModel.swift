@@ -96,6 +96,18 @@ public class ChatViewModel: ObservableObject {
     /// Current in-memory cache of client-side memories.
     private var clientMemories: [[String: String]] = []
 
+    // MARK: - Local History (ephemeral mode)
+
+    /// Observable list of locally-persisted conversations (newest first).
+    /// Non-ephemeral mode always returns an empty array.
+    @Published public var localConversations: [LocalConversationSummary] = []
+
+    /// The backing local-history store (nil when not ephemeral).
+    private var localHistoryStore: LocalHistoryStore?
+
+    /// Timestamp when the current ephemeral conversation was first created.
+    private var localConversationCreatedAt: Date?
+
     // MARK: - Dependencies
 
     private let config: ChatWidgetConfig
@@ -109,8 +121,12 @@ public class ChatViewModel: ObservableObject {
         self.apiClient = apiClient
         self.storage = storage
 
-        // Load saved conversation ID
-        if let savedId = storage.get(config.conversationIdKey) {
+        // Load saved conversation ID — server-side mode only.
+        // In ephemeral mode the conversationIdKey slot holds a stale
+        // server id that the user has no way to resume; rehydrating it
+        // causes createRun to 404. Local conversations are loaded via
+        // loadLocalConversation(_:) instead.
+        if !config.ephemeral, let savedId = storage.get(config.conversationIdKey) {
             self.conversationId = savedId
         }
 
@@ -130,6 +146,13 @@ public class ChatViewModel: ObservableObject {
            let data = memoriesJson.data(using: .utf8),
            let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] {
             clientMemories = parsed
+        }
+
+        // Initialise local history store for ephemeral mode
+        if config.ephemeral {
+            let store = LocalHistoryStore(agentKey: config.agentKey)
+            self.localHistoryStore = store
+            self.localConversations = store.loadIndex()
         }
     }
 
@@ -206,8 +229,12 @@ public class ChatViewModel: ObservableObject {
             if conversationId == nil, let newConvId = run.conversationId {
                 conversationId = newConvId
                 storage.set(config.conversationIdKey, value: newConvId)
+                // Mark creation time for the local conversation
+                if config.ephemeral {
+                    localConversationCreatedAt = Date()
+                }
             }
-            
+
             // Subscribe to SSE events
             await subscribeToEvents(runId: run.id)
             
@@ -251,14 +278,60 @@ public class ChatViewModel: ObservableObject {
         }
     }
     
-    /// Clear all messages and start fresh
+    /// Clear all messages and start fresh.
+    /// Does NOT delete the conversation from local storage — it just
+    /// starts a new in-memory conversation.
     public func clearMessages() {
         messages = []
         conversationId = nil
+        localConversationCreatedAt = nil
         error = nil
         hasMoreMessages = false
         messagesOffset = 0
         storage.set(config.conversationIdKey, value: nil)
+    }
+
+    // MARK: - Local History (ephemeral mode)
+
+    /// Returns the list of locally-persisted conversations (newest first).
+    /// In non-ephemeral mode this always returns `[]`.
+    public func loadLocalConversations() -> [LocalConversationSummary] {
+        guard let store = localHistoryStore else { return [] }
+        let list = store.loadIndex()
+        localConversations = list
+        return list
+    }
+
+    /// Hydrates the VM with a locally-persisted conversation.
+    /// Returns `true` if the conversation was found and loaded.
+    @discardableResult
+    public func loadLocalConversation(id: String) -> Bool {
+        guard let store = localHistoryStore,
+              let conv = store.load(id) else { return false }
+        messages = conv.messages.map { $0.toMessage() }
+        conversationId = id
+        localConversationCreatedAt = conv.createdAt
+        storage.set(config.conversationIdKey, value: id)
+        hasMoreMessages = false
+        messagesOffset = 0
+        error = nil
+        return true
+    }
+
+    /// Delete a single locally-persisted conversation.
+    public func deleteLocalConversation(id: String) {
+        localHistoryStore?.delete(id)
+        localConversations = localHistoryStore?.loadIndex() ?? []
+        // If the active conversation was deleted, clear state
+        if conversationId == id {
+            clearMessages()
+        }
+    }
+
+    /// Purge all locally-persisted conversations for this agent.
+    public func purgeLocalHistory() {
+        localHistoryStore?.purgeAll()
+        localConversations = []
     }
 
     // MARK: - System Selection

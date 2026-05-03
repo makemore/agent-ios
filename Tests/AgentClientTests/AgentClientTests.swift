@@ -149,4 +149,38 @@ final class AgentClientTests: XCTestCase {
         XCTAssertEqual(TaskState.complete.icon, "●")
         XCTAssertEqual(TaskState.cancelled.icon, "⊘")
     }
+
+    // MARK: - Ephemeral conversationId rehydration
+
+    @MainActor
+    func testEphemeralModeDoesNotRehydrateConversationId() {
+        // Pre-populate storage with a stale server-side conversation ID
+        let storage = InMemoryStorage()
+        storage.set("chat_widget_conversation_id", value: "stale-server-id")
+
+        var config = ChatWidgetConfig(backendUrl: "http://stub.local", agentKey: "test-agent")
+        config.ephemeral = true
+
+        let apiClient = APIClient(config: config, storage: storage)
+        let vm = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
+
+        XCTAssertNil(vm.conversationId,
+                     "Ephemeral VM should not rehydrate a stale server conversationId")
+    }
+
+    @MainActor
+    func testNonEphemeralModeRehydratesConversationId() {
+        // Pre-populate storage with a server-side conversation ID
+        let storage = InMemoryStorage()
+        storage.set("chat_widget_conversation_id", value: "server-id-123")
+
+        var config = ChatWidgetConfig(backendUrl: "http://stub.local", agentKey: "test-agent")
+        config.ephemeral = false
+
+        let apiClient = APIClient(config: config, storage: storage)
+        let vm = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
+
+        XCTAssertEqual(vm.conversationId, "server-id-123",
+                       "Non-ephemeral VM should rehydrate the saved conversationId")
+    }
 }
