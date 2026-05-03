@@ -45,6 +45,14 @@ public class ChatViewModel: ObservableObject {
     /// find and update it even after non-streaming messages (tool calls,
     /// content blocks, sub-agent events) have been appended after it.
     private var currentStreamingMessageId: String?
+    /// Set true at terminal-event time when the drain timer is still
+    /// flushing buffered chars; the next `drainTick` that empties the
+    /// buffer will then call `persistToLocalHistory()` so the on-disk
+    /// snapshot includes the final assistant bubble. Without this flag
+    /// the success-path persist would race the typewriter and capture
+    /// only the user message (the streaming bubble is appended to
+    /// `messages` from inside `drainTick` via `upsertStreamingMessage`).
+    private var pendingPersistAfterDrain: Bool = false
     /// Set true when an `assistant.message` finalises the current turn's
     /// bubble. While true, any further `assistant.delta` events are dropped
     /// because they are late-arriving tokens for a turn that has already
@@ -288,6 +296,7 @@ public class ChatViewModel: ObservableObject {
         error = nil
         hasMoreMessages = false
         messagesOffset = 0
+        pendingPersistAfterDrain = false
         storage.set(config.conversationIdKey, value: nil)
     }
 
@@ -332,6 +341,43 @@ public class ChatViewModel: ObservableObject {
     public func purgeLocalHistory() {
         localHistoryStore?.purgeAll()
         localConversations = []
+    }
+
+    /// Persist the current conversation to the on-device store.
+    /// No-op outside ephemeral mode or when there's nothing to save.
+    private func persistToLocalHistory() {
+        guard config.ephemeral,
+              let store = localHistoryStore,
+              let convId = conversationId,
+              !messages.isEmpty else { return }
+
+        let now = Date()
+        let title = deriveConversationTitle()
+        let localMsgs = messages.map { LocalMessage(from: $0) }
+        let conv = LocalConversation(
+            id: convId,
+            title: title,
+            createdAt: localConversationCreatedAt ?? now,
+            updatedAt: now,
+            messages: localMsgs
+        )
+        store.upsert(conv)
+        localConversations = store.loadIndex()
+    }
+
+    /// Derive a title from the first user message, capped to 60 chars.
+    /// Falls back to "Untitled conversation" when the conversation has no
+    /// user message yet (shouldn't happen in practice but keeps the row
+    /// rendering safe).
+    private func deriveConversationTitle() -> String {
+        guard let firstUser = messages.first(where: { $0.role == .user }) else {
+            return "Untitled conversation"
+        }
+        let collapsed = firstUser.content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        if collapsed.isEmpty { return "Untitled conversation" }
+        return collapsed.count <= 60 ? collapsed : String(collapsed.prefix(60)) + "…"
     }
 
     // MARK: - System Selection
@@ -1018,6 +1064,12 @@ public class ChatViewModel: ObservableObject {
             drainTimer?.invalidate()
             drainTimer = nil
             streamingDone = false
+            // The previous tick committed the final chars to the bubble
+            // via upsertStreamingMessage; safe to persist now.
+            if pendingPersistAfterDrain {
+                pendingPersistAfterDrain = false
+                persistToLocalHistory()
+            }
             return
         }
         let pending = streamBuffer.count
@@ -1126,6 +1178,18 @@ public class ChatViewModel: ObservableObject {
         sseClient?.disconnect()
         sseClient = nil
         currentRunId = nil
+
+        // Persist to local history store (ephemeral mode).
+        // On the success path the drain timer may still be revealing the
+        // final assistant chars into the bubble; defer until it empties so
+        // the persisted snapshot includes the full assistant message. The
+        // error path closes the streaming session up-front (above) so the
+        // buffer is already drained.
+        if drainTimer != nil || !streamBuffer.isEmpty {
+            pendingPersistAfterDrain = true
+        } else {
+            persistToLocalHistory()
+        }
     }
 
     private func mapApiMessage(_ m: APIMessage) -> [Message] {
