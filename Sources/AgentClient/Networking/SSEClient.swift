@@ -1,5 +1,23 @@
 import Foundation
 
+/// Strip `anonymous_token` / `token` query params from a URL so the
+/// value never lands in logs. Keeps the rest of the URL intact for
+/// production diagnostics. Internal helper, not part of the public API.
+internal func redactURLForLogging(_ url: URL) -> String {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return url.absoluteString
+    }
+    if let items = components.queryItems {
+        components.queryItems = items.map { item in
+            if item.name == "anonymous_token" || item.name == "token" {
+                return URLQueryItem(name: item.name, value: "<redacted>")
+            }
+            return item
+        }
+    }
+    return components.url?.absoluteString ?? url.absoluteString
+}
+
 /// Server-Sent Events client for streaming responses
 public class SSEClient {
     private var task: URLSessionDataTask?
@@ -10,6 +28,9 @@ public class SSEClient {
     /// Without this, calling `disconnect()` after a terminal SSE event
     /// produces a "cancelled" banner flash before the next run starts.
     private var expectingDisconnect = false
+    /// Retained reference to the active stream delegate so `parseEvent`
+    /// can bump the event counter the delegate reports at completion.
+    private var streamDelegate: SSEStreamDelegate?
 
     public var onEvent: ((SSEEvent) -> Void)?
     public var onError: ((Error) -> Void)?
@@ -31,6 +52,8 @@ public class SSEClient {
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
+
+        print("[AgentClient][SSE] connect url=\(redactURLForLogging(url))")
 
         // Reset on every connect — a previous run may have set the flag
         // during teardown.
@@ -65,6 +88,7 @@ public class SSEClient {
         streamConfig.timeoutIntervalForResource = 300
         Self.sessionConfigurator?(streamConfig)
         let streamSession = URLSession(configuration: streamConfig, delegate: delegate, delegateQueue: nil)
+        streamDelegate = delegate
         task = streamSession.dataTask(with: request)
         task?.resume()
     }
@@ -75,6 +99,7 @@ public class SSEClient {
         task?.cancel()
         task = nil
         buffer = ""
+        streamDelegate = nil
     }
     
     private func processData(_ text: String) {
@@ -127,9 +152,14 @@ public class SSEClient {
             data: eventData,
             id: id
         )
-        #if DEBUG
-        print("[AgentFrontend][SSE] event type=\(ev.type) bytes=\(eventData.count)")
-        #endif
+        streamDelegate?.totalEvents += 1
+        let preview: String
+        if eventData.count > 60 {
+            preview = String(eventData.prefix(60)) + "…"
+        } else {
+            preview = eventData
+        }
+        print("[AgentClient][SSE] event type=\(ev.type) bytes=\(eventData.count) data=\(preview)")
         return ev
     }
 }
@@ -152,18 +182,35 @@ private class SSEStreamDelegate: NSObject, URLSessionDataDelegate {
     let onData: (Data) -> Void
     let onComplete: () -> Void
     let onError: (Error) -> Void
-    
+
+    /// Wall-clock timestamps + counters used to produce the
+    /// `[AgentClient][SSE]` narrative logs (first-byte latency,
+    /// total bytes / events at completion).
+    let connectStartedAt: Date = Date()
+    var firstByteAt: Date?
+    var totalBytes: Int = 0
+    var totalEvents: Int = 0
+
     init(onData: @escaping (Data) -> Void, onComplete: @escaping () -> Void, onError: @escaping (Error) -> Void) {
         self.onData = onData
         self.onComplete = onComplete
         self.onError = onError
     }
-    
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if firstByteAt == nil {
+            firstByteAt = Date()
+            let ms = Int(firstByteAt!.timeIntervalSince(connectStartedAt) * 1000)
+            print("[AgentClient][SSE] first bytes received: \(data.count)B after \(ms)ms")
+        }
+        totalBytes += data.count
         onData(data)
     }
-    
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let durationMs = Int(Date().timeIntervalSince(connectStartedAt) * 1000)
+        let errDesc = error?.localizedDescription ?? "nil"
+        print("[AgentClient][SSE] complete error=\(errDesc) totalBytes=\(totalBytes) totalEvents=\(totalEvents) duration=\(durationMs)ms")
         if let error = error {
             onError(error)
         } else {

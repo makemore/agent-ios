@@ -605,6 +605,7 @@ public class ChatViewModel: ObservableObject {
                 }
             }
 
+            print("[ChatViewModel] subscribing runId=\(runId) url=\(redactURLForLogging(url))")
             client.connect(url: url, headers: apiClient.authHeaders())
         }
     }
@@ -1149,6 +1150,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
+        print("[ChatViewModel] terminal type=\(type) runId=\(currentRunId ?? "nil")")
         if type == "run.failed" {
             // Close out the stream so the error message doesn't orphan a
             // streaming bubble or cause subsequent text to overwrite it.
