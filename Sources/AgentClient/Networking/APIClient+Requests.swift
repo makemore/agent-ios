@@ -176,6 +176,65 @@ extension APIClient {
         return try decoder.decode([AgentSystem].self, from: data)
     }
 
+    // MARK: - Voice
+
+    /// Mint a short-lived bearer token for the TTS streaming endpoint.
+    ///
+    /// The token is bound to the current authenticated principal and may
+    /// embed quota/rate-limit metadata. Voice providers should call this
+    /// before each playback session and refresh on 401.
+    ///
+    /// Returns ``nil`` when the backend has no voice endpoint configured.
+    public func voiceToken() async throws -> VoiceToken? {
+        guard let path = config.apiPaths.voiceToken else { return nil }
+        let token = try await getOrCreateSession()
+        let request = buildRequest(path: path, method: "POST", body: Data("{}".utf8), token: token)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 404 { return nil }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.httpError(statusCode: http.statusCode)
+        }
+
+        // The Django voice endpoint emits snake_case keys regardless of
+        // the per-request format header (the response is a tiny dict that
+        // the view assembles directly). Decode against both shapes.
+        struct WireToken: Decodable {
+            let token: String
+            let ttsUrl: String?
+            let tts_url: String?
+            let expiresAt: Date?
+            let expires_at: Date?
+        }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let wire = try dec.decode(WireToken.self, from: data)
+        let urlField = (wire.ttsUrl ?? wire.tts_url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let absolute = urlField.hasPrefix("/") ? "\(config.backendUrl)\(urlField)" : urlField
+        let expires = wire.expiresAt ?? wire.expires_at ?? Date().addingTimeInterval(240)
+        return VoiceToken(token: wire.token, ttsUrl: absolute, expiresAt: expires)
+    }
+
+    /// List voices the configured provider exposes (e.g. ElevenLabs).
+    public func voices() async throws -> [VoiceDescriptor] {
+        guard let path = config.apiPaths.voiceVoices else { return [] }
+        let token = try await getOrCreateSession()
+        let request = buildRequest(path: path, method: "GET", token: token)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 404 { return [] }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.httpError(statusCode: http.statusCode)
+        }
+        struct WireVoices: Decodable {
+            let voices: [VoiceDescriptor]?
+        }
+        let dec = JSONDecoder()
+        return (try? dec.decode(WireVoices.self, from: data).voices) ?? []
+    }
+
     // MARK: - Decoder
 
     private var decoder: JSONDecoder {

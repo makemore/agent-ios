@@ -6,19 +6,32 @@ import SwiftUI
 /// or real Django backend — and drive the production `ChatWidgetView` from a
 /// button tap, mirroring exactly what XCUITest does headlessly.
 struct ScenarioLauncherView: View {
-    @AppStorage("launcher.stubUrl") private var stubUrl = "http://127.0.0.1:8765"
-    @AppStorage("launcher.backendUrl") private var backendUrl = "http://127.0.0.1:8000"
-    @AppStorage("launcher.authToken") private var authToken = ""
-    @AppStorage("launcher.agentKey") private var realBackendAgentKey = "agent-echo"
+    /// Only mutable input — DRF token used to authenticate against the real
+    /// Django backend. Defaults to a known-good token so a fresh sim run
+    /// works out of the box; persisted in `@AppStorage` once edited.
+    @AppStorage("launcher.authToken") private var authToken = HostConfiguration.defaultAuthToken
+
+    /// URLs and agent key are now driven by the active Xcode scheme via
+    /// env vars (BACKEND_URL, STUB_SERVER_URL, AGENT_KEY). Switch scheme
+    /// in the Xcode toolbar to swap targets — no in-app editing needed.
+    private var backendUrl: String { HostConfiguration.defaultBackendUrl }
+    private var stubUrl: String { HostConfiguration.stubServerUrl }
+    private var agentKey: String { HostConfiguration.defaultAgentKey }
 
     var body: some View {
         NavigationStack {
             List {
-                Section("Endpoints") {
-                    LabeledTextField(label: "Stub URL", text: $stubUrl)
-                    LabeledTextField(label: "Django URL", text: $backendUrl)
+                Section("Active scheme") {
+                    LabeledValue(label: "Backend URL", value: backendUrl)
+                    LabeledValue(label: "Stub URL", value: stubUrl)
+                    LabeledValue(label: "Agent key", value: agentKey)
+                    Text("Switch the Xcode scheme (toolbar, top-left) to change these.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Auth") {
                     LabeledTextField(label: "DRF token", text: $authToken, isSecret: true)
-                    LabeledTextField(label: "Real-backend agent key", text: $realBackendAgentKey)
                 }
 
                 Section("Stub fixtures (start `clients/test-stub-server`)") {
@@ -75,20 +88,24 @@ struct ScenarioLauncherView: View {
                 backendUrl: stubUrl,
                 agentKey: "test-agent",
                 testFixture: fixture,
-                autoSendOnLaunch: true,
+                autoSendOnLaunch: !scenario.manual,
                 autoSendPrompt: scenario.prompt,
                 autoSendFollowUps: scenario.followUps,
-                authToken: nil
+                authToken: nil,
+                enableTTS: scenario.enableTTS,
+                enableVoice: scenario.enableVoice
             )
         case .realBackend:
             return HostConfiguration(
                 backendUrl: backendUrl,
-                agentKey: realBackendAgentKey,
+                agentKey: agentKey,
                 testFixture: "",
-                autoSendOnLaunch: true,
+                autoSendOnLaunch: !scenario.manual,
                 autoSendPrompt: scenario.prompt,
                 autoSendFollowUps: scenario.followUps,
-                authToken: authToken.isEmpty ? nil : authToken
+                authToken: authToken.isEmpty ? nil : authToken,
+                enableTTS: scenario.enableTTS,
+                enableVoice: scenario.enableVoice
             )
         }
     }
@@ -101,7 +118,9 @@ struct ScenarioLauncherView: View {
             autoSendOnLaunch: false,
             autoSendPrompt: "",
             autoSendFollowUps: [],
-            authToken: nil
+            authToken: nil,
+            enableTTS: false,
+            enableVoice: false
         )
     }
 }
@@ -126,6 +145,24 @@ private struct LabeledTextField: View {
                     .autocorrectionDisabled(true)
                     .keyboardType(.URL)
             }
+        }
+    }
+}
+
+private struct LabeledValue: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(label).frame(width: 140, alignment: .leading)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 }

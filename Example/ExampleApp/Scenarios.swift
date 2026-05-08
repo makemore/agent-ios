@@ -18,6 +18,14 @@ struct Scenario: Identifiable, Hashable {
     let kind: Kind
     let prompt: String
     let followUps: [HostConfiguration.FollowUp]
+    /// When true, opens the chat without firing `autoSendPrompt` so the
+    /// developer can drive the turn manually (e.g. via the mic button).
+    var manual: Bool = false
+    /// Turn TTS playback on for this scenario. Routes through the
+    /// Django voice proxy when the backend has the endpoints mounted.
+    var enableTTS: Bool = false
+    /// Show the mic button so SFSpeech results land in the input field.
+    var enableVoice: Bool = false
 }
 
 extension ScenarioLauncherView {
@@ -106,6 +114,28 @@ extension ScenarioLauncherView {
                     delayMs: 2000
                 ),
             ]
+        ),
+        Scenario(
+            id: "real_voice_chat",
+            title: "Voice chat (TTS + mic)",
+            subtitle: "Hands-free: tap mic to speak, hear the agent reply",
+            kind: .realBackend,
+            prompt: "",
+            followUps: [],
+            manual: true,
+            enableTTS: true,
+            enableVoice: true
+        ),
+        Scenario(
+            id: "real_voice_tts_only",
+            title: "Voice playback (TTS only)",
+            subtitle: "Type prompts, hear streamed sentences via ElevenLabs",
+            kind: .realBackend,
+            prompt: "",
+            followUps: [],
+            manual: true,
+            enableTTS: true,
+            enableVoice: false
         ),
     ]
 }

@@ -8,10 +8,33 @@ public struct ChatWidgetView: View {
     @ObservedObject var viewModel: ChatViewModel
     let config: ChatWidgetConfig
     @State private var showSystemPicker = false
+    /// TTS controller, created lazily on first appear so the view can be
+    /// previewed without a backend. Bound to the viewModel so SSE events
+    /// flow into voice playback.
+    @StateObject private var voiceController: VoiceController
 
-    public init(viewModel: ChatViewModel, config: ChatWidgetConfig) {
+    public init(
+        viewModel: ChatViewModel,
+        config: ChatWidgetConfig,
+        apiClient: APIClient? = nil,
+        voiceController: VoiceController? = nil
+    ) {
         self.viewModel = viewModel
         self.config = config
+        // Build the controller up front: ``StateObject`` only honours its
+        // initial value on first creation, so we have to resolve the
+        // provider here. Host apps that need a custom provider pass one
+        // in explicitly via ``voiceController``.
+        let initial: VoiceController
+        if let injected = voiceController {
+            initial = injected
+        } else if let api = apiClient,
+                  let built = VoiceFactory.makeController(config: config, apiClient: api) {
+            initial = built
+        } else {
+            initial = VoiceController(provider: AVSpeechTTSProvider(), enabled: config.enableTTS)
+        }
+        _voiceController = StateObject(wrappedValue: initial)
     }
 
     public var body: some View {
@@ -41,11 +64,12 @@ public struct ChatWidgetView: View {
                 }
             }
 
-            // System picker button — bottom-right, above input
-            if config.showSystemPicker {
+            // System picker / TTS toggle row — bottom-right, above input
+            if config.showSystemPicker || config.showTTSButton {
                 HStack {
                     // Show current system name if selected
-                    if let slug = viewModel.selectedSystemSlug,
+                    if config.showSystemPicker,
+                       let slug = viewModel.selectedSystemSlug,
                        let system = viewModel.systems.first(where: { $0.slug == slug }) {
                         Text(system.name)
                             .font(.caption)
@@ -60,13 +84,31 @@ public struct ChatWidgetView: View {
 
                     Spacer()
 
-                    Button(action: { showSystemPicker = true }) {
-                        Image(systemName: "gearshape")
-                            .font(.body)
-                            .foregroundColor(.secondary)
-                            .padding(8)
-                            .background(PlatformColors.systemGray6)
-                            .clipShape(Circle())
+                    // TTS toggle: shows speaker icon, fills/animates while
+                    // playback is active. Tapping toggles ``enableTTS`` on
+                    // the controller — disabling cuts off any in-flight
+                    // audio so the user isn't trapped listening to the rest.
+                    if config.showTTSButton {
+                        Button(action: { voiceController.setEnabled(!voiceController.isEnabled) }) {
+                            Image(systemName: ttsIconName)
+                                .font(.body)
+                                .foregroundColor(voiceController.isEnabled ? config.primaryColor : .secondary)
+                                .padding(8)
+                                .background(PlatformColors.systemGray6)
+                                .clipShape(Circle())
+                        }
+                        .accessibilityLabel(voiceController.isEnabled ? "Disable voice output" : "Enable voice output")
+                    }
+
+                    if config.showSystemPicker {
+                        Button(action: { showSystemPicker = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .padding(8)
+                                .background(PlatformColors.systemGray6)
+                                .clipShape(Circle())
+                        }
                     }
                 }
                 .padding(.horizontal)
@@ -87,6 +129,11 @@ public struct ChatWidgetView: View {
         }
         // Auto-restore saved conversation on launch (paginated, not full history)
         .task {
+            // Bind the voice controller to the viewModel so SSE deltas
+            // flow into TTS playback. The controller already mirrors
+            // ``config.enableTTS`` so this is a no-op when disabled.
+            viewModel.voiceController = voiceController
+
             print("[📜 ChatWidgetView] .task fired — calling restoreConversationIfNeeded()")
             await viewModel.restoreConversationIfNeeded()
             print("[📜 ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
@@ -110,6 +157,13 @@ public struct ChatWidgetView: View {
                 }
             )
         }
+    }
+
+    /// Speaker icon: filled when speech is enabled, ``.3`` waves while
+    /// playback is in flight, slashed when muted.
+    private var ttsIconName: String {
+        if !voiceController.isEnabled { return "speaker.slash.fill" }
+        return voiceController.isSpeaking ? "speaker.wave.3.fill" : "speaker.wave.2.fill"
     }
 }
 
@@ -145,7 +199,7 @@ struct ChatWidgetView_Previews: PreviewProvider {
         let apiClient = APIClient(config: config, storage: storage)
         let viewModel = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
 
-        ChatWidgetView(viewModel: viewModel, config: config)
+        ChatWidgetView(viewModel: viewModel, config: config, apiClient: apiClient)
     }
 }
 #endif

@@ -13,7 +13,7 @@ public struct AgentFrontend {
         let apiClient = APIClient(config: config, storage: storage)
         let viewModel = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
 
-        return ChatWidgetView(viewModel: viewModel, config: config)
+        return ChatWidgetView(viewModel: viewModel, config: config, apiClient: apiClient)
     }
 
     /// Create a chat widget with custom storage
@@ -26,7 +26,7 @@ public struct AgentFrontend {
         let apiClient = APIClient(config: config, storage: storage)
         let viewModel = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
 
-        return ChatWidgetView(viewModel: viewModel, config: config)
+        return ChatWidgetView(viewModel: viewModel, config: config, apiClient: apiClient)
     }
     
     /// Create a chat view model for custom UI implementations

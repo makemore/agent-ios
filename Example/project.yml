@@ -28,6 +28,8 @@ targets:
           - UIInterfaceOrientationPortrait
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        NSMicrophoneUsageDescription: "Used to transcribe what you say so the agent can reply."
+        NSSpeechRecognitionUsageDescription: "Used on-device to turn your voice into text for the agent."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.makemore.agentfrontend.example
@@ -41,6 +43,8 @@ targets:
     dependencies:
       - package: AgentFrontend
         product: AgentFrontend
+      - package: AgentFrontend
+        product: AgentClient
 
   AgentExampleUITests:
     type: bundle.ui-testing
@@ -62,6 +66,9 @@ targets:
       - target: AgentExample
 
 schemes:
+  # Default scheme — no env overrides. Launcher uses its built-in
+  # fallbacks (stub at 127.0.0.1:8765, Django at 127.0.0.1:8000) and
+  # the XCUITest target reads BACKEND_URL / AGENT_TOKEN from the shell.
   AgentExample:
     build:
       targets:
@@ -83,6 +90,52 @@ schemes:
           isEnabled: true
         - variable: AGENT_TOKEN
           value: ${AGENT_TOKEN}
+          isEnabled: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  # Local Django dev server (`manage.py runserver`) on the host machine.
+  # Pick this from the Xcode toolbar to launch the app pointing at
+  # http://127.0.0.1:8000 with no further setup.
+  Local (runserver):
+    build:
+      targets:
+        AgentExample: all
+    run:
+      config: Debug
+      environmentVariables:
+        - variable: BACKEND_URL
+          value: http://127.0.0.1:8000
+          isEnabled: true
+        - variable: AGENT_KEY
+          value: chisel
+          isEnabled: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  # Local Django via ngrok tunnel — required for testing on a real
+  # device or from anywhere off the host network. Update the URL here
+  # if your tunnel hostname changes.
+  Local (ngrok):
+    build:
+      targets:
+        AgentExample: all
+    run:
+      config: Debug
+      environmentVariables:
+        - variable: BACKEND_URL
+          value: https://terminal.ngrok.app
+          isEnabled: true
+        - variable: AGENT_KEY
+          value: chisel
           isEnabled: true
     profile:
       config: Release

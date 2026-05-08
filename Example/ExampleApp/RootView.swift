@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentClient
 import AgentFrontend
 
 /// Top-level view: builds the `ChatViewModel` once with `InMemoryStorage`
@@ -15,7 +16,11 @@ struct RootView: View {
     }
 
     var body: some View {
-        ChatWidgetView(viewModel: holder.viewModel, config: holder.config)
+        ChatWidgetView(
+            viewModel: holder.viewModel,
+            config: holder.config,
+            apiClient: holder.api
+        )
             .accessibilityIdentifier("AgentChatRoot")
             .task {
                 guard host.autoSendOnLaunch, !holder.didAutoSend else { return }
@@ -41,6 +46,7 @@ struct RootView: View {
 final class ViewModelHolder: ObservableObject {
     let config: ChatWidgetConfig
     let viewModel: ChatViewModel
+    let api: APIClient
     var didAutoSend: Bool = false
 
     init(host: HostConfiguration) {
@@ -48,6 +54,7 @@ final class ViewModelHolder: ObservableObject {
         let storage = InMemoryStorage()
         let api = APIClient(config: cfg, storage: storage)
         self.config = cfg
+        self.api = api
         self.viewModel = ChatViewModel(config: cfg, apiClient: api, storage: storage)
     }
 }

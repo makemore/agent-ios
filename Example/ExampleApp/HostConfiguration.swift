@@ -1,4 +1,5 @@
 import Foundation
+import AgentClient
 import AgentFrontend
 
 /// Resolves runtime configuration from `ProcessInfo.processInfo.environment`.
@@ -24,21 +25,51 @@ struct HostConfiguration: Hashable {
     /// When non-nil, the chat widget is configured for token auth against
     /// a real Django backend instead of anonymous-session against the stub.
     let authToken: String?
+    /// Turn TTS playback on by default (mirrors `ChatWidgetConfig.enableTTS`).
+    /// The speaker icon in the chat header still lets the user toggle it.
+    let enableTTS: Bool
+    /// Show the mic button in the input row and route SFSpeech results
+    /// into the text field (mirrors `ChatWidgetConfig.enableVoice`).
+    let enableVoice: Bool
 
-    /// True when the launch environment looks like it came from XCUITest
-    /// (or a hand-rolled `xcodebuild ... env` invocation). Used by the
-    /// host app to skip the in-app `ScenarioLauncherView` and route
-    /// straight to the chat. The launcher sets none of these vars when
-    /// it builds its own `HostConfiguration`, so manual launches always
-    /// land on the launcher.
+    /// True when the launch environment looks like it came from XCUITest.
+    /// We key off `AUTO_SEND_PROMPT` specifically: that's only ever set by
+    /// the test runner, never by an Xcode scheme used for manual runs.
+    /// `BACKEND_URL` etc. are intentionally not triggers so a scheme can
+    /// pre-load the launcher with the right URL without skipping it.
     static func isLaunchedByTestRunner(
         _ env: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        let driverKeys = [
-            "STUB_SERVER_URL", "BACKEND_URL", "TEST_FIXTURE",
-            "AUTO_SEND_PROMPT", "AUTO_SEND_FOLLOW_UPS", "AGENT_TOKEN",
-        ]
-        return driverKeys.contains { (env[$0] ?? "").isEmpty == false }
+        return (env["AUTO_SEND_PROMPT"] ?? "").isEmpty == false
+    }
+
+    /// Default DRF token baked into the launcher so a fresh sim run can
+    /// hit the local Django backend without copy-paste. Override at any
+    /// time by editing the field in the launcher (the new value is
+    /// persisted in `@AppStorage`).
+    static let defaultAuthToken = "72be8261e1cf35dd3d7ae39c8f9b5268095113ab"
+
+    /// URL the launcher's stub-fixture scenarios point at. Reads
+    /// `STUB_SERVER_URL` from the active Xcode scheme, falling back to
+    /// the local Python stub server's default port.
+    static var stubServerUrl: String {
+        let raw = ProcessInfo.processInfo.environment["STUB_SERVER_URL"] ?? ""
+        return raw.isEmpty ? "http://127.0.0.1:8765" : raw
+    }
+
+    /// URL the launcher's real-backend scenarios point at. Reads
+    /// `BACKEND_URL` from the active Xcode scheme so switching scheme
+    /// (e.g. "Local (ngrok)" vs "Local (runserver)") swaps the host.
+    static var defaultBackendUrl: String {
+        let raw = ProcessInfo.processInfo.environment["BACKEND_URL"] ?? ""
+        return raw.isEmpty ? "http://127.0.0.1:8000" : raw
+    }
+
+    /// Agent key the launcher uses when building real-backend scenarios.
+    /// Set `AGENT_KEY` on the Xcode scheme to point at a different agent.
+    static var defaultAgentKey: String {
+        let raw = ProcessInfo.processInfo.environment["AGENT_KEY"] ?? ""
+        return raw.isEmpty ? "chisel" : raw
     }
 
     static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> HostConfiguration {
@@ -62,7 +93,9 @@ struct HostConfiguration: Hashable {
             autoSendOnLaunch: (env["AUTO_SEND"] ?? "true").lowercased() != "false",
             autoSendPrompt: env["AUTO_SEND_PROMPT"] ?? "Hello agent",
             autoSendFollowUps: parseFollowUps(env["AUTO_SEND_FOLLOW_UPS"]),
-            authToken: token
+            authToken: token,
+            enableTTS: (env["ENABLE_TTS"] ?? "false").lowercased() == "true",
+            enableVoice: (env["ENABLE_VOICE"] ?? "false").lowercased() == "true"
         )
     }
 
@@ -92,9 +125,11 @@ struct HostConfiguration: Hashable {
         cfg.subtitle = "Streaming UI test host"
         cfg.showSystemPicker = false
         cfg.showTasksTab = false
-        cfg.showTTSButton = false
-        cfg.enableTTS = false
-        cfg.enableVoice = false
+        // Show the speaker toggle whenever TTS is enabled for this host so
+        // the developer can flick playback off mid-stream from the header.
+        cfg.showTTSButton = enableTTS
+        cfg.enableTTS = enableTTS
+        cfg.enableVoice = enableVoice
         cfg.enableFiles = false
         cfg.followStreamingEnabled = true
         if let token = authToken {

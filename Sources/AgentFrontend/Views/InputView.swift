@@ -142,8 +142,13 @@ public struct InputView: View {
                     self.recognitionRequest = request
                     
                     #if os(iOS)
+                    // Use .playAndRecord (not .record) so subsequent TTS
+                    // playback isn't silenced. .defaultToSpeaker keeps
+                    // audio audible without headphones.
                     let audioSession = AVAudioSession.sharedInstance()
-                    try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+                    try audioSession.setCategory(.playAndRecord,
+                                                 mode: .spokenAudio,
+                                                 options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
                     try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
                     #endif
                     

@@ -38,6 +38,17 @@ public struct APIPaths {
     /// Agents discovery endpoint
     public var agents: String
 
+    /// Voice token mint endpoint (django_agent_runtime.voice).
+    /// Set to ``nil`` to disable ElevenLabs and fall back to native TTS.
+    public var voiceToken: String?
+
+    /// Voice TTS streaming endpoint. Returned in the token mint response,
+    /// but kept here as a default so callers can pre-resolve it.
+    public var voiceTts: String?
+
+    /// Voice catalogue endpoint.
+    public var voiceVoices: String?
+
     public init(
         anonymousSession: String = "/api/accounts/anonymous-session/",
         conversations: String = "/api/agent-runtime/conversations/",
@@ -50,7 +61,10 @@ public struct APIPaths {
         models: String = "/api/agent-runtime/models/",
         tasks: String = "/api/agent/tasks/",
         systems: String = "/api/agent-runtime/systems/",
-        agents: String = "/api/agent-runtime/agents/"
+        agents: String = "/api/agent-runtime/agents/",
+        voiceToken: String? = "/api/agent-runtime/voice/token/",
+        voiceTts: String? = "/api/agent-runtime/voice/tts/",
+        voiceVoices: String? = "/api/agent-runtime/voice/voices/"
     ) {
         self.anonymousSession = anonymousSession
         self.conversations = conversations
@@ -64,6 +78,9 @@ public struct APIPaths {
         self.tasks = tasks
         self.systems = systems
         self.agents = agents
+        self.voiceToken = voiceToken
+        self.voiceTts = voiceTts
+        self.voiceVoices = voiceVoices
     }
     
     /// Get the run events URL with the run ID substituted

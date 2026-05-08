@@ -122,6 +122,13 @@ public class ChatViewModel: ObservableObject {
     private let apiClient: APIClient
     private let storage: StorageService
 
+    // MARK: - Voice (TTS)
+    /// Optional voice controller. When set, ``assistant.delta`` and
+    /// ``assistant.message`` events are streamed into it for sentence-level
+    /// TTS playback. The controller itself owns the speaker indicator
+    /// state via its ``@Published isSpeaking``.
+    public var voiceController: VoiceController?
+
     // MARK: - Initialization
 
     public init(config: ChatWidgetConfig, apiClient: APIClient, storage: StorageService) {
@@ -188,10 +195,14 @@ public class ChatViewModel: ObservableObject {
         supersedeFromMessageIndex: Int? = nil
     ) async {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
-        
+
         isLoading = true
         error = nil
-        
+
+        // New turn — drop any half-spoken audio from the previous assistant
+        // response and clear the chunker's buffer.
+        voiceController?.reset()
+
         // Add user message
         let userMessage = Message(
             role: .user,
@@ -268,6 +279,8 @@ public class ChatViewModel: ObservableObject {
             // differs from the natural-end path (`handleTerminalEvent`) which
             // deliberately lets the drain finish smoothly.
             resetStreamBuffer()
+            // Cut off any in-flight TTS playback when the user cancels.
+            voiceController?.stop()
             isLoading = false
             currentRunId = nil
             // Wake the awaiter inside `subscribeToEvents` — disconnecting
@@ -685,6 +698,9 @@ public class ChatViewModel: ObservableObject {
         // event (tool/video/sub-agent), which resets `turnFinalized`.
         if turnFinalized { return }
 
+        // Per-delta emotion overrides the turn-level value when present.
+        let emotion = Emotion.from(payload["emotion"])
+
         // Sub-agent echo suppression. After a sub-agent finishes streaming
         // its final answer, the parent typically re-streams the exact same
         // text as its own deltas (it's echoing the tool result). Buffer the
@@ -718,6 +734,7 @@ public class ChatViewModel: ObservableObject {
             assistantContent = ""
             resetStreamBuffer()
             streamBuffer.append(replay)
+            voiceController?.pushDelta(replay, emotion: emotion)
             startDrainTimerIfNeeded()
             return
         }
@@ -747,6 +764,7 @@ public class ChatViewModel: ObservableObject {
 
         // Enqueue into buffer; drain timer reveals chars at a steady rate.
         streamBuffer.append(delta)
+        voiceController?.pushDelta(delta, emotion: emotion)
         startDrainTimerIfNeeded()
     }
 
@@ -765,6 +783,18 @@ public class ChatViewModel: ObservableObject {
         // via a sub-agent tool result) must be dropped to avoid a second
         // typewriter bubble below the one we're about to finalise.
         turnFinalized = true
+
+        // Voice: if the run streamed deltas the chunker has been fed
+        // throughout — `finishTurn(finalText: nil)` flushes the trailing
+        // fragment. If it didn't (non-streaming run, or an SSE that only
+        // emits the authoritative message), pass `content` so the user
+        // still hears the reply.
+        let voiceEmotion = Emotion.from(payload["emotion"])
+        let needsFallbackText = streamBuffer.isEmpty && drainTimer == nil
+        voiceController?.finishTurn(
+            finalText: needsFallbackText ? content : nil,
+            emotion: voiceEmotion
+        )
 
         // Sub-agent echo resolution. If we were still comparing the parent's
         // stream against a sub-agent snapshot when the final message lands,
@@ -1156,6 +1186,9 @@ public class ChatViewModel: ObservableObject {
             // streaming bubble or cause subsequent text to overwrite it.
             closeStreamingSession()
             clearPendingEcho()
+            // Cancel any in-flight TTS — the user shouldn't hear a half
+            // sentence after the failure banner appears.
+            voiceController?.stop()
             let errMsg = payload["error"] as? String ?? "Agent run failed"
             error = errMsg
             messages.append(Message(
@@ -1174,6 +1207,14 @@ public class ChatViewModel: ObservableObject {
             // resolved by another event and would only leak into the next
             // turn if not cleared.
             clearPendingEcho()
+            if type == "run.cancelled" || type == "run.timed_out" {
+                voiceController?.stop()
+            } else {
+                // Success: flush any trailing text the chunker still holds
+                // so the final fragment gets spoken. No-op when
+                // assistant.message already flushed.
+                voiceController?.finishTurn()
+            }
         }
 
         isLoading = false
