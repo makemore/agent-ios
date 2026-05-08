@@ -159,12 +159,18 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
     /// which forbids playback entirely. ``.playAndRecord`` with
     /// ``.defaultToSpeaker`` is the right fit for a chat-style app
     /// that mixes TTS playback and microphone capture.
+    ///
+    /// Preserves ``.voiceChat`` mode when set by the input layer for
+    /// barge-in (acoustic echo cancellation); otherwise uses
+    /// ``.spokenAudio`` for higher-fidelity playback.
     private func configurePlaybackSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            if session.category != .playAndRecord {
+            let needsCategoryChange = session.category != .playAndRecord
+            let preserveVoiceChat = session.mode == .voiceChat
+            if needsCategoryChange || (!preserveVoiceChat && session.mode != .spokenAudio) {
                 try session.setCategory(.playAndRecord,
-                                        mode: .spokenAudio,
+                                        mode: preserveVoiceChat ? .voiceChat : .spokenAudio,
                                         options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
             }
             try session.setActive(true, options: [])

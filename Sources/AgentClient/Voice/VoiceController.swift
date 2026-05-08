@@ -16,6 +16,18 @@ import Combine
 public final class VoiceController: ObservableObject {
     @Published public private(set) var isSpeaking: Bool = false
     @Published public var isEnabled: Bool
+    /// Rolling window of recently-spoken agent text. Consumed by the
+    /// iOS InputView's barge-in monitor to filter AEC leak-back: any
+    /// transcription the recognizer produces while the agent is talking
+    /// that's a near-match of this buffer is treated as the agent's own
+    /// voice bleeding through, not a real interrupt.
+    /// Capped to ``recentSpokenTextMaxChars`` characters.
+    @Published public private(set) var recentSpokenText: String = ""
+
+    /// Maximum length of ``recentSpokenText`` before old content is
+    /// dropped from the front. ~1500 chars covers a few sentences which
+    /// is enough lookback for the monitor's word-overlap check.
+    private let recentSpokenTextMaxChars: Int = 1500
 
     private let provider: TTSProvider
     private var queue: [String] = []
@@ -64,6 +76,8 @@ public final class VoiceController: ObservableObject {
         currentTask = nil
         provider.cancel()
         setSpeaking(false)
+        // Wipe the leak-back filter buffer so the next turn starts fresh.
+        recentSpokenText = ""
     }
 
     /// Clear emotion + buffer at the start of a new assistant turn.
@@ -71,6 +85,7 @@ public final class VoiceController: ObservableObject {
     public func reset() {
         currentEmotion = nil
         chunker.reset()
+        recentSpokenText = ""
     }
 
     /// Toggle speech on/off. Disabling stops any current playback.
@@ -98,6 +113,10 @@ public final class VoiceController: ObservableObject {
         while !queue.isEmpty {
             let text = queue.removeFirst()
             setSpeaking(true)
+            // Append to leak-back filter buffer *before* play starts so
+            // the InputView monitor already has the text by the time the
+            // first audio frame leaks into the mic.
+            appendRecentSpoken(text)
             let opts = TTSSpeakOptions(emotion: currentEmotion)
             do {
                 try Task.checkCancellation()
@@ -124,5 +143,17 @@ public final class VoiceController: ObservableObject {
 
     private func setSpeaking(_ value: Bool) {
         if isSpeaking != value { isSpeaking = value }
+    }
+
+    /// Append a freshly-queued sentence to the rolling agent-text
+    /// buffer. Trims from the front when the cap is exceeded.
+    private func appendRecentSpoken(_ text: String) {
+        var joined = recentSpokenText
+        if !joined.isEmpty { joined += " " }
+        joined += text
+        if joined.count > recentSpokenTextMaxChars {
+            joined = String(joined.suffix(recentSpokenTextMaxChars))
+        }
+        recentSpokenText = joined
     }
 }

@@ -195,6 +195,18 @@ Sources/AgentFrontend/
 
 ## Changelog
 
+### 0.7.0
+
+**Voice subsystem & Live Mic**
+
+- **`AgentClient/Voice` module** — new `TTSProvider` abstraction with `ElevenLabsTTSProvider` (streaming) and `AVSpeechTTSProvider` (on-device fallback) implementations, a `SentenceChunker` that splits assistant deltas into playable units, and a `VoiceController` that owns the playback queue and exposes `isSpeaking` to the UI. `ChatViewModel` pipes `assistant.delta` and `assistant.message` events into the controller; `ChatWidgetView` wires it through automatically when `config.enableVoice` is true.
+- **Audio session handling** — `ElevenLabsTTSProvider` configures `AVAudioSession` to `.playAndRecord` with `.defaultToSpeaker` + `.duckOthers` before each `play()`, so TTS is no longer silenced by the default `.soloAmbient` category and coexists with the mic capture flow. The provider preserves `.voiceChat` mode when set by the input layer (required for hardware acoustic echo cancellation during barge-in) and falls back to `.spokenAudio` for higher-fidelity playback when not.
+- **Live Mic — auto-send** — when `autoSendEnabled` is on (persisted in `@AppStorage("voice.autoSend")`), a mic-initiated turn auto-submits after 3 s of silence and re-arms the recogniser the moment the agent finishes speaking, giving a hands-free conversation loop.
+- **Live Mic — barge-in** — the user can interrupt agent TTS playback by speaking. Implemented as a *monitor* `SFSpeechRecognizer` that runs alongside playback (separate from the main recognition request so partials don't pollute `inputText`). Each monitor partial is diffed against `VoiceController.recentSpokenText` (a rolling 1500-char buffer of what the agent has actually queued for playback) using a tokenized novel-word count; barge-in fires when the user produces ≥ 2 words not in the agent's recent text. Hardware AEC (via `.voiceChat` mode) handles most leak-back; the text-overlap filter catches what the AEC misses, especially on simulator where there is no hardware AEC at all.
+- **Manual stop button** — the send button is now three-state: cancel-run while a request is in flight, **stop-agent** while the agent is speaking (user-initiated barge-in that always fires regardless of recogniser state), send otherwise. Provides a guaranteed interrupt path that doesn't depend on the speech model.
+- **Always-on audio engine** — the `AVAudioEngine` stays running across turns; only the `SFSpeechAudioBufferRecognitionRequest` is recycled on submit and on agent-speaking transitions. Eliminates engine restart latency between turns and avoids a class of crashes where the engine was started without a node connection.
+- **Example app schemes** — replaced the in-app URL settings with Xcode schemes (`Local runserver` / `Local ngrok`) that inject `BACKEND_URL` / `AGENT_KEY` / `ENABLE_VOICE` via environment. New "Voice chat (TTS + mic)" and "Voice playback (TTS only)" scenarios; mic + speech-recognition entitlements added to `Info.plist`.
+
 ### 0.6.0
 
 **Core / UI split**

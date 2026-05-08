@@ -119,6 +119,8 @@ public struct ChatWidgetView: View {
             InputView(
                 config: config,
                 isLoading: viewModel.isLoading,
+                isAgentSpeaking: voiceController.isSpeaking,
+                voiceController: voiceController,
                 onSend: { content, files in
                     Task { await viewModel.sendMessage(content, files: files) }
                 },
