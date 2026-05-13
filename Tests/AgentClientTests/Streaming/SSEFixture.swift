@@ -16,6 +16,7 @@ struct SSEFixture {
         let delay_ms: Int?
         let event: String
         let payload: [String: AnyCodable]?
+        let seq_override: Int?
     }
 
     let name: String
@@ -24,7 +25,7 @@ struct SSEFixture {
     let events: [Event]
 
     static func load(_ name: String, file: StaticString = #filePath) throws -> SSEFixture {
-        let url = try fixturesDirectory(from: file).appendingPathComponent("\(name).json")
+        let url = try fixturesDirectory(from: file, fixtureName: name).appendingPathComponent("\(name).json")
         let data = try Data(contentsOf: url)
         struct Raw: Decodable {
             let name: String?
@@ -47,10 +48,11 @@ struct SSEFixture {
         var out: [Data] = []
         let iso = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 0))
         for ev in events {
+            let eventSeq = ev.seq_override ?? seq
             let payload = ev.payload?.mapValues { $0.value } ?? [:]
             let envelope: [String: Any] = [
                 "run_id": runId,
-                "seq": seq,
+                "seq": eventSeq,
                 "type": ev.event,
                 "payload": payload,
                 "ts": iso,
@@ -66,17 +68,17 @@ struct SSEFixture {
         return out
     }
 
-    private static func fixturesDirectory(from file: StaticString) throws -> URL {
+    private static func fixturesDirectory(from file: StaticString, fixtureName: String) throws -> URL {
         var url = URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
         // Walk up until we find the `clients/` directory, then descend.
         for _ in 0..<10 {
-            let candidate = url.appendingPathComponent("test-fixtures/sse")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
-            }
             let siblings = url.appendingPathComponent("clients/test-fixtures/sse")
-            if FileManager.default.fileExists(atPath: siblings.path) {
+            if FileManager.default.fileExists(atPath: siblings.appendingPathComponent("\(fixtureName).json").path) {
                 return siblings
+            }
+            let candidate = url.appendingPathComponent("test-fixtures/sse")
+            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("\(fixtureName).json").path) {
+                return candidate
             }
             url.deleteLastPathComponent()
         }
