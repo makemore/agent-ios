@@ -13,6 +13,7 @@ public class ChatViewModel: ObservableObject {
     @Published public var conversationId: String?
     @Published public var hasMoreMessages: Bool = false
     @Published public var loadingMoreMessages: Bool = false
+    @Published public var runState: RunState = .idle
 
     // MARK: - System State
 
@@ -197,6 +198,7 @@ public class ChatViewModel: ObservableObject {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
 
         isLoading = true
+        runState = .sending
         error = nil
 
         // New turn — drop any half-spoken audio from the previous assistant
@@ -243,6 +245,7 @@ public class ChatViewModel: ObservableObject {
             print("[ChatViewModel] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
 
             currentRunId = run.id
+            runState = .streaming
 
             // Update conversation ID if new
             if conversationId == nil, let newConvId = run.conversationId {
@@ -260,6 +263,7 @@ public class ChatViewModel: ObservableObject {
         } catch {
             self.error = error.localizedDescription
             isLoading = false
+            runState = .failed
         }
     }
     
@@ -268,6 +272,7 @@ public class ChatViewModel: ObservableObject {
         guard let runId = currentRunId, isLoading else { return }
 
         do {
+            runState = .cancelling
             try await apiClient.cancelRun(id: runId)
 
             sseClient?.disconnect()
@@ -282,6 +287,7 @@ public class ChatViewModel: ObservableObject {
             // Cut off any in-flight TTS playback when the user cancels.
             voiceController?.stop()
             isLoading = false
+            runState = .cancelled
             currentRunId = nil
             // Wake the awaiter inside `subscribeToEvents` — disconnecting
             // the SSE client doesn't fire `onComplete`, so without this any
@@ -309,6 +315,7 @@ public class ChatViewModel: ObservableObject {
         error = nil
         hasMoreMessages = false
         messagesOffset = 0
+        runState = .idle
         pendingPersistAfterDrain = false
         storage.set(config.conversationIdKey, value: nil)
     }
@@ -647,6 +654,7 @@ public class ChatViewModel: ObservableObject {
 
         // Notify callback
         config.onEvent?(event.type, payload)
+        runState = runState.applying(eventType: event.type)
 
         switch event.type {
         case "assistant.delta":
@@ -675,6 +683,9 @@ public class ChatViewModel: ObservableObject {
 
         case "memory.update":
             handleMemoryUpdate(payload)
+
+        case "client.action.required", "run.suspended":
+            handleRequiredAction(payload)
 
         case "run.succeeded", "run.failed", "run.cancelled", "run.timed_out":
             handleTerminalEvent(event.type, payload)
@@ -899,7 +910,7 @@ public class ChatViewModel: ObservableObject {
         // than echoing a finished sub-agent — any stashed echo reference
         // is stale now.
         clearPendingEcho()
-        let name = payload["name"] as? String ?? "tool"
+        let name = payload["name"] as? String ?? payload["tool_name"] as? String ?? "tool"
         messages.append(Message(
             id: "tool-call-\(Date().timeIntervalSince1970)",
             role: .assistant,
@@ -907,8 +918,8 @@ public class ChatViewModel: ObservableObject {
             type: .toolCall,
             metadata: MessageMetadata(
                 toolName: name,
-                toolCallId: payload["id"] as? String,
-                arguments: payload["arguments"] as? String
+                toolCallId: payload["id"] as? String ?? payload["tool_call_id"] as? String,
+                arguments: stringifyPayload(payload["arguments"] ?? payload["tool_args"])
             )
         ))
     }
@@ -925,11 +936,20 @@ public class ChatViewModel: ObservableObject {
             content: content,
             type: .toolResult,
             metadata: MessageMetadata(
-                toolName: payload["name"] as? String,
-                toolCallId: payload["tool_call_id"] as? String,
+                toolName: payload["name"] as? String ?? payload["tool_name"] as? String,
+                toolCallId: payload["tool_call_id"] as? String ?? payload["id"] as? String,
                 result: result
             )
         ))
+    }
+
+    private func stringifyPayload(_ value: Any?) -> String? {
+        guard let value = value else { return nil }
+        if let string = value as? String { return string }
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        else { return String(describing: value) }
+        return String(data: data, encoding: .utf8)
     }
 
     private func handleSubAgentStart(_ payload: [String: Any]) {
@@ -1013,6 +1033,43 @@ public class ChatViewModel: ObservableObject {
                 contentBlocks: blocks
             )
         ))
+    }
+
+    private func handleRequiredAction(_ payload: [String: Any]) {
+        closeStreamingSession()
+        clearPendingEcho()
+        voiceController?.stop()
+
+        let action = payload["required_action"] as? [String: Any] ?? payload
+        let title = action["title"] as? String ?? "Action required"
+        let message = action["message"] as? String ?? "Please complete the requested action to continue."
+        let actionId = action["action_id"] as? String
+        let alreadyRendered = actionId != nil && messages.contains {
+            $0.type == .requiredAction && $0.metadata?.actionId == actionId
+        }
+        if !alreadyRendered {
+            messages.append(Message(
+                id: "required-action-\(Date().timeIntervalSince1970)",
+                role: .system,
+                content: message,
+                type: .requiredAction,
+                metadata: MessageMetadata(
+                    actionId: actionId,
+                    actionType: action["action_type"] as? String,
+                    actionURL: action["action_url"] as? String,
+                    actionLabel: action["action_label"] as? String ?? title,
+                    resumeHint: action["resume_hint"]
+                )
+            ))
+        }
+
+        isLoading = false
+        sseClient?.disconnect()
+        sseClient = nil
+        currentRunId = nil
+        runState = .waiting
+        resumeStreamContinuation()
+        persistToLocalHistory()
     }
 
     private func handleCustomEvent(_ payload: [String: Any]) {

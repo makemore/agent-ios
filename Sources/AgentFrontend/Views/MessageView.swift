@@ -105,6 +105,13 @@ public struct MessageView: View {
                     .font(.body)
                     .foregroundColor(messageTextColor)
             }
+
+            if message.type == .requiredAction, let label = message.metadata?.actionLabel {
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(config.primaryColor)
+                    .padding(.top, 2)
+            }
             
             // Debug info
             if showDebug, let metadata = message.metadata {
@@ -136,6 +143,9 @@ public struct MessageView: View {
         case .cancelled:
             Image(systemName: "stop.circle.fill")
                 .foregroundColor(.orange)
+        case .requiredAction:
+            Image(systemName: "person.crop.circle.badge.exclamationmark")
+                .foregroundColor(.blue)
         case .subAgentStart, .subAgentEnd, .agentContext:
             Image(systemName: "link")
                 .foregroundColor(.blue)

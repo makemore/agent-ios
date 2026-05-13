@@ -4,6 +4,17 @@ A SwiftUI chat widget package for AI agents. iOS equivalent of the `agent-fronte
 
 **Requires:** iOS 16+ / macOS 13+ · Swift 5.9+
 
+## Headless/API surface and reusable primitives
+
+The package ships two products:
+
+- `AgentClient`: product-neutral runtime client, models, SSE transport, `ChatViewModel`, local history, pagination, cancellation, and voice helpers.
+- `AgentFrontend`: reusable SwiftUI primitives and the bundled widget. Host apps can use `MessageListView`, `MessageView`, `InputView`, `ContentBlockViews`, `TaskListView`, and `SystemPickerView` directly to build their own shell.
+
+`ChatViewModel.runState` exposes the canonical lifecycle: `idle`, `sending`, `streaming`, `waiting`, `cancelling`, `cancelled`, `failed`, `succeeded`. `waiting` is used for `run.suspended` and `client.action.required` so mobile UI does not remain stuck in a loading state.
+
+Supported visible event primitives include assistant deltas/messages, tool calls/results, content blocks, cancellations/failures/success, memory updates, sub-agent markers, and generic required-action cards. The shared backend contract is documented in `agent/docs/mobile-protocol-contract.md`.
+
 ## Installation
 
 ### Local Package (recommended for development)

@@ -48,10 +48,29 @@ public enum MessageType: String, Codable {
     case toolResult = "tool_result"
     case error
     case cancelled
+    case requiredAction = "required_action"
     case subAgentStart = "sub_agent_start"
     case subAgentEnd = "sub_agent_end"
     case agentContext = "agent_context"
     case contentBlocks = "content_blocks"
+}
+
+/// Generic lifecycle state for a single run.
+public enum RunState: String, Codable, Equatable {
+    case idle, sending, streaming, waiting, cancelling, cancelled, failed, succeeded
+
+    public func applying(eventType: String) -> RunState {
+        switch eventType {
+        case "run.started", "assistant.delta", "assistant.message", "tool.call", "tool.result", "content.blocks":
+            return .streaming
+        case "run.suspended", "client.action.required":
+            return .waiting
+        case "run.cancelled": return .cancelled
+        case "run.failed", "run.timed_out": return .failed
+        case "run.succeeded": return .succeeded
+        default: return self
+        }
+    }
 }
 
 /// Message metadata
@@ -64,6 +83,11 @@ public struct MessageMetadata: Equatable {
     public var agentName: String?
     public var invocationMode: String?
     public var contentBlocks: [ContentBlock]?
+    public var actionId: String?
+    public var actionType: String?
+    public var actionURL: String?
+    public var actionLabel: String?
+    public var resumeHint: Any?
 
     public init(
         toolName: String? = nil,
@@ -73,7 +97,12 @@ public struct MessageMetadata: Equatable {
         subAgentKey: String? = nil,
         agentName: String? = nil,
         invocationMode: String? = nil,
-        contentBlocks: [ContentBlock]? = nil
+        contentBlocks: [ContentBlock]? = nil,
+        actionId: String? = nil,
+        actionType: String? = nil,
+        actionURL: String? = nil,
+        actionLabel: String? = nil,
+        resumeHint: Any? = nil
     ) {
         self.toolName = toolName
         self.toolCallId = toolCallId
@@ -83,6 +112,11 @@ public struct MessageMetadata: Equatable {
         self.agentName = agentName
         self.invocationMode = invocationMode
         self.contentBlocks = contentBlocks
+        self.actionId = actionId
+        self.actionType = actionType
+        self.actionURL = actionURL
+        self.actionLabel = actionLabel
+        self.resumeHint = resumeHint
     }
 
     public static func == (lhs: MessageMetadata, rhs: MessageMetadata) -> Bool {
@@ -91,7 +125,11 @@ public struct MessageMetadata: Equatable {
         lhs.arguments == rhs.arguments &&
         lhs.subAgentKey == rhs.subAgentKey &&
         lhs.agentName == rhs.agentName &&
-        lhs.contentBlocks == rhs.contentBlocks
+        lhs.contentBlocks == rhs.contentBlocks &&
+        lhs.actionId == rhs.actionId &&
+        lhs.actionType == rhs.actionType &&
+        lhs.actionURL == rhs.actionURL &&
+        lhs.actionLabel == rhs.actionLabel
     }
 }
 

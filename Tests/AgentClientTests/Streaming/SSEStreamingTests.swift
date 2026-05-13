@@ -155,6 +155,21 @@ final class SSEStreamingTests: XCTestCase {
         )
     }
 
+    func testRequiredActionRendersWaitingState() async throws {
+        let fixture = try SSEFixture.load("required_action")
+        installHandlers(for: fixture)
+
+        let vm = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
+        await vm.sendMessage("Check my calendar")
+        try await waitForStreamSettled(vm: vm)
+
+        XCTAssertEqual(vm.runState, .waiting)
+        let action = vm.messages.first { $0.type == .requiredAction }
+        XCTAssertNotNil(action, "expected required action message, got \(dump(vm.messages))")
+        XCTAssertEqual(action?.metadata?.actionType, "oauth")
+        XCTAssertEqual(action?.metadata?.actionLabel, "Connect")
+    }
+
     // MARK: - Helpers
 
     /// Wire MockURLProtocol to satisfy the three endpoints `ChatViewModel`

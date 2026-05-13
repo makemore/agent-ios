@@ -164,6 +164,7 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
     /// barge-in (acoustic echo cancellation); otherwise uses
     /// ``.spokenAudio`` for higher-fidelity playback.
     private func configurePlaybackSession() {
+        #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         do {
             let needsCategoryChange = session.category != .playAndRecord
@@ -179,6 +180,7 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
             print("[ElevenLabsTTSProvider] AVAudioSession setup failed: \(error)")
             #endif
         }
+        #endif
     }
 
     public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {

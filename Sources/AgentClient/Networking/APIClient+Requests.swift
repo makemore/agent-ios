@@ -149,7 +149,8 @@ extension APIClient {
         
         let (_, response) = try await session.data(for: request)
         
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...204).contains(httpResponse.statusCode) else {
             throw APIError.cancelFailed
         }
     }
