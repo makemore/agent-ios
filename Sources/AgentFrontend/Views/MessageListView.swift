@@ -140,6 +140,12 @@ public struct MessageListView: View {
         ScrollViewReader { proxy in
             scrollContent(proxy: proxy)
                 .coordinateSpace(name: "messageScroll")
+                // Background uses the appearance token so the scroll
+                // viewport blends into the surrounding shell instead of
+                // flashing the system background through gaps. The
+                // GeometryReader sits *on top* via a separate background
+                // modifier so it doesn't get covered.
+                .background(config.appearance.background)
                 .background(
                     GeometryReader { geo in
                         Color.clear.preference(
@@ -419,26 +425,40 @@ public struct MessageListView: View {
     }
 }
 
-/// Empty state view
+/// Empty state view. Two modes:
+/// - `config.greeting.enabled == true` → centered optional brand mark
+///   + serif greeting (`GreetingView`). This is the new library
+///   default.
+/// - otherwise → the legacy speech-bubble icon + heading/message
+///   pair, preserved for hosts that opt out of the warm-dark look.
 struct EmptyStateView: View {
     let config: ChatWidgetConfig
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 48))
-                .foregroundColor(config.primaryColor.opacity(0.5))
+        if config.greeting.enabled {
+            GreetingView(config: config)
+                // Center vertically inside the LazyVStack — the list
+                // pads its content with 16pt and the parent ScrollView
+                // is full-height, so a generous min-height lifts the
+                // greeting roughly to the middle of the viewport.
+                .frame(minHeight: 360)
+        } else {
+            VStack(spacing: 16) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 48))
+                    .foregroundColor(config.primaryColor.opacity(0.5))
 
-            Text(config.emptyStateTitle)
-                .font(.headline)
-                .foregroundColor(.primary)
+                Text(config.emptyStateTitle)
+                    .font(.headline)
+                    .foregroundColor(.primary)
 
-            Text(config.emptyStateMessage)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+                Text(config.emptyStateMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(40)
         }
-        .padding(40)
     }
 }
 

@@ -34,6 +34,17 @@ struct ScenarioLauncherView: View {
                     LabeledTextField(label: "DRF token", text: $authToken, isSecret: true)
                 }
 
+                Section {
+                    ForEach(Self.anthropicShellScenarios) { scenario in
+                        scenarioLink(scenario)
+                    }
+                } header: {
+                    Text("S'Ai shell (warm-dark baseline)")
+                } footer: {
+                    Text("Greeting, rounded composer card, slide-in sidebar on a warm-dark background.")
+                        .font(.footnote)
+                }
+
                 Section("Stub fixtures (start `clients/test-stub-server`)") {
                     ForEach(Self.stubScenarios) { scenario in
                         scenarioLink(scenario)
@@ -81,7 +92,18 @@ struct ScenarioLauncherView: View {
 
     // MARK: - Host construction
 
+    /// Resolve the personalised first name for the greeting: the
+    /// scenario's explicit override wins, otherwise we read `USER_NAME`
+    /// from the launch environment. Nil falls through to the generic
+    /// "Good afternoon" with no comma.
+    private func resolvedUserName(for scenario: Scenario) -> String? {
+        if let name = scenario.userName, !name.isEmpty { return name }
+        let env = ProcessInfo.processInfo.environment["USER_NAME"] ?? ""
+        return env.isEmpty ? nil : env
+    }
+
     private func makeHost(for scenario: Scenario) -> HostConfiguration {
+        let user = resolvedUserName(for: scenario)
         switch scenario.kind {
         case .stub(let fixture):
             return HostConfiguration(
@@ -93,7 +115,9 @@ struct ScenarioLauncherView: View {
                 autoSendFollowUps: scenario.followUps,
                 authToken: nil,
                 enableTTS: scenario.enableTTS,
-                enableVoice: scenario.enableVoice
+                enableVoice: scenario.enableVoice,
+                anthropicShell: scenario.anthropicShell,
+                userName: user
             )
         case .realBackend:
             return HostConfiguration(
@@ -105,7 +129,9 @@ struct ScenarioLauncherView: View {
                 autoSendFollowUps: scenario.followUps,
                 authToken: authToken.isEmpty ? nil : authToken,
                 enableTTS: scenario.enableTTS,
-                enableVoice: scenario.enableVoice
+                enableVoice: scenario.enableVoice,
+                anthropicShell: scenario.anthropicShell,
+                userName: user
             )
         }
     }
@@ -120,7 +146,9 @@ struct ScenarioLauncherView: View {
             autoSendFollowUps: [],
             authToken: nil,
             enableTTS: false,
-            enableVoice: false
+            enableVoice: false,
+            anthropicShell: false,
+            userName: nil
         )
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import AgentClient
 import AgentFrontend
 
@@ -31,6 +32,15 @@ struct HostConfiguration: Hashable {
     /// Show the mic button in the input row and route SFSpeech results
     /// into the text field (mirrors `ChatWidgetConfig.enableVoice`).
     let enableVoice: Bool
+    /// Drives the warm-dark shell: rounded composer card, greeting
+    /// empty state, slide-in sidebar. When `false` the scenario uses
+    /// the legacy classic composer + plain empty state so we can A/B
+    /// old vs new.
+    let anthropicShell: Bool
+    /// Optional first name woven into the greeting (e.g. "Chris" →
+    /// "Good afternoon, Chris"). Defaults to the `USER_NAME` env var,
+    /// then falls back to nothing.
+    let userName: String?
 
     /// True when the launch environment looks like it came from XCUITest.
     /// We key off `AUTO_SEND_PROMPT` specifically: that's only ever set by
@@ -95,7 +105,9 @@ struct HostConfiguration: Hashable {
             autoSendFollowUps: parseFollowUps(env["AUTO_SEND_FOLLOW_UPS"]),
             authToken: token,
             enableTTS: (env["ENABLE_TTS"] ?? "false").lowercased() == "true",
-            enableVoice: (env["ENABLE_VOICE"] ?? "false").lowercased() == "true"
+            enableVoice: (env["ENABLE_VOICE"] ?? "false").lowercased() == "true",
+            anthropicShell: (env["ANTHROPIC_SHELL"] ?? "false").lowercased() == "true",
+            userName: (env["USER_NAME"]).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -130,8 +142,29 @@ struct HostConfiguration: Hashable {
         cfg.showTTSButton = enableTTS
         cfg.enableTTS = enableTTS
         cfg.enableVoice = enableVoice
-        cfg.enableFiles = false
+        cfg.enableFiles = true
         cfg.followStreamingEnabled = true
+        if anthropicShell {
+            // Library default already enables the warm-dark appearance,
+            // greeting, and sidebar — just personalise so the demo
+            // picks up the user's name and shows the S'Ai placeholder.
+            cfg.appearance.composerStyle = .anthropic
+            cfg.appearance.modelPillLabel = "S'Ai"
+            cfg.greeting.enabled = true
+            cfg.greeting.userName = userName
+            cfg.sidebar.enabled = true
+            cfg.sidebar.footerInitials = userName?.prefix(1).uppercased()
+            cfg.sidebar.footerCaption = userName
+            cfg.placeholder = "Chat with S'Ai"
+        } else {
+            // Opt out of the new baseline so the legacy scenarios keep
+            // their original look while we iterate on the redesign.
+            cfg.appearance = .classic
+            cfg.greeting.enabled = false
+            cfg.sidebar.enabled = false
+            cfg.placeholder = "Type your message..."
+            cfg.primaryColor = Color(hex: "#4a6b8e")
+        }
         if let token = authToken {
             cfg.authStrategy = .token
             cfg.authToken = token

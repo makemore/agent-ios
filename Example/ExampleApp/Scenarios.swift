@@ -26,9 +26,51 @@ struct Scenario: Identifiable, Hashable {
     var enableTTS: Bool = false
     /// Show the mic button so SFSpeech results land in the input field.
     var enableVoice: Bool = false
+    /// Render the warm-dark shell (rounded composer card, greeting
+    /// empty state, slide-in sidebar). Defaults to `false` so the
+    /// existing scenarios keep their original look; the "S'Ai home"
+    /// scenario flips this on.
+    var anthropicShell: Bool = false
+    /// Optional first name for the greeting. The launcher falls back to
+    /// `USER_NAME` from the environment when this is nil so a developer
+    /// can personalise the demo without editing source.
+    var userName: String? = nil
 }
 
 extension ScenarioLauncherView {
+    /// Warm-dark baseline scenarios. Both flip `anthropicShell` on so
+    /// the host opts into the full new look (warm-dark background,
+    /// rounded composer, greeting, sidebar). The empty-chat entry
+    /// shows the idle home state.
+    static let anthropicShellScenarios: [Scenario] = [
+        Scenario(
+            id: "sai_home_empty",
+            title: "S'Ai home (empty chat)",
+            subtitle: "Greeting + rounded composer + sidebar, idle empty state",
+            kind: .stub(fixture: "simple_streaming"),
+            prompt: "",
+            followUps: [],
+            manual: true,
+            enableTTS: false,
+            enableVoice: true,
+            anthropicShell: true
+        ),
+        Scenario(
+            id: "sai_home_streaming",
+            title: "S'Ai home (streaming demo)",
+            subtitle: "Same shell, auto-sends a prompt so you can see the chat layout",
+            kind: .stub(fixture: "demo_big_conversation"),
+            prompt: "Plan me a 3-day trip to Tokyo",
+            followUps: [
+                HostConfiguration.FollowUp(prompt: "Yes, please book it.", delayMs: 1500)
+            ],
+            manual: false,
+            enableTTS: false,
+            enableVoice: true,
+            anthropicShell: true
+        ),
+    ]
+
     /// Mirrors the stub-server XCUITest scenarios in `ChatStreamingUITests`.
     /// Keep this list in sync if a new fixture is added — the in-app
     /// launcher and the test suite are intentionally one-to-one.

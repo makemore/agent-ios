@@ -7,7 +7,11 @@ import AgentClient
 public struct ChatWidgetView: View {
     @ObservedObject var viewModel: ChatViewModel
     let config: ChatWidgetConfig
+    /// APIClient is now retained so the sidebar's recents list can fetch
+    /// `loadConversations()` without the host having to pass a second copy.
+    let apiClient: APIClient?
     @State private var showSystemPicker = false
+    @State private var showSidebar = false
     /// TTS controller, created lazily on first appear so the view can be
     /// previewed without a backend. Bound to the viewModel so SSE events
     /// flow into voice playback.
@@ -21,6 +25,7 @@ public struct ChatWidgetView: View {
     ) {
         self.viewModel = viewModel
         self.config = config
+        self.apiClient = apiClient
         // Build the controller up front: ``StateObject`` only honours its
         // initial value on first creation, so we have to resolve the
         // provider here. Host apps that need a custom provider pass one
@@ -38,7 +43,40 @@ public struct ChatWidgetView: View {
     }
 
     public var body: some View {
+        ZStack(alignment: .leading) {
+            mainStack
+            if config.sidebar.enabled && showSidebar {
+                ChatSidebarView(
+                    viewModel: viewModel,
+                    config: config,
+                    apiClient: apiClient,
+                    onDismiss: { withAnimation(.easeOut(duration: 0.2)) { showSidebar = false } },
+                    onNewChat: {
+                        viewModel.clearMessages()
+                        withAnimation(.easeOut(duration: 0.2)) { showSidebar = false }
+                    },
+                    onSelectConversation: { conv in
+                        Task { await viewModel.loadConversation(conv.id) }
+                        withAnimation(.easeOut(duration: 0.2)) { showSidebar = false }
+                    }
+                )
+                .transition(.move(edge: .leading))
+                .zIndex(2)
+            }
+        }
+        .background(config.appearance.background.ignoresSafeArea())
+    }
+
+    private var mainStack: some View {
         VStack(spacing: 0) {
+            // Top bar with sidebar toggle + brand affordance — only when
+            // the sidebar is enabled. Hosts that don't want the bar can
+            // set `config.sidebar.enabled = false` and supply their own
+            // navigation chrome.
+            if config.sidebar.enabled {
+                anthropicTopBar
+            }
+
             // Messages list
             MessageListView(
                 messages: viewModel.messages,
@@ -166,6 +204,41 @@ public struct ChatWidgetView: View {
     private var ttsIconName: String {
         if !voiceController.isEnabled { return "speaker.slash.fill" }
         return voiceController.isSpeaking ? "speaker.wave.3.fill" : "speaker.wave.2.fill"
+    }
+
+    /// Top bar shown when `config.sidebar.enabled` is `true`. Left
+    /// circular button opens the sidebar; right circular button starts
+    /// a fresh conversation. Both are drawn on the surface colour so
+    /// they pop against the warm-dark background without an outline.
+    private var anthropicTopBar: some View {
+        HStack {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) { showSidebar = true }
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.body.weight(.medium))
+                    .foregroundColor(config.appearance.textPrimary)
+                    .frame(width: 40, height: 40)
+                    .background(config.appearance.surface)
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Open conversations")
+            Spacer()
+            Button {
+                viewModel.clearMessages()
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.body.weight(.medium))
+                    .foregroundColor(config.appearance.textPrimary)
+                    .frame(width: 40, height: 40)
+                    .background(config.appearance.surface)
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("New conversation")
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 }
 

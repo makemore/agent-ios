@@ -37,7 +37,22 @@ public struct InputView: View {
 
     @State private var inputText: String = ""
     @State private var attachedFiles: [FileAttachment] = []
-    @State private var showFilePicker: Bool = false
+    /// Drives the composer's sheet presentation. `.addToChat` shows
+    /// the "Add to Chat" panel from the `+` button; `.filePicker` is
+    /// chained when the user picks "Add files" inside that panel.
+    /// SwiftUI can only present one sheet per view at a time so the
+    /// two are routed through a single `.sheet(item:)` modifier.
+    @State private var activeSheet: ActiveSheet? = nil
+    /// Latched on when the user taps "Add files" inside the AddToChat
+    /// sheet so the picker is presented in the AddToChat sheet's
+    /// `onDismiss` callback (sequential sheets otherwise race).
+    @State private var pendingFilePicker: Bool = false
+
+    private enum ActiveSheet: Identifiable {
+        case addToChat
+        case filePicker
+        var id: Int { hashValue }
+    }
     @State private var isRecording: Bool = false
     @State private var speechRecognizer = SFSpeechRecognizer()
     @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -98,113 +113,37 @@ public struct InputView: View {
     private let bargeInNovelWordsRequired: Int = 2
     
     public var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            
-            // Attached files preview
-            if !attachedFiles.isEmpty {
-                attachedFilesView
+        Group {
+            switch config.appearance.composerStyle {
+            case .classic:    classicComposer
+            case .anthropic:  anthropicComposer
             }
-            
-            // Input row — center alignment keeps icons visually on the text
-            // baseline of the pill even though the TextField's padding makes
-            // the pill taller than the icons. Matches iMessage/WhatsApp behaviour.
-            HStack(alignment: .center, spacing: 8) {
-                // File attachment button
-                if config.enableFiles {
-                    Button(action: { showFilePicker = true }) {
-                        Image(systemName: "paperclip")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                // Voice input button (with countdown ring when auto-send armed)
-                if config.enableVoice {
-                    Button(action: { toggleRecording() }) {
-                        ZStack {
-                            if autoSendEnabled && isRecording && countdownProgress > 0 {
-                                Circle()
-                                    .trim(from: 0, to: countdownProgress)
-                                    .stroke(Color.red, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                                    .rotationEffect(.degrees(-90))
-                                    .frame(width: 26, height: 26)
-                                    .animation(.linear(duration: 0.1), value: countdownProgress)
-                            }
-                            Image(systemName: isRecording ? "mic.fill" : "mic")
-                                .font(.title3)
-                                .foregroundColor(isRecording ? .red : .secondary)
-                        }
-                    }
-                }
-
-                // Auto-send (hands-free) toggle — only meaningful with mic + TTS
-                if config.enableVoice {
-                    Button(action: { toggleAutoSend() }) {
-                        Image(systemName: autoSendEnabled
-                              ? "arrow.triangle.2.circlepath.circle.fill"
-                              : "arrow.triangle.2.circlepath.circle")
-                            .font(.title3)
-                            .foregroundColor(autoSendEnabled ? config.primaryColor : .secondary)
-                    }
-                    .accessibilityLabel(autoSendEnabled
-                                        ? "Disable hands-free auto-send"
-                                        : "Enable hands-free auto-send")
-                }
-                
-                // Text input
-                TextField(config.placeholder, text: $inputText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...5)
-                    .padding(10)
-                    .background(PlatformColors.systemGray6)
-                    .cornerRadius(20)
-                
-                // Send / Cancel-run / Stop-agent button. Three states:
-                //  • run in flight (isLoading)        → cancel the run
-                //  • agent is speaking (TTS playback) → stop the agent
-                //                                        (user-initiated
-                //                                        barge-in)
-                //  • otherwise                        → send the message
-                if isLoading {
-                    Button(action: onCancel) {
-                        Image(systemName: "stop.fill")
-                            .font(.title3)
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Color(hex: "#a85d5d"))
-                            .clipShape(Circle())
-                    }
-                    .accessibilityLabel("Cancel run")
-                } else if isAgentSpeaking {
-                    Button(action: userStopAgent) {
-                        Image(systemName: "stop.fill")
-                            .font(.title3)
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Color(hex: "#a85d5d"))
-                            .clipShape(Circle())
-                    }
-                    .accessibilityLabel("Stop speaking")
-                } else {
-                    Button(action: sendMessage) {
-                        Image(systemName: "arrow.up")
-                            .font(.title3)
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .background(canSend ? config.primaryColor : Color.gray)
-                            .clipShape(Circle())
-                    }
-                    .disabled(!canSend)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
         }
-        .background(PlatformColors.systemBackground)
-        .sheet(isPresented: $showFilePicker) {
-            FilePickerView { files in
-                attachedFiles.append(contentsOf: files)
+        .sheet(item: $activeSheet, onDismiss: {
+            // If "Add files" was tapped inside the AddToChat sheet,
+            // hand off to the file picker once SwiftUI has fully
+            // dismissed the first sheet. Without the brief delay iOS
+            // swallows the second presentation.
+            if pendingFilePicker {
+                pendingFilePicker = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    activeSheet = .filePicker
+                }
+            }
+        }) { sheet in
+            switch sheet {
+            case .addToChat:
+                AddToChatSheet(
+                    config: config,
+                    onAddFiles: {
+                        pendingFilePicker = true
+                        activeSheet = nil
+                    }
+                )
+            case .filePicker:
+                FilePickerView { files in
+                    attachedFiles.append(contentsOf: files)
+                }
             }
         }
         // Hands-free loop: when the agent finishes speaking after a
@@ -670,6 +609,172 @@ public struct InputView: View {
         return String(stripped).split(whereSeparator: { $0.isWhitespace }).map { String($0) }
     }
     
+    // MARK: - Composer layouts
+    //
+    // Two flavours selected by `config.appearance.composerStyle`.
+    // `classicComposer` is the original single-row pill input preserved
+    // verbatim from the pre-0.8 layout; `anthropicComposer` is the new
+    // rounded-card layout with text on top and controls below. Both
+    // share the same send/cancel/voice handlers above so behaviour
+    // (voice loop, barge-in, auto-send) is identical across styles.
+
+    @ViewBuilder
+    private var classicComposer: some View {
+        VStack(spacing: 0) {
+            Divider()
+
+            if !attachedFiles.isEmpty {
+                attachedFilesView
+            }
+
+            HStack(alignment: .center, spacing: 8) {
+                if config.enableFiles {
+                    Button(action: { activeSheet = .addToChat }) {
+                        Image(systemName: "paperclip")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if config.enableVoice {
+                    Button(action: { toggleRecording() }) {
+                        ZStack {
+                            if autoSendEnabled && isRecording && countdownProgress > 0 {
+                                Circle()
+                                    .trim(from: 0, to: countdownProgress)
+                                    .stroke(Color.red, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                    .rotationEffect(.degrees(-90))
+                                    .frame(width: 26, height: 26)
+                                    .animation(.linear(duration: 0.1), value: countdownProgress)
+                            }
+                            Image(systemName: isRecording ? "mic.fill" : "mic")
+                                .font(.title3)
+                                .foregroundColor(isRecording ? .red : .secondary)
+                        }
+                    }
+                }
+
+                if config.enableVoice {
+                    Button(action: { toggleAutoSend() }) {
+                        Image(systemName: autoSendEnabled
+                              ? "arrow.triangle.2.circlepath.circle.fill"
+                              : "arrow.triangle.2.circlepath.circle")
+                            .font(.title3)
+                            .foregroundColor(autoSendEnabled ? config.primaryColor : .secondary)
+                    }
+                    .accessibilityLabel(autoSendEnabled
+                                        ? "Disable hands-free auto-send"
+                                        : "Enable hands-free auto-send")
+                }
+
+                TextField(config.placeholder, text: $inputText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...5)
+                    .padding(10)
+                    .background(PlatformColors.systemGray6)
+                    .cornerRadius(20)
+
+                rightActionButton
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+        .background(PlatformColors.systemBackground)
+    }
+
+    /// Two-row composer card. Row 1 is the text field alone; row 2
+    /// carries the attach button, an optional model pill, the
+    /// auto-send / mic icons, and the prominent right-hand send
+    /// button. All sit on a single rounded surface inset from the
+    /// screen edges.
+    @ViewBuilder
+    private var anthropicComposer: some View {
+        VStack(spacing: 8) {
+            if !attachedFiles.isEmpty {
+                attachedFilesView
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                TextField(
+                    config.placeholder,
+                    text: $inputText,
+                    axis: .vertical
+                )
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...6)
+                    .font(.body)
+                    .foregroundColor(config.appearance.textPrimary)
+                    .tint(config.appearance.accent)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
+
+                anthropicControlRow
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: config.appearance.composerCornerRadius)
+                    .fill(config.appearance.surface)
+            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+        }
+        .background(config.appearance.background)
+    }
+
+    /// Bottom row of the Anthropic composer card.
+    @ViewBuilder
+    private var anthropicControlRow: some View {
+        HStack(spacing: 8) {
+            if config.enableFiles {
+                circularIconButton(systemName: "plus") {
+                    activeSheet = .addToChat
+                }
+                .accessibilityLabel("Add to chat")
+            }
+            if let label = config.appearance.modelPillLabel, !label.isEmpty {
+                modelPill(label: label)
+            }
+            Spacer(minLength: 0)
+            if config.enableVoice {
+                Button(action: { toggleAutoSend() }) {
+                    Image(systemName: autoSendEnabled
+                          ? "arrow.triangle.2.circlepath.circle.fill"
+                          : "arrow.triangle.2.circlepath.circle")
+                        .font(.title3)
+                        .foregroundColor(autoSendEnabled
+                                         ? config.appearance.accent
+                                         : config.appearance.textSecondary)
+                        .frame(width: 36, height: 36)
+                }
+                .accessibilityLabel(autoSendEnabled
+                                    ? "Disable hands-free auto-send"
+                                    : "Enable hands-free auto-send")
+            }
+            if config.enableVoice {
+                Button(action: { toggleRecording() }) {
+                    ZStack {
+                        if autoSendEnabled && isRecording && countdownProgress > 0 {
+                            Circle()
+                                .trim(from: 0, to: countdownProgress)
+                                .stroke(Color.red,
+                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                                .frame(width: 30, height: 30)
+                                .animation(.linear(duration: 0.1), value: countdownProgress)
+                        }
+                        Image(systemName: isRecording ? "mic.fill" : "mic")
+                            .font(.title3)
+                            .foregroundColor(isRecording
+                                             ? .red
+                                             : config.appearance.textSecondary)
+                    }
+                    .frame(width: 36, height: 36)
+                }
+            }
+            rightActionButton
+        }
+    }
+
     @ViewBuilder
     private var attachedFilesView: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -699,6 +804,81 @@ public struct InputView: View {
     
     private func removeFile(_ file: FileAttachment) {
         attachedFiles.removeAll { $0.id == file.id }
+    }
+
+    // MARK: - Shared composer atoms
+
+    /// Right-hand action button shared by both composer layouts. Three
+    /// states: cancel (run in flight), stop (TTS playing), send. Sizing
+    /// and corner radius are constant across styles so the muscle
+    /// memory of "tap bottom-right" is preserved.
+    @ViewBuilder
+    private var rightActionButton: some View {
+        if isLoading {
+            Button(action: onCancel) {
+                Image(systemName: "stop.fill")
+                    .font(.title3)
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color(hex: "#a85d5d"))
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Cancel run")
+        } else if isAgentSpeaking {
+            Button(action: userStopAgent) {
+                Image(systemName: "stop.fill")
+                    .font(.title3)
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color(hex: "#a85d5d"))
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Stop speaking")
+        } else {
+            Button(action: sendMessage) {
+                Image(systemName: "arrow.up")
+                    .font(.title3)
+                    .foregroundColor(canSend ? config.appearance.textOnAccent : .white)
+                    .frame(width: 36, height: 36)
+                    .background(canSend ? config.appearance.accent : Color.gray)
+                    .clipShape(Circle())
+            }
+            .disabled(!canSend)
+        }
+    }
+
+    /// Compact circular icon button used for the `+` (attach) affordance
+    /// and any future symmetrical controls on the Anthropic composer's
+    /// bottom row.
+    @ViewBuilder
+    private func circularIconButton(systemName: String,
+                                    action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.title3)
+                .foregroundColor(config.appearance.textSecondary)
+                .frame(width: 36, height: 36)
+        }
+    }
+
+    /// Pill button used for the model name. Visual only — the action
+    /// is a no-op until a host wires it to a model picker. Capsule
+    /// with text and a downward chevron.
+    @ViewBuilder
+    private func modelPill(label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+            Image(systemName: "chevron.down")
+                .font(.caption2)
+        }
+        .foregroundColor(config.appearance.textPrimary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule().fill(config.appearance.surfaceElevated)
+        )
+        .accessibilityLabel("Model: \(label)")
     }
 }
 

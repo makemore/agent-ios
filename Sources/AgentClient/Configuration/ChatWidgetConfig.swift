@@ -27,10 +27,28 @@ public struct ChatWidgetConfig {
     
     /// Empty state heading
     public var emptyStateTitle: String
-    
+
     /// Empty state description
     public var emptyStateMessage: String
-    
+
+    // MARK: - Appearance / Branding
+
+    /// Visual tokens (palette, typography, composer style, brand mark).
+    /// Defaults to `ChatAppearance.anthropic` so the bundled widget
+    /// renders the warm-dark look out of the box. Set to `.classic` to
+    /// restore the pre-0.8 appearance.
+    public var appearance: ChatAppearance
+
+    /// Empty-state greeting (e.g. "Good afternoon, Chris"). Disabled
+    /// by default so direct consumers of `MessageListView` see no
+    /// change; the bundled `ChatWidgetView` flips it on through
+    /// `make(...)` and the convenience initialiser.
+    public var greeting: ChatGreetingConfig
+
+    /// Slide-in conversation sidebar. Disabled by default for the
+    /// same reason as `greeting`.
+    public var sidebar: ChatSidebarConfig
+
     // MARK: - Feature Flags
 
     /// Show debug mode toggle button in the UI
@@ -178,10 +196,16 @@ public struct ChatWidgetConfig {
         self.agentKey = agentKey
         self.title = "Chat Assistant"
         self.subtitle = "How can we help you today?"
-        self.primaryColor = Color(hex: "#4a6b8e")
-        self.placeholder = "Type your message..."
+        self.primaryColor = Color(hex: "#D97757")
+        self.placeholder = "How can I help you today?"
         self.emptyStateTitle = "Start a Conversation"
         self.emptyStateMessage = "Send a message to get started."
+        self.appearance = .anthropic
+        // Library default is the full warm-dark baseline: greeting
+        // empty state + slide-in sidebar both on. Host apps can opt
+        // out per-feature without touching the appearance.
+        self.greeting = ChatGreetingConfig(enabled: true)
+        self.sidebar = ChatSidebarConfig(enabled: true)
         self.showDebugButton = false
         self.enableDebugMode = false
         self.showToolMessages = false
