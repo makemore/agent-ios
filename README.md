@@ -208,6 +208,18 @@ Sources/AgentFrontend/
 
 ## Changelog
 
+### 0.8.0
+
+**Warm-dark "S'Ai" shell**
+
+- **New configuration types** — `ChatAppearance` (palette, typography, composer style, brand-mark style), `ChatGreetingConfig` (time-of-day greeting + optional user name), and `ChatSidebarConfig` (slide-in drawer items, wordmark, footer). `ChatWidgetConfig` now exposes `appearance`, `greeting`, and `sidebar` properties; defaults flipped to the warm-dark baseline (`#0E0E0E` background, `#D97757` coral accent, `composerStyle = .anthropic`, greeting + sidebar enabled). Set `ChatAppearance.classic()` and `greeting.enabled = false` / `sidebar.enabled = false` to restore the pre-redesign look.
+- **`GreetingView`** — new centered empty-state view: brand starburst + system-serif `"Good {morning|afternoon|evening}, {name}"`. `MessageListView.EmptyStateView` swaps to it when `config.greeting.enabled` so direct consumers see no change unless they opt in.
+- **`ChatSidebarView`** — slide-in conversation drawer (~80% of screen width, floored at 280 pt for legibility). Header wordmark, nav rows, Recents loaded via `APIClient.loadConversations`, footer avatar + "New chat" pill wired to `ChatViewModel.clearMessages()` / `loadConversation(id:)`. Dim/blur backdrop, tap-outside to dismiss.
+- **`AnthropicTopBar` + sidebar overlay in `ChatWidgetView`** — bundled widget now mounts a top bar with a circular hamburger button (opens the sidebar) and a "+" new-chat button. When `sidebar.enabled = false` the widget renders exactly as before.
+- **`InputView` composer styles** — `ComposerStyle.anthropic` renders a two-row rounded card (text row + action row with `+` attach, model pill, mic, send circle); `ComposerStyle.classic` keeps the legacy single-row layout. Voice/STT logic is unchanged and shared between both styles.
+- **`AddToChatSheet`** — modal presented by the composer `+` / paperclip button. Camera + Recents preview tiles, action rows (Add files, Add to project, Choose style…), tool toggles, and connectors list. Re-skins automatically for hosts using `.classic`. Tapping `Add files` chains into the existing file picker.
+- **Example app** — `HostConfiguration` gains `anthropicShell`, `userName`, `enableTTS`, `enableVoice`; reads `USER_NAME` / `ANTHROPIC_SHELL` env vars. `ScenarioLauncherView` adds a "S'Ai shell (warm-dark baseline)" section with `S'Ai home (empty chat)` and `S'Ai home (streaming demo)` scenarios. Legacy scenarios explicitly opt out so they keep the classic look for A/B comparison.
+
 ### 0.7.0
 
 **Voice subsystem & Live Mic**
