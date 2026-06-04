@@ -27,6 +27,27 @@ public struct ChatAppearance {
         case systemIcon(name: String)
     }
 
+    /// How to render a sub-agent's activity while it is streaming.
+    ///
+    /// - `.pill`: hide the per-event "🔗 Delegating…" / "✓ completed" /
+    ///   sub-agent streaming bubbles. Instead show a single quiet pill
+    ///   below the message list with the current sub-agent's name and a
+    ///   head-truncated tail of its latest output, then collapse to a
+    ///   "Consulted <agent> · Xs" row in the history once the bracket
+    ///   ends. The parent orchestrator's own final reply renders below
+    ///   it as the actual answer. This is the warm-dark default and
+    ///   keeps complex multi-specialist chains feeling calm and on-task.
+    ///
+    /// - `.bubbles`: original behaviour — every `sub_agent.start` /
+    ///   `assistant.delta` / `assistant.message` / `sub_agent.end`
+    ///   appears as a separate bubble or system row, and the parent's
+    ///   re-stream of the sub-agent's answer is suppressed as an echo.
+    ///   Kept for hosts on the classic appearance.
+    public enum SubAgentActivityStyle {
+        case pill
+        case bubbles
+    }
+
     // MARK: - Surfaces
 
     /// Root background colour behind the whole widget.
@@ -77,6 +98,10 @@ public struct ChatAppearance {
     /// When `nil` the pill is hidden. Host apps drive this from their
     /// currently selected model so the composer surfaces what's active.
     public var modelPillLabel: String?
+    /// How sub-agent activity surfaces in the UI. Library default is
+    /// `.pill` so multi-specialist chains stay calm; the classic
+    /// appearance opts back into `.bubbles` for the old behaviour.
+    public var subAgentActivityStyle: SubAgentActivityStyle
 
     // MARK: - Init
 
@@ -95,7 +120,8 @@ public struct ChatAppearance {
         brandMark: BrandMark = .none,
         composerCornerRadius: CGFloat = 28,
         bubbleCornerRadius: CGFloat = 18,
-        modelPillLabel: String? = nil
+        modelPillLabel: String? = nil,
+        subAgentActivityStyle: SubAgentActivityStyle = .pill
     ) {
         self.background = background
         self.surface = surface
@@ -112,6 +138,7 @@ public struct ChatAppearance {
         self.composerCornerRadius = composerCornerRadius
         self.bubbleCornerRadius = bubbleCornerRadius
         self.modelPillLabel = modelPillLabel
+        self.subAgentActivityStyle = subAgentActivityStyle
     }
 
     /// The original library look prior to the warm-dark redesign —
@@ -133,7 +160,8 @@ public struct ChatAppearance {
             composerStyle: .classic,
             brandMark: .systemIcon(name: "bubble.left.and.bubble.right"),
             composerCornerRadius: 20,
-            bubbleCornerRadius: 16
+            bubbleCornerRadius: 16,
+            subAgentActivityStyle: .bubbles
         )
         // No-op — keeps `var` for symmetry if we add post-init tweaks.
         return a

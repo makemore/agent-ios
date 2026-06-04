@@ -91,6 +91,22 @@ public struct BlockAction: Codable, Equatable {
     public var message: String?
     public var callbackId: String?
     public var style: String?        // "primary" | "secondary"
+
+    public init(
+        type: String,
+        label: String,
+        url: String? = nil,
+        message: String? = nil,
+        callbackId: String? = nil,
+        style: String? = nil
+    ) {
+        self.type = type
+        self.label = label
+        self.url = url
+        self.message = message
+        self.callbackId = callbackId
+        self.style = style
+    }
 }
 
 // MARK: - Individual Block Types
@@ -119,6 +135,11 @@ public struct CardListBlock: Codable, Equatable {
 public struct ActionButtonsBlock: Codable, Equatable {
     public let type: String
     public var buttons: [BlockAction]
+
+    public init(type: String = "actionButtons", buttons: [BlockAction]) {
+        self.type = type
+        self.buttons = buttons
+    }
 }
 
 public struct CalloutBlock: Codable, Equatable {

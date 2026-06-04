@@ -49,6 +49,34 @@ public struct ChatWidgetConfig {
     /// same reason as `greeting`.
     public var sidebar: ChatSidebarConfig
 
+    /// Render the library's built-in top bar (hamburger + new-chat
+    /// pencil) above the message list. Set to `false` when the host
+    /// app provides its own navigation chrome; in that case the host
+    /// is responsible for surfacing equivalents (open sidebar, start
+    /// new chat) via its own UI. Default `true`.
+    ///
+    /// Note: when this is `false` there is no built-in affordance to
+    /// open the slide-in sidebar, so hosts that hide the top bar
+    /// typically also set `sidebar.enabled = false` and render their
+    /// own drawer using `ChatAppearance` tokens for cohesion.
+    public var showInternalTopBar: Bool
+
+    /// Render the pencil "new chat" button on the right of the
+    /// internal top bar. Only meaningful when `showInternalTopBar`
+    /// is `true`. Set to `false` so the host owns the "new chat"
+    /// placement entirely — its own button should call
+    /// `viewModel.clearMessages()`. Default `true`.
+    public var showNewChatButton: Bool
+
+    /// Render the S'Ai presence orb as a small avatar at the leading
+    /// edge of each assistant message. The latest assistant message
+    /// glows softly while TTS playback is in flight. Set to `false`
+    /// when the host wants to place the orb in its own chrome (top
+    /// bar, splash, etc.) using the public `PresenceOrbView` directly,
+    /// or when no agent-identity affordance is wanted in the
+    /// scrollback at all. Default `true`.
+    public var showPresenceOrb: Bool
+
     // MARK: - Feature Flags
 
     /// Show debug mode toggle button in the UI
@@ -168,9 +196,20 @@ public struct ChatWidgetConfig {
     
     /// TTS proxy URL for secure backend calls
     public var ttsProxyUrl: String?
-    
+
     /// ElevenLabs API key (direct mode only)
     public var elevenLabsApiKey: String?
+
+    /// Voice identifier passed to the configured `TTSProvider`. For the
+    /// ElevenLabs proxy this is the ElevenLabs voice id (e.g. a 20-char
+    /// alphanumeric string from https://elevenlabs.io/app/voice-library).
+    /// For ``AVSpeechTTSProvider`` it's a `AVSpeechSynthesisVoice`
+    /// identifier. When nil, the provider's own default voice is used.
+    public var voiceId: String?
+
+    /// Model id for the TTS provider (e.g. ElevenLabs model such as
+    /// `eleven_turbo_v2_5`). nil falls back to the provider/proxy default.
+    public var voiceModelId: String?
     
     // MARK: - Callbacks
     
@@ -185,6 +224,37 @@ public struct ChatWidgetConfig {
     /// to manage orientation locks or other chrome. Orientation handling is intentionally
     /// left to the host.
     public var onVideoFullScreenChange: ((Bool) -> Void)?
+
+    /// Fires exactly once per conversation lifetime, the moment the
+    /// runtime mints a fresh `conversationId` (i.e. the first
+    /// `createRun` response carries one and `messages` was empty).
+    /// Does **not** fire when an existing conversation is restored
+    /// from local storage or loaded via `loadConversation(_:)`. Useful
+    /// for analytics, first-launch coach marks, or kicking off
+    /// host-side flows that should bind to a stable conversation id.
+    public var onConversationStart: ((String) -> Void)?
+
+    /// Fires exactly once per conversation lifetime, when the first
+    /// assistant message becomes visible in `messages` — whether it
+    /// arrives via streaming deltas, a non-streaming `assistant.message`
+    /// snap, or a host call to `appendAssistantMessage(_:)`. Suppressed
+    /// when an existing conversation already containing assistant
+    /// messages is restored. Useful for dismissing splash screens or
+    /// chaining onboarding steps once S'Ai has actually spoken.
+    public var onFirstAssistantMessage: ((String) -> Void)?
+
+    /// Called inside ``ChatWidgetView.task`` the moment the
+    /// internal ``VoiceController`` is attached to the supplied
+    /// ``ChatViewModel``. Useful when the host wants to play a
+    /// scripted opening turn (TTS + content blocks) and needs to
+    /// know voice is live before pushing deltas — polling the VM
+    /// from the host races the widget mount and is unreliable on
+    /// flows where the chat surface isn't visible at trigger time.
+    ///
+    /// Fires exactly once per widget mount. A `resetToFreshConversation`
+    /// or any other action that swaps the VM will cause the widget
+    /// to remount and the callback to fire again with the new VM.
+    public var onVoiceControllerReady: ((ChatViewModel) -> Void)?
     
     // MARK: - Initialization
     
@@ -206,6 +276,9 @@ public struct ChatWidgetConfig {
         // out per-feature without touching the appearance.
         self.greeting = ChatGreetingConfig(enabled: true)
         self.sidebar = ChatSidebarConfig(enabled: true)
+        self.showInternalTopBar = true
+        self.showNewChatButton = true
+        self.showPresenceOrb = true
         self.showDebugButton = false
         self.enableDebugMode = false
         self.showToolMessages = false
@@ -238,9 +311,14 @@ public struct ChatWidgetConfig {
         self.defaultJourneyType = "general"
         self.ttsProxyUrl = nil
         self.elevenLabsApiKey = nil
+        self.voiceId = nil
+        self.voiceModelId = nil
         self.onEvent = nil
         self.onAuthError = nil
         self.onVideoFullScreenChange = nil
+        self.onConversationStart = nil
+        self.onFirstAssistantMessage = nil
+        self.onVoiceControllerReady = nil
     }
 }
 

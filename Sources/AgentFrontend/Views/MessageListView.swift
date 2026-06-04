@@ -110,6 +110,50 @@ public struct MessageListView: View {
     let onLoadMore: () -> Void
     let onRetry: (Int) -> Void
     let onEdit: (Int, String) -> Void
+    /// Live sub-agent activity from the view model. When non-empty in
+    /// pill mode the list renders a quiet activity pill in place of the
+    /// generic "Thinking..." spinner. Defaults to an empty state so the
+    /// existing `MessageListView(...)` call sites and harness keep
+    /// working unchanged.
+    let activity: SubAgentActivityState
+    /// `true` when the agent's TTS playback is in flight. Propagated
+    /// down to the latest assistant `MessageView` so its avatar can
+    /// glow without recomputing per-row.
+    let agentIsSpeaking: Bool
+    /// Fired when the user taps a ``BlockAction`` inside any rendered
+    /// ``ContentBlock`` (e.g. an action-button row). The list itself
+    /// has no opinion on what an action should do; ``ChatWidgetView``
+    /// supplies a default that auto-sends `type == "message"` actions
+    /// as a user turn, opens `type == "link"` URLs, and forwards
+    /// everything else to the host. Optional so the existing
+    /// preview/harness call site keeps compiling.
+    let onBlockAction: ((BlockAction) -> Void)?
+
+    public init(
+        messages: [Message],
+        isLoading: Bool,
+        hasMoreMessages: Bool,
+        loadingMoreMessages: Bool,
+        config: ChatWidgetConfig,
+        onLoadMore: @escaping () -> Void,
+        onRetry: @escaping (Int) -> Void,
+        onEdit: @escaping (Int, String) -> Void,
+        activity: SubAgentActivityState = SubAgentActivityState(),
+        agentIsSpeaking: Bool = false,
+        onBlockAction: ((BlockAction) -> Void)? = nil
+    ) {
+        self.messages = messages
+        self.isLoading = isLoading
+        self.hasMoreMessages = hasMoreMessages
+        self.loadingMoreMessages = loadingMoreMessages
+        self.config = config
+        self.onLoadMore = onLoadMore
+        self.onRetry = onRetry
+        self.onEdit = onEdit
+        self.activity = activity
+        self.agentIsSpeaking = agentIsSpeaking
+        self.onBlockAction = onBlockAction
+    }
 
     @State private var editingIndex: Int?
     @State private var editText: String = ""
@@ -343,6 +387,19 @@ public struct MessageListView: View {
                 }
 
                 // Messages
+                // Resolve once per render: the id of the most recent
+                // assistant text message so only its avatar gets the
+                // speaking-halo treatment. Skips tool/system/contentBlock
+                // rows so the glow always lands on a real reply.
+                let latestAssistantId: String? = messages.last(where: {
+                    $0.role == .assistant
+                        && $0.type != .toolCall
+                        && $0.type != .toolResult
+                        && $0.type != .subAgentStart
+                        && $0.type != .subAgentEnd
+                        && $0.type != .agentContext
+                        && $0.type != .contentBlocks
+                })?.id
                 ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                     let isToolMsg = message.type == .toolCall
                         || message.type == .toolResult
@@ -371,7 +428,11 @@ public struct MessageListView: View {
                             onEdit: message.role == .user ? {
                                 editText = message.content
                                 editingIndex = index
-                            } : nil
+                            } : nil,
+                            showAgentAvatar: config.showPresenceOrb,
+                            agentAvatarSpeaking: agentIsSpeaking
+                                && message.id == latestAssistantId,
+                            onBlockAction: onBlockAction
                         )
                         .id(message.id)
                     }
@@ -383,7 +444,21 @@ public struct MessageListView: View {
                 // area transition and produce a visible layout bleed. The
                 // parent's `.animation(nil, value: isLoading)` (below) further
                 // suppresses any implicit insert animation.
-                if isLoading {
+                //
+                // Pill mode + active sub-agent → render the activity pill in
+                // place of the generic spinner so the user sees which
+                // specialist is running and a tail of its narration. Falls
+                // back to the spinner whenever the bracket isn't open (e.g.
+                // the parent itself is composing the final reply).
+                if activity.isActive
+                    && config.appearance.subAgentActivityStyle == .pill {
+                    SubAgentActivityPillView(
+                        activity: activity,
+                        appearance: config.appearance
+                    )
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 6)
+                } else if isLoading {
                     HStack {
                         ProgressView().progressViewStyle(CircularProgressViewStyle())
                         Text("Thinking...")

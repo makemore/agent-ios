@@ -20,19 +20,44 @@ public struct InputView: View {
     let voiceController: VoiceController?
     let onSend: (String, [FileAttachment]) -> Void
     let onCancel: () -> Void
+    /// Invoked when the user taps the model pill in the anthropic
+    /// composer. Optional so existing call sites (and the classic
+    /// composer, which doesn't render a pill) keep working unchanged.
+    /// Bundled hosts wire this to present `ModelOptionsSheet`.
+    let onModelPillTap: (() -> Void)?
+    /// Optional dynamic label for the model pill. When non-nil this
+    /// wins over `config.appearance.modelPillLabel`, letting hosts
+    /// reflect the actively-selected model (e.g. "Claude Opus 4.7")
+    /// as the user picks one in `ModelOptionsSheet`. When `nil` the
+    /// static appearance label is used — preserving the existing
+    /// behaviour for hosts that don't wire the picker.
+    let modelPillLabelOverride: String?
+    /// Optional view model used by `AddToChatSheet` to bind its
+    /// behaviour toggles (response style, tool access, research, web
+    /// search) and to surface recent conversations. Optional so
+    /// `InputView` retains its "headless" usage in previews and hosts
+    /// that don't pipe a `ChatViewModel` through. When `nil` the sheet
+    /// falls back to local stub state.
+    let viewModel: ChatViewModel?
 
     public init(config: ChatWidgetConfig,
                 isLoading: Bool,
                 isAgentSpeaking: Bool = false,
                 voiceController: VoiceController? = nil,
                 onSend: @escaping (String, [FileAttachment]) -> Void,
-                onCancel: @escaping () -> Void) {
+                onCancel: @escaping () -> Void,
+                onModelPillTap: (() -> Void)? = nil,
+                modelPillLabelOverride: String? = nil,
+                viewModel: ChatViewModel? = nil) {
         self.config = config
         self.isLoading = isLoading
         self.isAgentSpeaking = isAgentSpeaking
         self.voiceController = voiceController
         self.onSend = onSend
         self.onCancel = onCancel
+        self.onModelPillTap = onModelPillTap
+        self.modelPillLabelOverride = modelPillLabelOverride
+        self.viewModel = viewModel
     }
 
     @State private var inputText: String = ""
@@ -135,9 +160,15 @@ public struct InputView: View {
             case .addToChat:
                 AddToChatSheet(
                     config: config,
+                    viewModel: viewModel,
                     onAddFiles: {
                         pendingFilePicker = true
                         activeSheet = nil
+                    },
+                    onCaptureImage: { image in
+                        if let attachment = makeAttachment(from: image) {
+                            attachedFiles.append(attachment)
+                        }
                     }
                 )
             case .filePicker:
@@ -165,6 +196,21 @@ public struct InputView: View {
     private var canSend: Bool {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
     }
+
+    #if canImport(UIKit)
+    /// Convert a `UIImage` captured by the camera tile into a
+    /// `FileAttachment` so it flows through the same upload pipeline as
+    /// files picked from the document browser. JPEG @ 0.9 quality is a
+    /// sensible default for chat-attached photos and keeps payloads
+    /// manageable without visible quality loss.
+    private func makeAttachment(from image: UIImage) -> FileAttachment? {
+        guard let data = image.jpegData(compressionQuality: 0.9) else { return nil }
+        let name = "camera-\(Int(Date().timeIntervalSince1970)).jpg"
+        return FileAttachment(name: name, size: data.count, type: "image/jpeg", data: data)
+    }
+    #else
+    private func makeAttachment(from image: Any) -> FileAttachment? { nil }
+    #endif
     
     private func sendMessage() {
         guard canSend else { return }
@@ -731,7 +777,11 @@ public struct InputView: View {
                 }
                 .accessibilityLabel("Add to chat")
             }
-            if let label = config.appearance.modelPillLabel, !label.isEmpty {
+            // Override (dynamic selection from the model picker) wins
+            // over the static appearance label so the pill always
+            // reflects the model the next turn will actually use.
+            if let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
+               !label.isEmpty {
                 modelPill(label: label)
             }
             Spacer(minLength: 0)
@@ -866,7 +916,7 @@ public struct InputView: View {
     /// with text and a downward chevron.
     @ViewBuilder
     private func modelPill(label: String) -> some View {
-        HStack(spacing: 4) {
+        let pill = HStack(spacing: 4) {
             Text(label)
                 .font(.subheadline.weight(.medium))
             Image(systemName: "chevron.down")
@@ -878,7 +928,18 @@ public struct InputView: View {
         .background(
             Capsule().fill(config.appearance.surfaceElevated)
         )
-        .accessibilityLabel("Model: \(label)")
+
+        if let onTap = onModelPillTap {
+            // Tap opens `ModelOptionsSheet` (wired by the host). Use a
+            // plain button style so the capsule's existing fill renders
+            // without iOS's default button chrome.
+            Button(action: onTap) { pill }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Model: \(label) — open model options")
+                .accessibilityHint("Toggles extended thinking and verbose multi-agent display.")
+        } else {
+            pill.accessibilityLabel("Model: \(label)")
+        }
     }
 }
 

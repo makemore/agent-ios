@@ -156,6 +156,10 @@ struct HostConfiguration: Hashable {
             cfg.sidebar.footerInitials = userName?.prefix(1).uppercased()
             cfg.sidebar.footerCaption = userName
             cfg.placeholder = "Chat with S'Ai"
+            // S'Ai's branded ElevenLabs voice. Used by the voice proxy
+            // when `enableTTS` is on; ignored otherwise. The proxy still
+            // gets to override per-emotion / per-request via the body.
+            cfg.voiceId = "qWwVaTG9JajvxM1YzeLa"
         } else {
             // Opt out of the new baseline so the legacy scenarios keep
             // their original look while we iterate on the redesign.

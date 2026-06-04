@@ -19,25 +19,55 @@ The library boundary is intentionally generic: AgentClient owns agent stream eve
 
 ## Installation
 
-### Local Package (recommended for development)
+The library is distributed via **Swift Package Manager** from the public
+`makemore/agent-ios` repository, pinned to a version tag — **no token or
+credentials required**. Use the latest tag from
+[makemore/agent-ios/tags](https://github.com/makemore/agent-ios/tags).
 
-In Xcode: **File → Add Package Dependencies → Add Local...** → select the `agent-ios` folder.
+### Swift Package Manager (recommended)
+
+In Xcode: **File → Add Package Dependencies…** → paste
+`https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
+from `0.9.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(path: "/path/to/agent-ios"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.0"),
 ],
 targets: [
     .target(
         name: "MyApp",
         dependencies: [
-            .product(name: "AgentFrontend", package: "AgentFrontend"),
+            .product(name: "AgentFrontend", package: "agent-ios"),
         ]
     ),
 ]
 ```
+
+> **Public repo:** the repository is public, so SwiftPM (and CI) can clone it with
+> no SSH key, PAT, or Xcode account configuration.
+
+<details>
+<summary><strong>Local package (for library development)</strong></summary>
+
+To work against the library source instead of a tagged release, in Xcode use
+**File → Add Package Dependencies → Add Local…** → select the `agent-ios` folder, or in
+`Package.swift`:
+
+```swift
+dependencies: [
+    .package(path: "/path/to/agent-ios"),
+],
+```
+
+</details>
+
+### Publishing a new release
+
+See [RELEASING.md](RELEASING.md) for how to cut a version — for SwiftPM this is a
+semver Git tag push (no artifact upload); consumers resolve the new tag directly.
 
 ## Quick Start
 
@@ -176,13 +206,13 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(path: "/path/to/agent-ios"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.0"),
 ],
 targets: [
     .target(
         name: "MyApp",
         dependencies: [
-            .product(name: "AgentClient", package: "AgentFrontend"),
+            .product(name: "AgentClient", package: "agent-ios"),
         ]
     ),
 ]
@@ -207,6 +237,15 @@ Sources/AgentFrontend/
 
 
 ## Changelog
+
+### 0.9.0
+
+**Sub-agent activity display + Model Options sheet**
+
+- **Sub-agent activity is a UI affordance, not a model concern** — when an orchestrator hands off to a specialist sub-agent, the bundled UI collapses the intermediate `assistant.delta` / `tool.call` / `assistant.message` events into a live activity pill (`SubAgentActivityPillView`) and, once the bracket closes, a single quiet "Consulted *Name* · 4s" row in the history. This is independent from any model-level reasoning / extended-thinking the underlying LLM does; the two never share terminology. Control surface: `ChatAppearance.subAgentActivityStyle` (`.pill` default on the warm-dark appearance, `.bubbles` on `.classic`).
+- **Extended thinking is a separate per-run flag** — `ChatViewModel.sendMessage(_:files:model:thinking:supersedeFromMessageIndex:)` forwards the documented `thinking: bool` parameter (see `agent/docs/mobile-protocol-contract.md`) to the runtime, which passes it through to the provider's reasoning mode. The new `ModelOptionsSheet` surfaces a toggle so end users can flip it without host code changes.
+- **`ModelOptionsSheet`** — modal opened by tapping the model pill in the anthropic composer. Two toggles: **Extended thinking** (per-conversation, off by default) and **Verbose multi-agent** (per-app preference, off by default — when on, switches `subAgentActivityStyle` back to `.bubbles` so every specialist step gets its own bubble for debugging / inspection).
+- **`MessageMetadata.subAgentDurationSeconds`** — renamed from `thinkingDurationSeconds` to remove the reasoning-model collision. Carries the elapsed wall-clock for a `sub_agent.start`→`sub_agent.end` bracket; populates the collapsed history row.
 
 ### 0.8.0
 

@@ -35,6 +35,11 @@ struct Scenario: Identifiable, Hashable {
     /// `USER_NAME` from the environment when this is nil so a developer
     /// can personalise the demo without editing source.
     var userName: String? = nil
+    /// Per-scenario override for `agentKey`. When nil, real-backend
+    /// scenarios fall back to the active scheme's `AGENT_KEY` env var
+    /// (or the "chisel" default). Used by the S'Ai local-Django entries
+    /// to pin the slug regardless of which scheme is selected.
+    var agentKeyOverride: String? = nil
 }
 
 extension ScenarioLauncherView {
@@ -178,6 +183,36 @@ extension ScenarioLauncherView {
             manual: true,
             enableTTS: true,
             enableVoice: false
+        ),
+        // S'Ai Triage agent on the local Django backend. Mirrors
+        // /studio/agents/1b70ad3e-…/test/ and /studio/systems/23298cfd-…/test/
+        // — both pages send the same `agentKey` (the system's entry_agent
+        // slug is `sai-triage`), so a single entry covers both URLs.
+        Scenario(
+            id: "real_sai_triage",
+            title: "S'Ai Triage (local Django)",
+            subtitle: "Warm-dark shell against /studio/agents/.../test/ (slug: sai-triage)",
+            kind: .realBackend,
+            prompt: "",
+            followUps: [],
+            manual: true,
+            enableTTS: true,
+            enableVoice: true,
+            anthropicShell: true,
+            agentKeyOverride: "sai-triage"
+        ),
+        Scenario(
+            id: "real_sai_dev_guidance_system",
+            title: "S'Ai Developmental Guidance system (local Django)",
+            subtitle: "Same slug, drives the system's entry agent (sai-triage)",
+            kind: .realBackend,
+            prompt: "",
+            followUps: [],
+            manual: true,
+            enableTTS: true,
+            enableVoice: true,
+            anthropicShell: true,
+            agentKeyOverride: "sai-triage"
         ),
     ]
 }

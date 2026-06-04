@@ -89,6 +89,14 @@ final class SSEStreamingTests: XCTestCase {
     }
 
     func testMultiAgentHandoffSuppressesParentEcho() async throws {
+        // Legacy bubble-style behaviour — every sub-agent event renders
+        // as its own bubble and the parent's re-stream of the sub-agent
+        // reply is suppressed so the long sentence only appears once.
+        // The new library default is pill-mode (covered by
+        // `testMultiAgentHandoffPillModeCollapsesSubAgentActivity`);
+        // we opt back into bubbles here to keep coverage of the legacy
+        // appearance hosts can still select via `ChatAppearance.classic`.
+        config.appearance = ChatAppearance.classic
         let fixture = try SSEFixture.load("sai_multi_agent_handoff")
         installHandlers(for: fixture)
 
@@ -113,6 +121,57 @@ final class SSEStreamingTests: XCTestCase {
         XCTAssertEqual(starts.count, 1)
         XCTAssertEqual(ends.count, 1)
         XCTAssertEqual(starts.first?.metadata?.agentName, "S'Ai Therapist")
+    }
+
+    func testMultiAgentHandoffPillModeCollapsesSubAgentActivity() async throws {
+        // Pill mode is the warm-dark default. The sub-agent's narration
+        // is diverted into the activity ticker (no bubbles), then
+        // collapses to a single quiet "Consulted X · 4s" row when its
+        // bracket closes. The parent's subsequent re-stream of the same
+        // text becomes the actual answer bubble — echo suppression is
+        // disabled in this mode because the sub-agent never produced a
+        // bubble whose echo we'd be hiding. (Note: this is purely a UI
+        // affordance for multi-agent handoffs; it is unrelated to the
+        // model-level `thinking:` / extended-reasoning flag which is a
+        // separate per-run parameter on the runtime protocol.)
+        XCTAssertEqual(config.appearance.subAgentActivityStyle, .pill,
+                       "pill should be the library default")
+        let fixture = try SSEFixture.load("sai_multi_agent_handoff")
+        installHandlers(for: fixture)
+
+        let vm = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
+        await vm.sendMessage("I'm anxious about something")
+        let therapistReply = "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"
+        try await waitForStreamSettled(vm: vm, expectedLastAssistantContent: therapistReply)
+
+        // (a) no sub-agent start bubble was appended to history
+        let starts = vm.messages.filter { $0.type == .subAgentStart }
+        XCTAssertTrue(starts.isEmpty,
+                      "pill mode should not emit a 'Delegating…' bubble, got \(starts.count)")
+
+        // (b) exactly one collapsed thought row, carrying duration + name
+        let ends = vm.messages.filter { $0.type == .subAgentEnd }
+        XCTAssertEqual(ends.count, 1,
+                       "expected one collapsed thought row, got \(dump(vm.messages))")
+        XCTAssertEqual(ends.first?.metadata?.agentName, "S'Ai Therapist")
+        let duration = ends.first?.metadata?.subAgentDurationSeconds ?? -1
+        XCTAssertGreaterThan(duration, 0,
+                             "sub-agent bracket duration should be populated, got \(duration)")
+
+        // (c) the parent's final answer renders as exactly one assistant
+        //     bubble (no echo suppression in pill mode)
+        let assistantText = vm.messages
+            .filter { $0.role == .assistant && $0.type == .message }
+            .map(\.content)
+        XCTAssertEqual(
+            assistantText.filter { $0 == therapistReply }.count, 1,
+            "pill mode: parent's echo IS the final answer, expected exactly once, got: \(assistantText)"
+        )
+
+        // (d) the live activity state drained when the bracket closed
+        XCTAssertFalse(vm.subAgentActivity.isActive,
+                       "activity state should be empty after the run")
+        XCTAssertTrue(vm.subAgentActivity.frames.isEmpty)
     }
 
     func testMultiAgentWithBlocksRendersSubAgentBlocks() async throws {

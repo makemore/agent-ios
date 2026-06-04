@@ -122,7 +122,7 @@ struct ScenarioLauncherView: View {
         case .realBackend:
             return HostConfiguration(
                 backendUrl: backendUrl,
-                agentKey: agentKey,
+                agentKey: scenario.agentKeyOverride ?? agentKey,
                 testFixture: "",
                 autoSendOnLaunch: !scenario.manual,
                 autoSendPrompt: scenario.prompt,

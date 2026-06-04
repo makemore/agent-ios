@@ -58,6 +58,14 @@ extension APIClient {
     // MARK: - Runs
     
     /// Create a new agent run
+    ///
+    /// `params` is forwarded verbatim under the request body's `params`
+    /// key. The backend's `AgentRunCreateSerializer` already accepts an
+    /// arbitrary dict here and folds `model` / `thinking` into it on
+    /// arrival — see `agent/django_agent_runtime/api/views.py`. This is
+    /// how we ship behaviour knobs (response_style, tool_access,
+    /// research, web_search, etc.) without breaking the wire format
+    /// every time a new toggle is added.
     public func createRun(
         conversationId: String?,
         messages: [[String: Any]],
@@ -67,7 +75,8 @@ extension APIClient {
         agentKeyOverride: String? = nil,
         systemVersionId: String? = nil,
         ephemeral: Bool = false,
-        memories: [[String: String]]? = nil
+        memories: [[String: String]]? = nil,
+        params: [String: Any]? = nil
     ) async throws -> AgentRun {
         let token = try await getOrCreateSession()
 
@@ -104,7 +113,11 @@ extension APIClient {
         if let memories = memories, !memories.isEmpty {
             body["memories"] = memories
         }
-        
+
+        if let params = params, !params.isEmpty {
+            body["params"] = params
+        }
+
         let jsonData = try JSONSerialization.data(withJSONObject: body)
         let request = buildRequest(path: config.apiPaths.runs, method: "POST", body: jsonData, token: token)
         
@@ -234,6 +247,28 @@ extension APIClient {
         }
         let dec = JSONDecoder()
         return (try? dec.decode(WireVoices.self, from: data).voices) ?? []
+    }
+
+    // MARK: - Models
+
+    /// Fetch the list of LLM models the runtime is willing to route to.
+    /// Hits `GET /api/agent-runtime/models/` (configurable via
+    /// `APIPaths.models`) — the same endpoint the web client uses to
+    /// populate its model dropdown. Decodes the snake_case payload via
+    /// the explicit `CodingKeys` on `AgentModel`.
+    public func loadModels() async throws -> ModelsResponse {
+        let token = try await getOrCreateSession()
+        let request = buildRequest(path: config.apiPaths.models, method: "GET", token: token)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        if http.statusCode == 401 { throw APIError.unauthorized }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.httpError(statusCode: http.statusCode)
+        }
+        return try decoder.decode(ModelsResponse.self, from: data)
     }
 
     // MARK: - Decoder

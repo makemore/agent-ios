@@ -14,6 +14,209 @@ public class ChatViewModel: ObservableObject {
     @Published public var hasMoreMessages: Bool = false
     @Published public var loadingMoreMessages: Bool = false
     @Published public var runState: RunState = .idle
+    /// In-flight sub-agent activity, surfaced by the UI as a quiet pill
+    /// in place of per-event bubbles when the effective
+    /// `subAgentActivityStyle` is `.pill`. Stays empty in `.bubbles`
+    /// mode (the legacy behaviour) so the view layer can treat it as a
+    /// single optional source of truth either way.
+    @Published public var subAgentActivity: SubAgentActivityState = SubAgentActivityState()
+
+    // MARK: - Model Options (per-conversation / per-app)
+
+    /// Per-conversation toggle for the LLM's extended-reasoning / "thinking"
+    /// mode. Forwarded to the runtime as the `thinking:` parameter on the
+    /// next `sendMessage` call. Distinct from `subAgentActivityStyle` —
+    /// that controls how multi-agent handoffs *display*; this controls
+    /// whether the model is asked to think harder. Reset to `false` in
+    /// `clearMessages()` because reasoning is a per-conversation choice,
+    /// not an app-wide preference.
+    @Published public var extendedThinking: Bool = false
+
+    /// Per-app preference. When `true`, the bundled UI surfaces every
+    /// sub-agent's narration as its own bubble (the legacy `.bubbles`
+    /// behaviour) regardless of the host's `ChatAppearance` default —
+    /// useful for debugging specialist chains. When `false` (default),
+    /// the effective style falls back to `config.appearance.subAgentActivityStyle`.
+    /// Persisted to `StorageService` under `verboseMultiAgentStorageKey`.
+    @Published public var verboseMultiAgent: Bool = false {
+        didSet {
+            guard oldValue != verboseMultiAgent else { return }
+            storage.set(Self.verboseMultiAgentStorageKey, value: verboseMultiAgent ? "1" : "0")
+        }
+    }
+
+    /// Effective sub-agent activity style after applying the
+    /// `verboseMultiAgent` override on top of the host's appearance
+    /// default. Read by the reducer (`usesPillActivity`) and available
+    /// to view code that needs to render in lockstep.
+    public var subAgentActivityStyle: ChatAppearance.SubAgentActivityStyle {
+        verboseMultiAgent ? .bubbles : config.appearance.subAgentActivityStyle
+    }
+
+    private static let verboseMultiAgentStorageKey = "chat_widget_verbose_multi_agent"
+
+    // MARK: - Model Picker State
+
+    /// Models advertised by the runtime's `/api/agent-runtime/models/`
+    /// endpoint. Empty until `loadModels()` succeeds; the picker UI
+    /// renders a loading / empty state until then. Sorted as the
+    /// server returned them so the runtime can control ordering
+    /// (typically: most capable / newest first).
+    @Published public var availableModels: [AgentModel] = []
+
+    /// Identifier of the model the user has chosen for the next turn.
+    /// `nil` means "let the runtime use its configured default". Persisted
+    /// to `StorageService` so the choice survives app restarts. Forwarded
+    /// to `createRun(model:)` on every `sendMessage` / edit / retry.
+    @Published public var selectedModelId: String? {
+        didSet {
+            guard oldValue != selectedModelId else { return }
+            storage.set(Self.selectedModelStorageKey, value: selectedModelId)
+            // Extended thinking only makes sense for models that advertise
+            // `supports_thinking`. Quietly switch it off if the user picks
+            // a model that doesn't — the toggle in `ModelOptionsSheet`
+            // disables itself in lockstep so the state stays coherent.
+            if extendedThinking, let model = selectedModel, !model.supportsThinking {
+                extendedThinking = false
+            }
+        }
+    }
+
+    /// True while `loadModels()` is in flight. Drives the spinner in the
+    /// picker; the toggles below stay interactive throughout.
+    @Published public var isLoadingModels: Bool = false
+
+    /// Runtime's advertised default model id (`DEFAULT_MODEL` setting),
+    /// captured from `ModelsResponse.default`. Used as the fallback the
+    /// picker highlights when `selectedModelId` is `nil`.
+    @Published public private(set) var runtimeDefaultModelId: String?
+
+    /// Convenience: the `AgentModel` matching `selectedModelId`, or the
+    /// runtime default if the user hasn't chosen explicitly, or `nil` if
+    /// the list hasn't loaded yet.
+    public var selectedModel: AgentModel? {
+        if let id = selectedModelId, let m = availableModels.first(where: { $0.id == id }) {
+            return m
+        }
+        if let id = runtimeDefaultModelId, let m = availableModels.first(where: { $0.id == id }) {
+            return m
+        }
+        return availableModels.first
+    }
+
+    /// Short display name suitable for the composer's model pill. Prefers
+    /// the picked model's friendly name; falls back to the host's
+    /// `ChatAppearance.modelPillLabel` so existing branding (e.g. "S'Ai")
+    /// keeps rendering until the picker has resolved a real selection.
+    public var selectedModelDisplayName: String? {
+        selectedModel?.name ?? config.appearance.modelPillLabel
+    }
+
+    private static let selectedModelStorageKey = "chat_widget_selected_model"
+
+    // MARK: - Behaviour preferences (forwarded via run `params`)
+
+    /// Response-style preferences surfaced in the `+` sheet. Forwarded
+    /// to the backend under `params["response_style"]`; the runtime
+    /// translates the chosen tag into a system-prompt directive (see
+    /// `DynamicAgentRuntime` in `django_agent_runtime`). `nil` means
+    /// "let the agent's own prompt decide" \u2014 the default.
+    public enum ResponseStyle: String, CaseIterable, Sendable {
+        case normal
+        case concise
+        case explanatory
+        case formal
+
+        public var displayName: String {
+            switch self {
+            case .normal: return "Normal"
+            case .concise: return "Concise"
+            case .explanatory: return "Explanatory"
+            case .formal: return "Formal"
+            }
+        }
+    }
+
+    /// Tool-access mode the user picked in the `+` sheet. Maps to
+    /// `params["tool_access"]`. The runtime honours this by filtering
+    /// or annotating the tool list before the agentic loop.
+    public enum ToolAccess: String, CaseIterable, Sendable {
+        case auto
+        case manual
+        case none
+
+        public var displayName: String {
+            switch self {
+            case .auto: return "Auto"
+            case .manual: return "Manual"
+            case .none: return "None"
+            }
+        }
+    }
+
+    @Published public var responseStyle: ResponseStyle = .normal {
+        didSet {
+            guard oldValue != responseStyle else { return }
+            storage.set(Self.responseStyleStorageKey, value: responseStyle.rawValue)
+        }
+    }
+
+    @Published public var toolAccess: ToolAccess = .auto {
+        didSet {
+            guard oldValue != toolAccess else { return }
+            storage.set(Self.toolAccessStorageKey, value: toolAccess.rawValue)
+        }
+    }
+
+    /// "Deep research" toggle. Surfaced as `params["research"]: Bool`.
+    /// The runtime injects a research directive into the system prompt
+    /// when true; default false to preserve current behaviour.
+    @Published public var researchEnabled: Bool = false {
+        didSet {
+            guard oldValue != researchEnabled else { return }
+            storage.set(Self.researchStorageKey, value: researchEnabled ? "1" : "0")
+        }
+    }
+
+    /// "Web search" toggle. Surfaced as `params["web_search"]: Bool`.
+    /// Defaults to true \u2014 matches the AddToChatSheet's prior visible
+    /// state and is a no-op when no web-search tool is configured.
+    @Published public var webSearchEnabled: Bool = true {
+        didSet {
+            guard oldValue != webSearchEnabled else { return }
+            storage.set(Self.webSearchStorageKey, value: webSearchEnabled ? "1" : "0")
+        }
+    }
+
+    private static let responseStyleStorageKey = "chat_widget_response_style"
+    private static let toolAccessStorageKey = "chat_widget_tool_access"
+    private static let researchStorageKey = "chat_widget_research_enabled"
+    private static let webSearchStorageKey = "chat_widget_web_search_enabled"
+
+    /// Snapshot of the user's current behaviour preferences as a JSON
+    /// dict suitable for `APIClient.createRun(params:)`. Only includes
+    /// keys whose value differs from the implicit server default so the
+    /// runtime can stay backwards-compatible with older clients that
+    /// don't send these flags. Merged into any caller-supplied params
+    /// (caller wins on conflicts).
+    public func runParamsSnapshot() -> [String: Any] {
+        var p: [String: Any] = [:]
+        if responseStyle != .normal {
+            p["response_style"] = responseStyle.rawValue
+        }
+        if toolAccess != .auto {
+            p["tool_access"] = toolAccess.rawValue
+        }
+        if researchEnabled {
+            p["research"] = true
+        }
+        // Only forward web_search when the user explicitly turned it off
+        // \u2014 keeps the payload small for the common (default-on) case.
+        if !webSearchEnabled {
+            p["web_search"] = false
+        }
+        return p
+    }
 
     // MARK: - System State
 
@@ -63,6 +266,14 @@ public class ChatViewModel: ObservableObject {
     /// block, sub-agent start/end, custom, terminal), which marks the
     /// boundary of a new turn.
     private var turnFinalized: Bool = false
+
+    /// Latches on the first assistant message we surface for the current
+    /// conversation lifetime so `config.onFirstAssistantMessage` only
+    /// fires once. Reset by `clearMessages()` (new conversation). Set
+    /// to `true` by `loadConversation`/`loadLocalConversation` when the
+    /// restored history already contains an assistant message, so the
+    /// callback doesn't fire for replayed history.
+    private var firstAssistantMessageFired: Bool = false
 
     // MARK: - Sub-agent echo suppression
     /// When a sub-agent finishes streaming its final answer, we snapshot
@@ -164,6 +375,42 @@ public class ChatViewModel: ObservableObject {
             clientMemories = parsed
         }
 
+        // Load persisted "verbose multi-agent" preference. Stored as a
+        // simple "1" / "0" string for portability across StorageService
+        // implementations. The `didSet` will fire and re-persist the
+        // same value on first launch — idempotent, so we accept the
+        // trivial extra write rather than threading a load-guard flag.
+        if storage.get(Self.verboseMultiAgentStorageKey) == "1" {
+            verboseMultiAgent = true
+        }
+
+        // Restore the user's previously-chosen model id (if any). The
+        // matching `AgentModel` is resolved lazily once `loadModels()`
+        // populates `availableModels` — until then the pill falls back
+        // to the host's `modelPillLabel`.
+        if let savedModelId = storage.get(Self.selectedModelStorageKey), !savedModelId.isEmpty {
+            self.selectedModelId = savedModelId
+        }
+
+        // Restore behaviour preferences surfaced in the `+` sheet.
+        // Unknown enum strings (older app version, manual storage tweak)
+        // fall back to the default rather than crashing.
+        if let raw = storage.get(Self.responseStyleStorageKey),
+           let style = ResponseStyle(rawValue: raw) {
+            self.responseStyle = style
+        }
+        if let raw = storage.get(Self.toolAccessStorageKey),
+           let mode = ToolAccess(rawValue: raw) {
+            self.toolAccess = mode
+        }
+        if storage.get(Self.researchStorageKey) == "1" {
+            self.researchEnabled = true
+        }
+        // Default-on toggle: only flip to false if storage explicitly says so.
+        if storage.get(Self.webSearchStorageKey) == "0" {
+            self.webSearchEnabled = false
+        }
+
         // Initialise local history store for ephemeral mode
         if config.ephemeral {
             let store = LocalHistoryStore(agentKey: config.agentKey)
@@ -230,16 +477,28 @@ public class ChatViewModel: ObservableObject {
 
             print("[ChatViewModel] createRun sending conversationId=\(conversationId ?? "nil")")
 
+            // Caller-provided `model:` wins (so deep-link / scripted flows
+            // can pin a specific id); otherwise fall back to the user's
+            // current picker selection. `nil` lets the runtime use its
+            // configured `DEFAULT_MODEL`.
+            let resolvedModel = model ?? selectedModelId
+            // Build the params payload from the user's current behaviour
+            // preferences (response_style, tool_access, research,
+            // web_search). Only non-default values are included so the
+            // payload stays minimal and old clients/runtimes remain
+            // compatible.
+            let resolvedParams = runParamsSnapshot()
             let run = try await apiClient.createRun(
                 conversationId: conversationId,
                 messages: apiMessages,
-                model: model,
+                model: resolvedModel,
                 thinking: thinking,
                 supersedeFromMessageIndex: supersedeFromMessageIndex,
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
                 systemVersionId: selectedSystemVersionId,
                 ephemeral: config.ephemeral,
-                memories: config.ephemeral ? clientMemories : nil
+                memories: config.ephemeral ? clientMemories : nil,
+                params: resolvedParams.isEmpty ? nil : resolvedParams
             )
 
             print("[ChatViewModel] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
@@ -255,6 +514,11 @@ public class ChatViewModel: ObservableObject {
                 if config.ephemeral {
                     localConversationCreatedAt = Date()
                 }
+                // Lifecycle hook: a fresh conversation has just been
+                // minted by the runtime. Fires exactly once per
+                // conversation; restoring an existing one via
+                // `loadConversation(_:)` does not trigger this.
+                config.onConversationStart?(newConvId)
             }
 
             // Subscribe to SSE events
@@ -284,6 +548,9 @@ public class ChatViewModel: ObservableObject {
             // differs from the natural-end path (`handleTerminalEvent`) which
             // deliberately lets the drain finish smoothly.
             resetStreamBuffer()
+            // Clear any in-flight sub-agent activity so the pill
+            // disappears immediately on Stop.
+            subAgentActivity = SubAgentActivityState()
             // Cut off any in-flight TTS playback when the user cancels.
             voiceController?.stop()
             isLoading = false
@@ -315,9 +582,255 @@ public class ChatViewModel: ObservableObject {
         error = nil
         hasMoreMessages = false
         messagesOffset = 0
+        // Extended-thinking is a per-conversation choice — starting a
+        // new chat resets it to the safer (cheaper, faster) default.
+        extendedThinking = false
         runState = .idle
         pendingPersistAfterDrain = false
+        subAgentActivity = SubAgentActivityState()
+        firstAssistantMessageFired = false
         storage.set(config.conversationIdKey, value: nil)
+    }
+
+    /// Append an assistant message to the conversation without a
+    /// backend round-trip. Useful for host-scripted intros, onboarding
+    /// turns, or replaying canned responses in a guided flow.
+    ///
+    /// The message is inserted as a fully-formed bubble (not a
+    /// streaming one) and fires `config.onFirstAssistantMessage` the
+    /// first time it lands in a conversation. When `speak == true`
+    /// **and** a `voiceController` is attached, the text is pushed
+    /// through the chunker + finished so the TTS pipeline plays it
+    /// with the same prosody settings used for real model replies.
+    ///
+    /// Refuses to insert while an SSE stream is in flight (`runState
+    /// == .streaming` or there's a live streaming bubble) so a
+    /// scripted turn can never split a real one in two. Returns the
+    /// resulting `Message`, or `nil` if the insertion was skipped.
+    @discardableResult
+    public func appendAssistantMessage(
+        _ text: String,
+        speak: Bool = false,
+        blocks: [ContentBlock]? = nil,
+        emotion: Emotion? = nil
+    ) -> Message? {
+        let trimmed = text
+        guard !trimmed.isEmpty else { return nil }
+        // Don't splice into an active stream — the host should wait
+        // for the run to finish before injecting a scripted turn.
+        if runState == .streaming || currentStreamingMessageId != nil {
+            return nil
+        }
+
+        let id = "assistant-injected-\(Date().timeIntervalSince1970)"
+        let metadata: MessageMetadata? = (blocks?.isEmpty == false)
+            ? MessageMetadata(contentBlocks: blocks)
+            : nil
+        let msg = Message(
+            id: id,
+            role: .assistant,
+            content: trimmed,
+            type: .message,
+            metadata: metadata
+        )
+        messages.append(msg)
+
+        // Fire the first-assistant lifecycle hook just like a normal
+        // streamed turn would.
+        if !firstAssistantMessageFired {
+            firstAssistantMessageFired = true
+            config.onFirstAssistantMessage?(id)
+        }
+
+        // Voice: re-use the same chunker + finishTurn path as a real
+        // run so the host-injected text benefits from the min-chunk
+        // prosody fix and any emotion routing.
+        if speak, let vc = voiceController {
+            vc.reset()
+            vc.pushDelta(trimmed, emotion: emotion)
+            vc.finishTurn(finalText: nil, emotion: emotion)
+        }
+
+        return msg
+    }
+
+    /// Inject a scripted assistant turn whose text is *revealed
+    /// progressively* in sync with TTS playback, so the bubble feels
+    /// alive instead of materialising fully-formed.
+    ///
+    /// Functionally a streaming-simulation variant of
+    /// ``appendAssistantMessage``: the full utterance is pushed to the
+    /// `VoiceController` immediately (so audio starts at t=0) while the
+    /// on-screen content grows word-by-word at the requested rate. Each
+    /// mutation re-publishes ``messages``, which triggers
+    /// ``MessageListView``'s content-change handler and keeps the bubble
+    /// pinned to the bottom as it expands — the same auto-follow path a
+    /// real SSE-driven reply uses.
+    ///
+    /// Guarded against a live real run the same way the other scripted
+    /// inserts are. ``currentStreamingMessageId`` is set for the
+    /// duration of the reveal and cleared before ``completion`` runs,
+    /// so the host can chain a follow-up insert (e.g. action buttons)
+    /// without tripping the scripted-insert refusal in
+    /// ``appendContentBlocksMessage``.
+    ///
+    /// - Parameters:
+    ///   - text: The full utterance. Empty / whitespace-only input is a
+    ///     no-op and returns `nil`.
+    ///   - speak: Push the full text through the `VoiceController`
+    ///     chunker + finishTurn so the standard TTS pipeline plays it.
+    ///   - emotion: Optional prosody hint forwarded to the voice path.
+    ///   - wordsPerMinute: Reveal cadence. 180 wpm is the natural
+    ///     conversational band for ElevenLabs at default speed; lower
+    ///     for a more deliberate feel, higher for snappier.
+    ///   - completion: Called on the main actor after the final word
+    ///     lands and `currentStreamingMessageId` is cleared. Audio may
+    ///     still be playing — this signals *visual* completion only.
+    /// - Returns: The inserted ``Message`` (already in ``messages``
+    ///   with empty content), or `nil` if the insert was refused.
+    @discardableResult
+    public func appendAssistantMessageStreamed(
+        _ text: String,
+        speak: Bool = false,
+        emotion: Emotion? = nil,
+        wordsPerMinute: Double = 180,
+        completion: (() -> Void)? = nil
+    ) -> Message? {
+        let trimmed = text
+        guard !trimmed.isEmpty else { return nil }
+        if runState == .streaming || currentStreamingMessageId != nil {
+            return nil
+        }
+
+        let id = "assistant-injected-\(Date().timeIntervalSince1970)"
+        let msg = Message(
+            id: id,
+            role: .assistant,
+            content: "",
+            type: .message,
+            metadata: nil
+        )
+        messages.append(msg)
+        currentStreamingMessageId = id
+
+        if !firstAssistantMessageFired {
+            firstAssistantMessageFired = true
+            config.onFirstAssistantMessage?(id)
+        }
+
+        // Voice: start the whole utterance at t=0 so the spoken audio
+        // runs alongside the visual reveal. The chunker emits as the
+        // host's TTS provider streams audio back; the on-screen
+        // word-cadence below is an independent, approximate pacing
+        // intended to *feel* synchronised without needing per-phoneme
+        // timing callbacks from the voice pipeline.
+        if speak {
+            if let vc = voiceController {
+                print("[Voice/streamed] pushing \(trimmed.count) chars — controller.isEnabled=\(vc.isEnabled)")
+                vc.reset()
+                vc.pushDelta(trimmed, emotion: emotion)
+                vc.finishTurn(finalText: nil, emotion: emotion)
+            } else {
+                print("[Voice/streamed] SKIPPED — voiceController is nil at inject time")
+            }
+        } else {
+            print("[Voice/streamed] speak=false, no voice push")
+        }
+
+        // Per-word delay derived from the requested WPM. Clamp at a
+        // floor so a pathologically low WPM (or zero) doesn't stall
+        // the reveal indefinitely.
+        let wpm = max(wordsPerMinute, 30)
+        let perWordSeconds = 60.0 / wpm
+        let perWordNanos = UInt64(perWordSeconds * 1_000_000_000)
+
+        // Preserve whitespace runs so contractions / line breaks / em
+        // dashes survive the reveal exactly as written.
+        let tokens = Self.revealTokens(for: trimmed)
+
+        Task { @MainActor in
+            var accumulated = ""
+            for token in tokens {
+                accumulated += token
+                if let idx = messages.firstIndex(where: { $0.id == id }) {
+                    messages[idx].content = accumulated
+                }
+                // Whitespace-only tokens don't add visible characters,
+                // so skip the dwell on them — pacing is driven by
+                // word emissions only.
+                if !token.allSatisfy({ $0.isWhitespace }) {
+                    try? await Task.sleep(nanoseconds: perWordNanos)
+                }
+            }
+            // Make sure the final content matches the source exactly,
+            // even if a token splitter edge case lost a character.
+            if let idx = messages.firstIndex(where: { $0.id == id }),
+               messages[idx].content != trimmed {
+                messages[idx].content = trimmed
+            }
+            currentStreamingMessageId = nil
+            completion?()
+        }
+
+        return msg
+    }
+
+    /// Split `text` into a sequence of reveal tokens, alternating
+    /// non-whitespace runs (words) and whitespace runs (separators).
+    /// Concatenating the tokens in order reproduces the input exactly,
+    /// which matters because the streaming reveal mutates the bubble's
+    /// content one token at a time.
+    private static func revealTokens(for text: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var currentIsSpace: Bool? = nil
+        for ch in text {
+            let isSpace = ch.isWhitespace
+            if let was = currentIsSpace, was != isSpace {
+                tokens.append(current)
+                current = ""
+            }
+            current.append(ch)
+            currentIsSpace = isSpace
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
+    }
+
+    /// Inject a scripted assistant turn that consists solely of rich
+    /// ``ContentBlock``s (e.g. an action-button row, a card, a callout).
+    /// Distinct from ``appendAssistantMessage``: that path produces a
+    /// text bubble (`type == .message`) and silently drops any blocks
+    /// passed in metadata, because ``MessageView`` only renders content
+    /// blocks when the message's discriminator is `.contentBlocks`.
+    ///
+    /// Typical pairing is one ``appendAssistantMessage(_:speak:blocks:emotion:)``
+    /// for the narration followed by this call for the interactive
+    /// affordance underneath, mirroring how a real turn streams text
+    /// first and then emits a `content.blocks` event.
+    ///
+    /// Refuses to splice into an active stream for the same reason
+    /// ``appendAssistantMessage`` does. Returns the resulting ``Message``,
+    /// or `nil` if the insertion was skipped or `blocks` was empty.
+    @discardableResult
+    public func appendContentBlocksMessage(
+        _ blocks: [ContentBlock]
+    ) -> Message? {
+        guard !blocks.isEmpty else { return nil }
+        if runState == .streaming || currentStreamingMessageId != nil {
+            return nil
+        }
+
+        let id = "assistant-blocks-\(Date().timeIntervalSince1970)"
+        let msg = Message(
+            id: id,
+            role: .assistant,
+            content: "",
+            type: .contentBlocks,
+            metadata: MessageMetadata(contentBlocks: blocks)
+        )
+        messages.append(msg)
+        return msg
     }
 
     // MARK: - Local History (ephemeral mode)
@@ -344,6 +857,10 @@ public class ChatViewModel: ObservableObject {
         hasMoreMessages = false
         messagesOffset = 0
         error = nil
+        // Restored history already contains earlier assistant turns —
+        // the first-assistant lifecycle hook fires only for *new*
+        // messages, not for replayed ones.
+        firstAssistantMessageFired = messages.contains { $0.role == .assistant }
         return true
     }
 
@@ -470,6 +987,42 @@ public class ChatViewModel: ObservableObject {
         storage.set(config.systemVersionIdKey, value: nil)
     }
 
+    // MARK: - Model picker
+
+    /// Fetch the runtime's catalogue of available LLM models so the
+    /// picker in `ModelOptionsSheet` has something to show. Idempotent
+    /// and safe to call from `.task` on every appearance — the view
+    /// just re-renders with the same list. Failures are logged but not
+    /// surfaced as errors, because the picker has a sensible empty
+    /// state ("Using runtime default") and the run path still works
+    /// without any client-side model selection.
+    public func loadModels() async {
+        isLoadingModels = true
+        defer { isLoadingModels = false }
+        do {
+            let response = try await apiClient.loadModels()
+            availableModels = response.models
+            runtimeDefaultModelId = response.default
+            // If the persisted selection refers to a model the runtime
+            // no longer advertises (renamed / removed), drop it so the
+            // picker falls back to the runtime default rather than
+            // showing a stale label.
+            if let chosen = selectedModelId,
+               !availableModels.contains(where: { $0.id == chosen }) {
+                selectedModelId = nil
+            }
+        } catch {
+            print("[ChatViewModel] Failed to load models: \(error)")
+        }
+    }
+
+    /// User picked a model in `ModelOptionsSheet`. Storing `nil` reverts
+    /// to "use the runtime default" — handy when a host wants to expose
+    /// a "Reset" affordance later.
+    public func selectModel(_ modelId: String?) {
+        selectedModelId = modelId
+    }
+
     /// Load a specific conversation
     public func loadConversation(_ convId: String) async {
         // Ephemeral mode: conversation is local-only, nothing to fetch.
@@ -493,6 +1046,10 @@ public class ChatViewModel: ObservableObject {
 
             hasMoreMessages = conversation.hasMore ?? false
             messagesOffset = conversation.messages?.count ?? 0
+
+            // Suppress the first-assistant lifecycle hook for restored
+            // conversations that already contain an assistant turn.
+            firstAssistantMessageFired = messages.contains { $0.role == .assistant }
 
         } catch APIError.notFound {
             conversationId = nil
@@ -591,6 +1148,11 @@ public class ChatViewModel: ObservableObject {
         turnFinalized = false
         resetStreamBuffer()
         clearPendingEcho()
+        // Drop any sub-agent activity left over from a previous run —
+        // shouldn't happen on the happy path (terminal events drain it)
+        // but a transport error mid-bracket would otherwise leave a
+        // stale pill hovering on the next send.
+        subAgentActivity = SubAgentActivityState()
 
         let client = SSEClient()
         sseClient = client
@@ -702,6 +1264,18 @@ public class ChatViewModel: ObservableObject {
     private func handleAssistantDelta(_ payload: [String: Any]) {
         guard let delta = payload["delta"] as? String else { return }
 
+        // Pill mode: while a sub-agent bracket is active the deltas are
+        // narration from a sub-agent (or its own deltas, since we don't
+        // emit a parent delta until the bracket closes). Divert them
+        // into the activity ticker rather than the message list so the
+        // wall of intermediate chatter never produces a bubble. Voice
+        // intentionally stays silent here — the user only hears the
+        // parent orchestrator's final synthesis.
+        if usesPillActivity && subAgentActivity.isActive {
+            subAgentActivity.appendDelta(delta)
+            return
+        }
+
         // Drop late-arriving deltas for a turn whose authoritative
         // `assistant.message` has already been applied. Otherwise they
         // spawn a second bubble that types out content we've already
@@ -785,6 +1359,17 @@ public class ChatViewModel: ObservableObject {
     /// correct whether or not the client received every delta.
     private func handleAssistantMessage(_ payload: [String: Any]) {
         guard let content = payload["content"] as? String else { return }
+
+        // Pill mode: while a sub-agent bracket is active the
+        // authoritative final message belongs to the sub-agent, not to
+        // a user-visible bubble. Snap the ticker to the final text so
+        // the pill stops mid-stream-looking, and return — the matching
+        // `sub_agent.end` will pop the frame and emit the collapsed
+        // history row.
+        if usesPillActivity && subAgentActivity.isActive {
+            subAgentActivity.setFinal(content)
+            return
+        }
 
         // Mark the turn finalised *unconditionally* — this is the server's
         // authoritative "this turn is done" signal. Any `assistant.delta`
@@ -871,6 +1456,12 @@ public class ChatViewModel: ObservableObject {
                 content: content,
                 type: .message
             ))
+            // Lifecycle hook: first assistant bubble in this
+            // conversation. Latch so it only fires once per conv.
+            if !firstAssistantMessageFired {
+                firstAssistantMessageFired = true
+                config.onFirstAssistantMessage?(id)
+            }
         }
     }
 
@@ -905,12 +1496,22 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleToolCall(_ payload: [String: Any]) {
+        let name = payload["name"] as? String ?? payload["tool_name"] as? String ?? "tool"
+
+        // Pill mode: tool calls from inside a sub-agent bracket are part
+        // of the same "thinking" activity and shouldn't show as a bubble.
+        // Surface the latest tool name on the pill instead so the user
+        // still sees what the sub-agent is reaching for.
+        if usesPillActivity && subAgentActivity.isActive {
+            subAgentActivity.noteToolCall(name)
+            return
+        }
+
         closeStreamingSession()
         // A new tool call by the parent means it's doing more work rather
         // than echoing a finished sub-agent — any stashed echo reference
         // is stale now.
         clearPendingEcho()
-        let name = payload["name"] as? String ?? payload["tool_name"] as? String ?? "tool"
         messages.append(Message(
             id: "tool-call-\(Date().timeIntervalSince1970)",
             role: .assistant,
@@ -925,6 +1526,14 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleToolResult(_ payload: [String: Any]) {
+        // Pill mode: silently absorb tool results that arrive inside a
+        // sub-agent bracket — the activity pill already reflects the
+        // tool call, and we don't want a "✓ Done" row in the history
+        // for work the user only saw as a ticker tail.
+        if usesPillActivity && subAgentActivity.isActive {
+            return
+        }
+
         closeStreamingSession()
         let result = payload["result"] as? [String: Any]
         let isError = result?["error"] != nil
@@ -952,12 +1561,34 @@ public class ChatViewModel: ObservableObject {
         return String(data: data, encoding: .utf8)
     }
 
+    /// `true` when the host has opted into pill-style sub-agent activity
+    /// (the warm-dark default). In this mode the reducer suppresses
+    /// per-event sub-agent bubbles and instead diverts the activity into
+    /// `subAgentActivity`, leaving behind a single collapsed history row
+    /// on bracket close. `false` preserves the original behaviour: every
+    /// sub-agent event becomes its own bubble.
+    private var usesPillActivity: Bool {
+        subAgentActivityStyle == .pill
+    }
+
     private func handleSubAgentStart(_ payload: [String: Any]) {
         closeStreamingSession()
         // A new sub-agent invocation supersedes any pending echo reference
         // from a previous one.
         clearPendingEcho()
         let agentName = payload["agent_name"] as? String ?? payload["sub_agent_key"] as? String ?? "sub-agent"
+
+        if usesPillActivity {
+            // Pill mode: don't emit a "🔗 Delegating…" bubble; the pill
+            // view will pick up the new frame and render the agent name
+            // next to its live ticker tail.
+            subAgentActivity.push(SubAgentActivityState.Frame(
+                agentName: agentName,
+                subAgentKey: payload["sub_agent_key"] as? String
+            ))
+            return
+        }
+
         messages.append(Message(
             id: "sub-agent-start-\(Date().timeIntervalSince1970)",
             role: .system,
@@ -972,6 +1603,35 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSubAgentEnd(_ payload: [String: Any]) {
+        if usesPillActivity {
+            // Pop the matching frame. If it was the outermost one, drop a
+            // single quiet "Consulted <agent> · 4s" row into the history
+            // so the bracket is still represented on reload (and for
+            // post-hoc skim-reading). The parent's own final reply will
+            // render below this row as the actual answer — no echo
+            // suppression in pill mode because the sub-agent never
+            // produced a bubble whose echo we'd need to hide.
+            let popped = subAgentActivity.pop()
+            let agentName = payload["agent_name"] as? String
+                ?? popped?.agentName
+                ?? "Sub-agent"
+            if !subAgentActivity.isActive, let frame = popped {
+                let duration = Date().timeIntervalSince(frame.startedAt)
+                messages.append(Message(
+                    id: "sub-agent-end-\(Date().timeIntervalSince1970)",
+                    role: .system,
+                    content: "Consulted \(agentName) · \(Self.formatDuration(duration))",
+                    type: .subAgentEnd,
+                    metadata: MessageMetadata(
+                        subAgentKey: payload["sub_agent_key"] as? String,
+                        agentName: agentName,
+                        subAgentDurationSeconds: duration
+                    )
+                ))
+            }
+            return
+        }
+
         closeStreamingSession()
         // After the session is closed the sub-agent's final streamed text is
         // committed to its bubble — capture it as the echo reference so the
@@ -994,6 +1654,14 @@ public class ChatViewModel: ObservableObject {
             pendingEchoBuffer = ""
             pendingEchoDiverged = false
         }
+    }
+
+    /// Format an elapsed-seconds value for the collapsed thought row.
+    /// Sub-1s rounds to one decimal so quick handoffs don't display as
+    /// "0s"; longer durations show whole seconds.
+    private static func formatDuration(_ seconds: Double) -> String {
+        if seconds < 1 { return String(format: "%.1fs", seconds) }
+        return "\(Int(seconds.rounded()))s"
     }
 
     private func handleContentBlocks(_ payload: [String: Any]) {

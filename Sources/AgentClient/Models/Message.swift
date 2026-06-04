@@ -88,6 +88,14 @@ public struct MessageMetadata: Equatable {
     public var actionURL: String?
     public var actionLabel: String?
     public var resumeHint: Any?
+    /// Elapsed wall-clock seconds between a `sub_agent.start` and its
+    /// matching `sub_agent.end`. Populated on the collapsed `.subAgentEnd`
+    /// row that the pill-mode reducer leaves behind so the history can
+    /// render a quiet "Consulted X · 4s" caption on reload without having
+    /// to re-walk the original event stream. Distinct from any
+    /// reasoning-token duration the underlying LLM may report — this is
+    /// pure orchestration wall-clock, not model "extended thinking".
+    public var subAgentDurationSeconds: Double?
 
     public init(
         toolName: String? = nil,
@@ -102,7 +110,8 @@ public struct MessageMetadata: Equatable {
         actionType: String? = nil,
         actionURL: String? = nil,
         actionLabel: String? = nil,
-        resumeHint: Any? = nil
+        resumeHint: Any? = nil,
+        subAgentDurationSeconds: Double? = nil
     ) {
         self.toolName = toolName
         self.toolCallId = toolCallId
@@ -117,6 +126,7 @@ public struct MessageMetadata: Equatable {
         self.actionURL = actionURL
         self.actionLabel = actionLabel
         self.resumeHint = resumeHint
+        self.subAgentDurationSeconds = subAgentDurationSeconds
     }
 
     public static func == (lhs: MessageMetadata, rhs: MessageMetadata) -> Bool {
@@ -129,7 +139,8 @@ public struct MessageMetadata: Equatable {
         lhs.actionId == rhs.actionId &&
         lhs.actionType == rhs.actionType &&
         lhs.actionURL == rhs.actionURL &&
-        lhs.actionLabel == rhs.actionLabel
+        lhs.actionLabel == rhs.actionLabel &&
+        lhs.subAgentDurationSeconds == rhs.subAgentDurationSeconds
     }
 }
 

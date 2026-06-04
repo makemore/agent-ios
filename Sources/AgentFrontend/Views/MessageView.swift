@@ -13,13 +13,67 @@ public struct MessageView: View {
     let showDebug: Bool
     let onRetry: (() -> Void)?
     let onEdit: (() -> Void)?
-    
+    /// When `true` and this is an assistant text/tool/system message,
+    /// render the S'Ai presence orb as a small avatar at the leading
+    /// edge of the row. The parent list decides per-message whether
+    /// to paint an avatar (typically gated by `config.showPresenceOrb`).
+    let showAgentAvatar: Bool
+    /// Drives the avatar's halo glow. Only the latest assistant
+    /// message should receive `true` so the scrollback doesn't bloom
+    /// every row when the agent speaks.
+    let agentAvatarSpeaking: Bool
+
     var onBlockAction: ((BlockAction) -> Void)?
 
     private var isUser: Bool { message.role == .user }
     private var isSystem: Bool { message.role == .system }
     private var isToolMessage: Bool { message.type == .toolCall || message.type == .toolResult }
     private var isContentBlocks: Bool { message.type == .contentBlocks }
+    /// Avatar gating mirrors the bubble visibility — we only paint the
+    /// orb next to an actual assistant text bubble, not next to tool /
+    /// system / content-block / thought rows (each of which has its
+    /// own visual treatment that already conveys "this isn't a chat
+    /// reply from the agent").
+    private var shouldShowAvatar: Bool {
+        showAgentAvatar
+            && !isUser
+            && !isSystem
+            && !isToolMessage
+            && !isContentBlocks
+            && !isThoughtRow
+    }
+    /// Fixed avatar size. 32pt strikes the balance between brand
+    /// presence (the orb's swirl is legible) and bubble width
+    /// (still leaves enough room on phones). The halo glow on the
+    /// latest message is what carries the speaking signal.
+    private var avatarSize: CGFloat { 32 }
+    /// `true` when this message is the collapsed pill-mode summary row.
+    /// In `.bubbles` mode the same `.subAgentEnd` type still flows
+    /// through the standard system-bubble path so legacy hosts see the
+    /// "✓ Agent completed" row they had before.
+    private var isThoughtRow: Bool {
+        message.type == .subAgentEnd
+            && config.appearance.subAgentActivityStyle == .pill
+    }
+
+    @ViewBuilder
+    private var thoughtRow: some View {
+        let appearance = config.appearance
+        HStack(spacing: 6) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 11))
+                .foregroundColor(appearance.textSecondary)
+            Text(message.content)
+                .font(.system(size: 12))
+                .foregroundColor(appearance.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message.content)
+    }
 
     public var body: some View {
         // Content blocks: render as standalone rich content
@@ -33,9 +87,28 @@ public struct MessageView: View {
                 .padding(.horizontal, 12)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
+        } else if isThoughtRow {
+            // Collapsed "Consulted <agent> · 4s" row left behind by
+            // pill-mode after a sub-agent bracket closes. Centered and
+            // muted so it reads as historical metadata, not a message.
+            thoughtRow
         } else {
-        HStack(alignment: .top, spacing: 8) {
-            if isUser { Spacer(minLength: 40) }
+        HStack(alignment: .top, spacing: 3) {
+            if isUser {
+                Spacer(minLength: 40)
+            } else if shouldShowAvatar {
+                // Per-message S'Ai avatar. Sits at the bubble's leading
+                // edge so the assistant identity is anchored in the
+                // scrollback. Compact mode keeps the silhouette stable;
+                // only the latest message receives `agentAvatarSpeaking`
+                // so just that one glows when audio is in flight.
+                PresenceOrbView(
+                    isSpeaking: agentAvatarSpeaking,
+                    baseSize: avatarSize,
+                    compact: true
+                )
+                .accessibilityHidden(true)
+            }
 
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
                 // Message bubble with long-press copy

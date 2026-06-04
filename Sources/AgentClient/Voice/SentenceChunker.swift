@@ -50,9 +50,14 @@ public final class SentenceChunker {
         }
 
         // Soft sentence boundary: only flush once we have enough characters
-        // to make a worthwhile TTS request.
+        // to make a worthwhile TTS request. The emitted *chunk* (not just
+        // the buffer) must be at least ``minChars`` long — otherwise a
+        // short opener like "Hello!" gets shipped as a 1-word TTS request,
+        // which ElevenLabs voices with noticeably different prosody than
+        // the same voice mid-paragraph. Skip past short sentence ends and
+        // emit at the next terminator that meets the threshold.
         while buffer.count >= minChars {
-            guard let endIndex = sentenceEnd(in: buffer) else { break }
+            guard let endIndex = sentenceEnd(in: buffer, minChunkChars: minChars) else { break }
             let count = buffer.distance(from: buffer.startIndex, to: endIndex)
             let head = String(buffer.prefix(count)).trimmingCharacters(in: .whitespacesAndNewlines)
             buffer.removeFirst(count)
@@ -60,20 +65,25 @@ public final class SentenceChunker {
         }
     }
 
-    /// Locate the index *after* the first sentence-terminator that is
-    /// followed by whitespace or end-of-buffer. Returns ``nil`` when the
-    /// buffer doesn't yet contain a safe break.
-    private func sentenceEnd(in text: String) -> String.Index? {
+    /// Locate the index *after* the first sentence-terminator that
+    /// produces a chunk of at least ``minChunkChars`` characters and is
+    /// followed by whitespace or end-of-buffer. Returns ``nil`` when no
+    /// such break exists yet — caller should wait for more text.
+    private func sentenceEnd(in text: String, minChunkChars: Int = 0) -> String.Index? {
         let terminators: Set<Character> = [".", "!", "?"]
         var i = text.startIndex
+        var offset = 0
         while i < text.endIndex {
             if terminators.contains(text[i]) {
                 let next = text.index(after: i)
-                if next == text.endIndex || text[next].isWhitespace {
+                let chunkLen = offset + 1   // characters consumed up to and including terminator
+                if chunkLen >= minChunkChars,
+                   next == text.endIndex || text[next].isWhitespace {
                     return next
                 }
             }
             i = text.index(after: i)
+            offset += 1
         }
         return nil
     }
