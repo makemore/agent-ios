@@ -174,6 +174,34 @@ final class SSEStreamingTests: XCTestCase {
         XCTAssertTrue(vm.subAgentActivity.frames.isEmpty)
     }
 
+    func testVerboseMultiAgentOverrideShowsBubbleModeFromDefaultAppearance() async throws {
+        // The warm-dark appearance defaults to pill mode. Flipping the
+        // per-app verbose preference should opt this conversation back into
+        // legacy bubble mode without requiring hosts to use `.classic`.
+        XCTAssertEqual(config.appearance.subAgentActivityStyle, .pill)
+        let fixture = try SSEFixture.load("sai_multi_agent_handoff")
+        installHandlers(for: fixture)
+
+        let vm = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
+        vm.verboseMultiAgent = true
+        await vm.sendMessage("I'm anxious about something")
+        let therapistReply = "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"
+        try await waitForStreamSettled(vm: vm, expectedLastAssistantContent: therapistReply)
+
+        XCTAssertEqual(vm.subAgentActivityStyle, .bubbles)
+        XCTAssertEqual(vm.messages.filter { $0.type == .subAgentStart }.count, 1)
+        XCTAssertEqual(vm.messages.filter { $0.type == .subAgentEnd }.count, 1)
+        XCTAssertFalse(vm.subAgentActivity.isActive)
+
+        let assistantText = vm.messages
+            .filter { $0.role == .assistant && $0.type == .message }
+            .map(\.content)
+        XCTAssertEqual(
+            assistantText.filter { $0 == therapistReply }.count, 1,
+            "verbose mode should render the sub-agent answer once and suppress the parent echo"
+        )
+    }
+
     func testMultiAgentWithBlocksRendersSubAgentBlocks() async throws {
         let fixture = try SSEFixture.load("sai_multi_agent_with_blocks")
         installHandlers(for: fixture)

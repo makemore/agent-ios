@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `0.9.0` → add the **AgentFrontend** product to your app target.
+from `0.9.1` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.1"),
 ],
 targets: [
     .target(
@@ -206,7 +206,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.1"),
 ],
 targets: [
     .target(
@@ -237,6 +237,13 @@ Sources/AgentFrontend/
 
 
 ## Changelog
+
+### 0.9.1
+
+**Verbose multi-agent display hardening**
+
+- Ensures the bundled SwiftUI views render with the same effective `subAgentActivityStyle` used by `ChatViewModel`, so the persisted **Verbose multi-agent** preference reliably switches between collapsed pill mode and legacy bubble mode.
+- Adds streaming regression coverage for toggling verbose multi-agent on while using the warm-dark default appearance.
 
 ### 0.9.0
 

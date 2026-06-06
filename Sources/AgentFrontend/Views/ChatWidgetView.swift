@@ -107,6 +107,19 @@ public struct ChatWidgetView: View {
         .background(config.appearance.background.ignoresSafeArea())
     }
 
+    /// UI-facing config after applying view-model runtime preferences.
+    ///
+    /// `ChatViewModel` is the source of truth for whether verbose
+    /// multi-agent mode is active. The reducer already uses its effective
+    /// `subAgentActivityStyle`; pass the same style into child views so
+    /// rendering stays in lockstep with the messages/state the reducer
+    /// produced.
+    private var effectiveConfig: ChatWidgetConfig {
+        var effective = config
+        effective.appearance.subAgentActivityStyle = viewModel.subAgentActivityStyle
+        return effective
+    }
+
     private var mainStack: some View {
         VStack(spacing: 0) {
             // Built-in top bar (hamburger + new-chat pencil). Hosts
@@ -130,7 +143,7 @@ public struct ChatWidgetView: View {
                 isLoading: viewModel.isLoading,
                 hasMoreMessages: viewModel.hasMoreMessages,
                 loadingMoreMessages: viewModel.loadingMoreMessages,
-                config: config,
+                config: effectiveConfig,
                 onLoadMore: {
                     Task { await viewModel.loadMoreMessages() }
                 },
