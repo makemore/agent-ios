@@ -39,7 +39,11 @@ public struct ContentBlockRenderer: View {
         case .collapsible(let b): CollapsibleBlockView(block: b)
         case .status(let b): StatusBlockView(block: b)
         case .location(let b): LocationBlockView(block: b)
-        case .video(let b): VideoBlockView(block: b, onFullScreenChange: config.onVideoFullScreenChange)
+        case .video(let b): VideoBlockView(
+            block: b,
+            onFullScreenChange: config.onVideoFullScreenChange,
+            onPlaybackStart: config.onVideoPlaybackStart
+        )
         case .unknown: EmptyView()
         }
     }
@@ -443,6 +447,7 @@ struct LocationBlockView: View {
 struct VideoBlockView: View {
     let block: VideoBlock
     var onFullScreenChange: ((Bool) -> Void)? = nil
+    var onPlaybackStart: (() -> Void)? = nil
 
     @State private var player: AVPlayer?
     @State private var isFullScreen = false
@@ -457,6 +462,7 @@ struct VideoBlockView: View {
                 #if os(iOS)
                 if player != nil {
                     Button {
+                        onPlaybackStart?()
                         isFullScreen = true
                     } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -539,6 +545,7 @@ struct VideoBlockView: View {
         #if DEBUG
         print("[AgentFrontend][VideoBlock] loadPlayer starting AVPlayer for \(url)")
         #endif
+        onPlaybackStart?()
         let p = AVPlayer(url: url)
         self.player = p
         p.play()

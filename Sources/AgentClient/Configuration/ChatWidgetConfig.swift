@@ -225,6 +225,11 @@ public struct ChatWidgetConfig {
     /// left to the host.
     public var onVideoFullScreenChange: ((Bool) -> Void)?
 
+    /// Video playback-start callback. Invoked when a native video block
+    /// begins playback, before the player audio starts. Host apps can use
+    /// this to stop/pause TTS so agent speech does not overlap media audio.
+    public var onVideoPlaybackStart: (() -> Void)?
+
     /// Fires exactly once per conversation lifetime, the moment the
     /// runtime mints a fresh `conversationId` (i.e. the first
     /// `createRun` response carries one and `messages` was empty).
@@ -316,6 +321,7 @@ public struct ChatWidgetConfig {
         self.onEvent = nil
         self.onAuthError = nil
         self.onVideoFullScreenChange = nil
+        self.onVideoPlaybackStart = nil
         self.onConversationStart = nil
         self.onFirstAssistantMessage = nil
         self.onVoiceControllerReady = nil
