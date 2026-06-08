@@ -12,17 +12,21 @@ final class AgentClientTests: XCTestCase {
         XCTAssertEqual(config.agentKey, "default-agent")
         XCTAssertEqual(config.title, "Chat Assistant")
         XCTAssertTrue(config.showTasksTab)
+        // Model selector is opt-in: hidden unless the host turns it on.
+        XCTAssertFalse(config.showModelSelector)
     }
-    
+
     func testCustomConfiguration() {
         var config = ChatWidgetConfig(backendUrl: "https://api.example.com", agentKey: "my-agent")
         config.title = "My Chat"
         config.showTasksTab = false
+        config.showModelSelector = true
 
         XCTAssertEqual(config.backendUrl, "https://api.example.com")
         XCTAssertEqual(config.agentKey, "my-agent")
         XCTAssertEqual(config.title, "My Chat")
         XCTAssertFalse(config.showTasksTab)
+        XCTAssertTrue(config.showModelSelector)
     }
     
     // MARK: - API Paths Tests

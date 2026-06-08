@@ -106,7 +106,12 @@ public struct ChatWidgetConfig {
     /// Enable file attachments
     public var enableFiles: Bool
 
-    /// Show model selector
+    /// Gates the composer model selector. When `true` the Anthropic
+    /// composer renders the model pill, which is the only entry point to
+    /// `ModelOptionsSheet` (model picker + extended-thinking / verbose
+    /// multi-agent toggles). When `false` (the default) the pill — and
+    /// therefore the whole model selector — is hidden; hosts that want it
+    /// must opt in explicitly.
     public var showModelSelector: Bool
 
     /// Show tasks tab

@@ -779,8 +779,12 @@ public struct InputView: View {
             }
             // Override (dynamic selection from the model picker) wins
             // over the static appearance label so the pill always
-            // reflects the model the next turn will actually use.
-            if let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
+            // reflects the model the next turn will actually use. Gated
+            // on `showModelSelector` (off by default) — the pill is the
+            // only entry point to `ModelOptionsSheet`, so hiding it fully
+            // suppresses the model selector for hosts that don't opt in.
+            if config.showModelSelector,
+               let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
                !label.isEmpty {
                 modelPill(label: label)
             }

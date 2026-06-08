@@ -34,7 +34,7 @@ Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.1"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.10.0"),
 ],
 targets: [
     .target(
@@ -206,7 +206,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.9.1"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.10.0"),
 ],
 targets: [
     .target(
@@ -237,6 +237,13 @@ Sources/AgentFrontend/
 
 
 ## Changelog
+
+### 0.10.0
+
+**`showModelSelector` now gates the model selector**
+
+- **Behaviour change** — `ChatWidgetConfig.showModelSelector` (default `false`) finally controls the composer model selector. The Anthropic composer's model pill — the only entry point to `ModelOptionsSheet` (model picker + extended-thinking / verbose multi-agent toggles) — is rendered **only** when `showModelSelector == true`. Previously the flag was unused and the pill appeared whenever a model label resolved. Hosts that relied on seeing the model selector must now set `showModelSelector = true` explicitly.
+- Model-loading in `ChatViewModel` is unchanged; this is purely a visibility gate on the composer pill / sheet.
 
 ### 0.9.1
 
