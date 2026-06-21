@@ -75,6 +75,30 @@ public struct ChatAppearance {
     /// not customised by the host.
     public var accent: Color
 
+    /// Background colour for the user's own message bubbles. When `nil`
+    /// the transcript falls back to `ChatWidgetConfig.primaryColor`,
+    /// preserving the prior (host-customisable) behaviour; set a value
+    /// to theme the user side of the transcript independently.
+    public var userBubble: Color?
+
+    /// Background colour for assistant message bubbles. When `nil` the
+    /// transcript falls back to the adaptive system grey it used before
+    /// the warm-dark redesign, so `.classic` is unchanged. The default
+    /// initializer supplies the warm tone for the anthropic baseline.
+    public var assistantBubble: Color?
+
+    /// Background colour for tool / system message bubbles. When `nil`
+    /// the transcript falls back to the adaptive system grey, keeping
+    /// `.classic` unchanged. The default initializer supplies the warm
+    /// tone for the anthropic baseline.
+    public var systemBubble: Color?
+
+    /// Colour for markdown links and `requiredAction` labels in the
+    /// transcript. When `nil` the transcript falls back to
+    /// `ChatWidgetConfig.primaryColor`, matching the prior behaviour;
+    /// set a value to re-tint links independently.
+    public var link: Color?
+
     // MARK: - Typography
 
     /// Font design used for the empty-state greeting headline.
@@ -114,6 +138,10 @@ public struct ChatAppearance {
         textSecondary: Color = Color(hex: "#A8A29A"),
         textOnAccent: Color = Color.white,
         accent: Color = Color(hex: "#D97757"),
+        userBubble: Color? = nil,
+        assistantBubble: Color? = Color(hex: "#3A3A37"),
+        systemBubble: Color? = Color(hex: "#2F2F2D"),
+        link: Color? = nil,
         greetingFontDesign: Font.Design = .serif,
         greetingFontSize: CGFloat = 32,
         composerStyle: ComposerStyle = .anthropic,
@@ -131,6 +159,10 @@ public struct ChatAppearance {
         self.textSecondary = textSecondary
         self.textOnAccent = textOnAccent
         self.accent = accent
+        self.userBubble = userBubble
+        self.assistantBubble = assistantBubble
+        self.systemBubble = systemBubble
+        self.link = link
         self.greetingFontDesign = greetingFontDesign
         self.greetingFontSize = greetingFontSize
         self.composerStyle = composerStyle
@@ -155,6 +187,8 @@ public struct ChatAppearance {
             textSecondary: Color.secondary,
             textOnAccent: Color.white,
             accent: Color(hex: "#4a6b8e"),
+            assistantBubble: nil,
+            systemBubble: nil,
             greetingFontDesign: .default,
             greetingFontSize: 17,
             composerStyle: .classic,

@@ -75,6 +75,7 @@ extension APIClient {
         agentKeyOverride: String? = nil,
         systemVersionId: String? = nil,
         ephemeral: Bool = false,
+        privateOnly: Bool = false,
         memories: [[String: String]]? = nil,
         params: [String: Any]? = nil
     ) async throws -> AgentRun {
@@ -108,6 +109,10 @@ extension APIClient {
 
         if ephemeral {
             body["ephemeral"] = true
+        }
+
+        if privateOnly {
+            body["private_only"] = true
         }
 
         if let memories = memories, !memories.isEmpty {

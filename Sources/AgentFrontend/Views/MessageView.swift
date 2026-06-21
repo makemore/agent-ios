@@ -29,6 +29,10 @@ public struct MessageView: View {
     private var isSystem: Bool { message.role == .system }
     private var isToolMessage: Bool { message.type == .toolCall || message.type == .toolResult }
     private var isContentBlocks: Bool { message.type == .contentBlocks }
+    /// Visual tokens for the transcript. Sourced from the host's
+    /// `ChatWidgetConfig.appearance` so bubble colours, text colours,
+    /// link tint, and corner radius all track the configured theme.
+    private var appearance: ChatAppearance { config.appearance }
     /// Avatar gating mirrors the bubble visibility — we only paint the
     /// orb next to an actual assistant text bubble, not next to tool /
     /// system / content-block / thought rows (each of which has its
@@ -172,7 +176,7 @@ public struct MessageView: View {
             
             // Content — markdown for assistant messages, plain text for user/system
             if !isUser && !isSystem && !isToolMessage && config.enableMarkdown {
-                MarkdownTextView(content: message.content, foregroundColor: messageTextColor, linkColor: config.primaryColor)
+                MarkdownTextView(content: message.content, foregroundColor: messageTextColor, linkColor: linkColor)
             } else {
                 Text(message.content)
                     .font(.body)
@@ -182,7 +186,7 @@ public struct MessageView: View {
             if message.type == .requiredAction, let label = message.metadata?.actionLabel {
                 Text(label)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundColor(config.primaryColor)
+                    .foregroundColor(linkColor)
                     .padding(.top, 2)
             }
             
@@ -198,7 +202,7 @@ public struct MessageView: View {
         }
         .padding(12)
         .background(bubbleBackground)
-        .cornerRadius(16)
+        .cornerRadius(appearance.bubbleCornerRadius)
     }
     
     @ViewBuilder
@@ -229,19 +233,26 @@ public struct MessageView: View {
     
     private var messageTextColor: Color {
         if isUser {
-            return config.primaryColor.contrastingTextColor
+            return appearance.textOnAccent
         }
-        return .primary
+        return appearance.textPrimary
     }
-    
+
+    /// Link / `requiredAction` tint. Falls back to the host's
+    /// `primaryColor` when the appearance leaves `link` unset, matching
+    /// the pre-token behaviour.
+    private var linkColor: Color {
+        appearance.link ?? config.primaryColor
+    }
+
     private var bubbleBackground: Color {
         if isUser {
-            return config.primaryColor
+            return appearance.userBubble ?? config.primaryColor
         }
         if isToolMessage || isSystem {
-            return PlatformColors.systemGray6
+            return appearance.systemBubble ?? PlatformColors.systemGray6
         }
-        return PlatformColors.systemGray5
+        return appearance.assistantBubble ?? PlatformColors.systemGray5
     }
     
     @ViewBuilder

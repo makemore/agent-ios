@@ -81,10 +81,38 @@ public class LocalHistoryStore {
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
             print("[LocalHistoryStore] Failed to open database at \(dbPath)")
         }
+        if dbPath != ":memory:" {
+            Self.protectFileAtRest(dbPath)
+        }
         createTables()
     }
 
     deinit { sqlite3_close(db) }
+
+    /// Encrypt the on-disk conversation database at rest. On iOS this ties the
+    /// file to the device's hardware-backed class key with
+    /// `.completeUnlessOpen`: unreadable on a locked, captured device, while a
+    /// handle opened before lock keeps working so a backgrounded stream isn't
+    /// killed mid-write. No-op on macOS (no data protection) and for in-memory
+    /// databases. Also excludes the DB (and its -wal/-shm siblings) from
+    /// iCloud/iTunes backups.
+    private static func protectFileAtRest(_ dbPath: String) {
+        #if os(iOS)
+        let fm = FileManager.default
+        for suffix in ["", "-wal", "-shm"] {
+            let p = dbPath + suffix
+            guard fm.fileExists(atPath: p) else { continue }
+            try? fm.setAttributes(
+                [.protectionKey: FileProtectionType.completeUnlessOpen],
+                ofItemAtPath: p
+            )
+            var url = URL(fileURLWithPath: p)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? url.setResourceValues(values)
+        }
+        #endif
+    }
 
     // MARK: - Schema
 

@@ -9,7 +9,12 @@ public struct AgentFrontend {
     /// - Returns: A SwiftUI view containing the chat widget
     @MainActor
     public static func createChatWidget(config: ChatWidgetConfig) -> some View {
-        let storage = UserDefaultsStorage(prefix: config.agentKey)
+        // Secrets (auth token, client memories) go to the Keychain; non-secret
+        // UI preferences stay in UserDefaults. See SecureStorageService.
+        let storage = SecureStorageService.makeDefault(
+            prefix: config.agentKey,
+            secureKeys: [config.anonymousTokenKey]
+        )
         let apiClient = APIClient(config: config, storage: storage)
         let viewModel = ChatViewModel(config: config, apiClient: apiClient, storage: storage)
 
@@ -34,7 +39,12 @@ public struct AgentFrontend {
     /// - Returns: A ChatViewModel instance
     @MainActor
     public static func createViewModel(config: ChatWidgetConfig) -> ChatViewModel {
-        let storage = UserDefaultsStorage(prefix: config.agentKey)
+        // Secrets (auth token, client memories) go to the Keychain; non-secret
+        // UI preferences stay in UserDefaults. See SecureStorageService.
+        let storage = SecureStorageService.makeDefault(
+            prefix: config.agentKey,
+            secureKeys: [config.anonymousTokenKey]
+        )
         let apiClient = APIClient(config: config, storage: storage)
         return ChatViewModel(config: config, apiClient: apiClient, storage: storage)
     }

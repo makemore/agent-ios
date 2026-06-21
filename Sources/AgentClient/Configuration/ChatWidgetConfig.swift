@@ -124,6 +124,16 @@ public struct ChatWidgetConfig {
     /// The server only holds run data for a short pickup window.
     public var ephemeral: Bool
 
+    /// Private-only egress: when true, every run is flagged `private_only`
+    /// so the server routes it ONLY to the configured private model endpoint
+    /// (fail-closed). Set this for data-sovereignty-restricted users.
+    public var privateOnly: Bool
+
+    /// Allow cleartext HTTP to the backend. Default `false`: the client
+    /// refuses to send over a non-HTTPS connection (except to local dev
+    /// hosts). Only enable for local development against an http:// backend.
+    public var allowInsecureHTTP: Bool
+
     /// Follow the assistant's streaming reply by auto-scrolling to the
     /// bottom on every token. When `false` the list stays put while the
     /// reply is being generated and the user controls scrolling. The
@@ -301,6 +311,8 @@ public struct ChatWidgetConfig {
         self.showTasksTab = true
         self.showSystemPicker = true
         self.ephemeral = false
+        self.privateOnly = false
+        self.allowInsecureHTTP = false
         self.followStreamingEnabled = true
         self.nearBottomThresholdPt = 100
         self.authStrategy = nil

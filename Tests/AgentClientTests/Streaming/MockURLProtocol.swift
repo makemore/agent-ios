@@ -19,7 +19,16 @@ final class MockURLProtocol: URLProtocol {
 
     typealias Handler = (URLRequest) -> Response?
 
+    /// A captured request — method, path, and decoded JSON body. Used by the
+    /// parity tests to assert exactly what the client put on the wire.
+    struct Recorded {
+        let method: String
+        let path: String
+        let body: Data?
+    }
+
     private static var handlers: [Handler] = []
+    private static var recordedRequests: [Recorded] = []
     private static let lock = NSLock()
 
     static func register(handler: @escaping Handler) {
@@ -30,6 +39,36 @@ final class MockURLProtocol: URLProtocol {
     static func reset() {
         lock.lock(); defer { lock.unlock() }
         handlers.removeAll()
+        recordedRequests.removeAll()
+    }
+
+    /// Snapshot of every request seen since the last `reset()`, in order.
+    static var recorded: [Recorded] {
+        lock.lock(); defer { lock.unlock() }
+        return recordedRequests
+    }
+
+    private static func record(_ r: Recorded) {
+        lock.lock(); defer { lock.unlock() }
+        recordedRequests.append(r)
+    }
+
+    /// URLProtocol nils `httpBody` and exposes the payload as a stream, so we
+    /// drain `httpBodyStream` to recover the bytes the client sent.
+    static func bodyData(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open(); defer { stream.close() }
+        var data = Data()
+        let bufSize = 4096
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+        defer { buf.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buf, maxLength: bufSize)
+            if read <= 0 { break }
+            data.append(buf, count: read)
+        }
+        return data.isEmpty ? nil : data
     }
 
     private static func response(for request: URLRequest) -> Response? {
@@ -51,6 +90,11 @@ final class MockURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
+        MockURLProtocol.record(Recorded(
+            method: request.httpMethod ?? "GET",
+            path: url.path,
+            body: MockURLProtocol.bodyData(of: request)
+        ))
         guard let outcome = MockURLProtocol.response(for: request) else {
             // No handler matched. Fail loudly so the test author notices
             // an unexpected request rather than silently hanging.

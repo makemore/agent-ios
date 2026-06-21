@@ -57,10 +57,33 @@ public class APIClient {
         return .none
     }
     
+    /// Standard local-development hosts that may use cleartext HTTP even when
+    /// `allowInsecureHTTP` is off: loopback, the Android emulator alias, and
+    /// `.local` (mDNS/Bonjour) dev servers.
+    static func isDevHost(_ host: String?) -> Bool {
+        guard let h = host?.lowercased() else { return false }
+        return h == "localhost" || h == "127.0.0.1" || h == "::1"
+            || h == "10.0.2.2" || h.hasSuffix(".local")
+    }
+
+    /// Fail closed on cleartext transport. Called before any network egress so
+    /// a misconfigured (http://) production backend never receives data.
+    func validateTransport() throws {
+        guard let url = URL(string: config.backendUrl),
+              let scheme = url.scheme?.lowercased() else {
+            throw APIError.insecureTransport(host: config.backendUrl)
+        }
+        if scheme == "https" { return }
+        if config.allowInsecureHTTP { return }
+        if Self.isDevHost(url.host) { return }
+        throw APIError.insecureTransport(host: url.host ?? config.backendUrl)
+    }
+
     /// Get or create a session token
     public func getOrCreateSession(forceRefresh: Bool = false) async throws -> String? {
+        try validateTransport()
         let strategy = authStrategy
-        
+
         if strategy != .anonymous {
             return authToken ?? config.authToken
         }

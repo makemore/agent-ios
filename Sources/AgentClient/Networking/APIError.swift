@@ -11,7 +11,8 @@ public enum APIError: LocalizedError {
     case cancelFailed
     case decodingError(Error)
     case networkError(Error)
-    
+    case insecureTransport(host: String)
+
     public var errorDescription: String? {
         switch self {
         case .invalidResponse:
@@ -32,6 +33,9 @@ public enum APIError: LocalizedError {
             return "Failed to decode response: \(error.localizedDescription)"
         case .networkError(let error):
             return "Network error: \(error.localizedDescription)"
+        case .insecureTransport(let host):
+            return "Refusing to send over an insecure (non-HTTPS) connection to \(host). "
+                + "Use an https:// backend URL, or set allowInsecureHTTP for local development."
         }
     }
 }

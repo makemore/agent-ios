@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `0.9.1` → add the **AgentFrontend** product to your app target.
+from `3.0.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.10.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.0"),
 ],
 targets: [
     .target(
@@ -206,7 +206,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "0.10.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.0"),
 ],
 targets: [
     .target(
@@ -237,6 +237,13 @@ Sources/AgentFrontend/
 
 
 ## Changelog
+
+### 3.0.0
+
+**Unified client versioning + themable transcript**
+
+- **Synchronized versioning** — iOS, Android, and web clients now share a single version line starting at `3.0.0`. This release carries the same feature set as the prior `0.10.0` (iOS) / `0.9.0` (Android) tags; the major bump signals production maturity and version alignment across platforms, not a breaking API change.
+- **Message-bubble theming** — `ChatAppearance` gains `userBubble`, `assistantBubble`, `systemBubble`, and `link` tokens. `MessageView` now drives bubble backgrounds, text colours, corner radius, and markdown link tint from these tokens. Tokens are optional and fall back to the previous behaviour (host `primaryColor` / adaptive system greys), so existing integrations are unaffected.
 
 ### 0.10.0
 

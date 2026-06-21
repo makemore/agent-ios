@@ -497,6 +497,7 @@ public class ChatViewModel: ObservableObject {
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
                 systemVersionId: selectedSystemVersionId,
                 ephemeral: config.ephemeral,
+                privateOnly: config.privateOnly,
                 memories: config.ephemeral ? clientMemories : nil,
                 params: resolvedParams.isEmpty ? nil : resolvedParams
             )
@@ -878,6 +879,20 @@ public class ChatViewModel: ObservableObject {
     public func purgeLocalHistory() {
         localHistoryStore?.purgeAll()
         localConversations = []
+    }
+
+    /// Wipe all on-device data for this agent — call on logout / sign-out so a
+    /// later holder of the device finds nothing. Clears the local conversation
+    /// history, the cached client memories, the in-memory transcript, and the
+    /// stored auth/anonymous token (removed from the Keychain when the secure
+    /// store is in use).
+    public func clearAllLocalData() {
+        purgeLocalHistory()
+        storage.set(Self.memoriesStorageKey, value: nil)
+        clientMemories = []
+        messages = []
+        conversationId = nil
+        apiClient.clearSession()
     }
 
     /// Persist the current conversation to the on-device store.
