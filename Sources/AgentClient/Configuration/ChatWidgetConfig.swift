@@ -103,6 +103,16 @@ public struct ChatWidgetConfig {
     /// Enable voice input
     public var enableVoice: Bool
 
+    /// Policy for choosing remote vs local/system TTS.
+    /// In `privateOnly` mode, `.automatic` resolves to `.localOnly` so
+    /// assistant text is not sent to remote voice providers by default.
+    public var ttsProviderPolicy: TTSProviderPolicy
+
+    /// Policy for speech input privacy. In `privateOnly` mode, `.automatic`
+    /// resolves to `.localOnly`; if on-device recognition is unavailable,
+    /// the mic affordance fails closed.
+    public var speechInputPolicy: SpeechInputPolicy
+
     /// Enable file attachments
     public var enableFiles: Bool
 
@@ -275,7 +285,19 @@ public struct ChatWidgetConfig {
     /// or any other action that swaps the VM will cause the widget
     /// to remount and the callback to fire again with the new VM.
     public var onVoiceControllerReady: ((ChatViewModel) -> Void)?
-    
+
+    /// Fired exactly once per run, the moment the SSE stream is torn
+    /// down. The first argument is the runId of the stream that just
+    /// closed; the second classifies the teardown so the host can
+    /// distinguish a user-driven cancel (`.explicit`) from a network
+    /// failure (`.network`) or a view/VM/OS lifecycle event
+    /// (`.lifecycle`). The library does not perform any network call
+    /// in response — this is purely a signal for the host to decide
+    /// what to do (e.g. notify a backend that the user left).
+    /// Default `nil` preserves the existing behaviour where the
+    /// library does nothing on stream teardown.
+    public var onDisconnect: ((String, DisconnectReason) -> Void)?
+
     // MARK: - Initialization
     
     public init(
@@ -306,6 +328,8 @@ public struct ChatWidgetConfig {
         self.showTTSButton = true
         self.enableTTS = false
         self.enableVoice = true
+        self.ttsProviderPolicy = .automatic
+        self.speechInputPolicy = .automatic
         self.enableFiles = true
         self.showModelSelector = false
         self.showTasksTab = true
@@ -342,6 +366,21 @@ public struct ChatWidgetConfig {
         self.onConversationStart = nil
         self.onFirstAssistantMessage = nil
         self.onVoiceControllerReady = nil
+        self.onDisconnect = nil
+    }
+}
+
+public extension ChatWidgetConfig {
+    /// Effective TTS policy after protected/private defaults are applied.
+    var effectiveTTSProviderPolicy: TTSProviderPolicy {
+        if privateOnly && ttsProviderPolicy == .automatic { return .localOnly }
+        return ttsProviderPolicy
+    }
+
+    /// Effective speech-input policy after protected/private defaults are applied.
+    var effectiveSpeechInputPolicy: SpeechInputPolicy {
+        if privateOnly && speechInputPolicy == .automatic { return .localOnly }
+        return speechInputPolicy
     }
 }
 

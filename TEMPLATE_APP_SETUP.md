@@ -61,8 +61,8 @@ MyApp/
 1. **Create a new Xcode project**: iOS → App → SwiftUI → Swift. Name it `MyApp` (or your preferred name).
 2. **Minimum deployment target**: iOS 16.0.
 3. **Add AgentFrontend package** (Swift Package Manager, pinned to a version tag):
-   - File → Add Package Dependencies… → paste `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version** from `3.0.0` (use the latest [tag](https://github.com/makemore/agent-ios/tags)).
-   - Or in `Package.swift`: `.package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.0")`
+   - File → Add Package Dependencies… → paste `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version** from `3.0.1` (use the latest [tag](https://github.com/makemore/agent-ios/tags)).
+   - Or in `Package.swift`: `.package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.1")`
    - Add the `AgentFrontend` product as a dependency of your app target.
    - **Public repo:** no token or credentials needed — SwiftPM (and CI) can clone `makemore/agent-ios` directly.
    - *(Library development only)* alternatively add the local folder via **Add Local…** or `.package(path: "../agent_libraries/clients/agent-ios")`.
@@ -475,6 +475,10 @@ final class AppViewModel: ObservableObject {
         config.showClearButton = false           // We handle this ourselves
         config.showTasksTab = false              // Optional: set true if you want tasks
         config.enableFiles = true
+        // Voice output:
+        // Normal mode: config.enableTTS = true; config.ttsProviderPolicy = .automatic
+        // Protected mode: config.privateOnly = true; config.enableTTS = true; config.ttsProviderPolicy = .localOnly
+        // Local/system TTS quality depends on the OS/device and will not match ElevenLabs.
         config.apiCaseStyle = .auto
 
         // Auth — use .token for DRF Token, .jwt for JWT Bearer

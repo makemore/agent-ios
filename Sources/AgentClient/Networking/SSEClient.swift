@@ -18,16 +18,43 @@ internal func redactURLForLogging(_ url: URL) -> String {
     return components.url?.absoluteString ?? url.absoluteString
 }
 
+/// Reason the SSE stream was torn down. Mirrors the
+/// `DisconnectReason` enum in the Android `ChatWidgetConfig` and the
+/// `DisconnectReason` union exported by `@makemore/agent-client` on
+/// web. Hosts can use this to distinguish a clean user-driven cancel
+/// from a network failure or a lifecycle teardown (e.g. SwiftUI view
+/// disappearance, VM deinit).
+public enum DisconnectReason: String, Sendable {
+    /// `cancelRun()` or an explicit client-side close.
+    case explicit
+    /// Underlying socket / read error reported by `URLSession`.
+    case network
+    /// View disappeared, VM deinit, OS backgrounding — the run
+    /// continues server-side; the client is just no longer watching.
+    case lifecycle
+    /// Unhandled / unknown teardown.
+    case error
+}
+
 /// Server-Sent Events client for streaming responses
 public class SSEClient {
     private var task: URLSessionDataTask?
     private var buffer = ""
+    /// Run ID of the active stream, set inside `connect(url:headers:runId:)`.
+    /// Captured here so `disconnect(reason:)` can pass it to the
+    /// `onDisconnect` callback without callers having to remember to
+    /// supply it. Cleared on disconnect.
+    private var lastRunId: String?
     /// Set by `disconnect()` so the URLSession completion callback can tell
     /// "we asked for this" (NSURLErrorCancelled is expected, surface as
     /// `onComplete`) from a genuine network failure (surface as `onError`).
     /// Without this, calling `disconnect()` after a terminal SSE event
     /// produces a "cancelled" banner flash before the next run starts.
     private var expectingDisconnect = false
+    /// Set true after the onDisconnect callback has fired for the
+    /// current run. Prevents double-firing if both an explicit
+    /// disconnect and a late error callback race on the same run.
+    private var hasFiredDisconnect = false
     /// Retained reference to the active stream delegate so `parseEvent`
     /// can bump the event counter the delegate reports at completion.
     private var streamDelegate: SSEStreamDelegate?
@@ -35,6 +62,11 @@ public class SSEClient {
     public var onEvent: ((SSEEvent) -> Void)?
     public var onError: ((Error) -> Void)?
     public var onComplete: (() -> Void)?
+    /// Fired exactly once when the SSE stream is torn down. The first
+    /// argument is the runId of the stream that just closed; the
+    /// second classifies the teardown so the host can distinguish
+    /// a user cancel from a network failure or a lifecycle event.
+    public var onDisconnect: ((String, DisconnectReason) -> Void)?
 
     /// Hook for tests to inject a `URLProtocol` (or otherwise mutate the
     /// session configuration) into every `URLSession` this client builds
@@ -43,8 +75,17 @@ public class SSEClient {
 
     public init() {}
 
-    /// Connect to an SSE endpoint
-    public func connect(url: URL, headers: [String: String] = [:]) {
+    /// Connect to an SSE endpoint.
+    /// - Parameter runId: The run ID for the stream; captured so the
+    ///   `onDisconnect` callback can report it without the caller
+    ///   having to thread it through `disconnect()`. Pass `nil` if
+    ///   the client is being used outside of an agent-runtime run
+    ///   (e.g. ad-hoc SSE in tests); in that case `disconnect()`
+    ///   will not fire `onDisconnect` because there is no runId to
+    ///   report.
+    public func connect(url: URL, headers: [String: String] = [:], runId: String? = nil) {
+        lastRunId = runId
+        hasFiredDisconnect = false
         var request = URLRequest(url: url)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -93,13 +134,38 @@ public class SSEClient {
         task?.resume()
     }
 
-    /// Disconnect from the SSE endpoint
-    public func disconnect() {
+    /// Disconnect from the SSE endpoint.
+    /// - Parameter reason: Why the stream is being torn down. The
+    ///   caller (the view model) is responsible for choosing the
+    ///   correct reason — the SSE owner no longer has enough context
+    ///   to distinguish "user cancelled" from "view disappeared".
+    ///   `disconnect()` only fires the `onDisconnect` callback when a
+    ///   run was associated with this client (i.e. `connect(...,
+    ///   runId:)` was called first); for clients created in tests
+    ///   without a runId the callback is a no-op.
+    public func disconnect(reason: DisconnectReason = .explicit) {
+        guard let runId = lastRunId else {
+            // Never connected, or already cleaned up — nothing to report.
+            expectingDisconnect = true
+            task?.cancel()
+            task = nil
+            buffer = ""
+            streamDelegate = nil
+            return
+        }
         expectingDisconnect = true
         task?.cancel()
         task = nil
         buffer = ""
         streamDelegate = nil
+        if !hasFiredDisconnect {
+            hasFiredDisconnect = true
+            let captured = runId
+            DispatchQueue.main.async { [weak self] in
+                self?.onDisconnect?(captured, reason)
+            }
+        }
+        lastRunId = nil
     }
     
     private func processData(_ text: String) {

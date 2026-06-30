@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.0.0` → add the **AgentFrontend** product to your app target.
+from `3.0.1` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.1"),
 ],
 targets: [
     .target(
@@ -126,6 +126,8 @@ config.showTasksTab = true
 config.showModelSelector = false
 config.enableFiles = true
 config.enableVoice = true
+config.enableTTS = true
+config.ttsProviderPolicy = .automatic
 
 // Authentication
 config.authStrategy = .jwt
@@ -137,6 +139,35 @@ config.apiPaths = APIPaths(
     runs: "/api/v2/runs/"
 )
 ```
+
+### Privacy-safe voice output
+
+Normal mode keeps the existing remote/provider-backed voice behavior when the
+Django voice proxy is configured:
+
+```swift
+config.enableTTS = true
+config.ttsProviderPolicy = .automatic
+```
+
+Protected/private mode should use system TTS so assistant message text never
+goes to ElevenLabs or another remote TTS provider:
+
+```swift
+config.privateOnly = true
+config.enableTTS = true
+config.ttsProviderPolicy = .localOnly
+```
+
+`privateOnly = true` also makes `.automatic` resolve to local/system TTS. In
+that mode the library does not request `/voice/token/` and does not call
+`/voice/tts/`. Host apps can inspect `VoiceController.voiceMode` to show states
+such as “Using device voice in Protected AI Mode” or an unavailable reason.
+
+Local/system voice quality depends on the OS, installed voices, and device; it
+will not match ElevenLabs quality. Speech input also has a `speechInputPolicy`;
+protected mode defaults to on-device recognition and disables the mic when the
+OS cannot provide it.
 
 ### Auth Strategies
 
@@ -206,7 +237,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.1"),
 ],
 targets: [
     .target(
@@ -237,6 +268,16 @@ Sources/AgentFrontend/
 
 
 ## Changelog
+
+### 3.0.1
+
+**`onDisconnect` callback**
+
+- **New `onDisconnect` on `ChatWidgetConfig`** — optional `((String, DisconnectReason) -> Void)?` fired exactly once per run when the SSE stream is torn down. The first argument is the `runId` of the stream that just closed; the second classifies the teardown so the host can distinguish a user-driven cancel (`.explicit`) from a network failure (`.network`) or a view/VM/OS lifecycle event (`.lifecycle`). The library does not perform any network call in response — this is purely a signal for the host to decide what to do (e.g. notify a backend that the user left). Default `nil` preserves the existing behaviour.
+- **`DisconnectReason` enum** — new public type on `AgentClient` with cases `explicit`, `network`, `lifecycle`, `error`. Mirrors the Android enum and the web `DisconnectReason` union.
+- **`SSEClient.disconnect(reason:)`** — signature extended from `disconnect()` to `disconnect(reason: DisconnectReason = .explicit)`. Callers (the view model) choose the reason; the SSE owner no longer has enough context to distinguish "user cancelled" from "view disappeared". A `hasFiredDisconnect` guard ensures the callback fires at most once per run.
+- **`ChatViewModel`** — passes `runId` into `SSEClient.connect(url:headers:runId:)`, forwards `config.onDisconnect` to the SSE owner's callback, and tags each of the four `sseClient?.disconnect()` call sites with the right reason: `.explicit` from `cancelRun()` and the new-run-replaces-prior path, `.lifecycle` from terminal `run.suspended` / `client.action.required` and from a terminal `run.succeeded` / `run.failed` / `run.cancelled` / `run.timed_out`. A new `deinit` on `ChatViewModel` calls `sseClient?.disconnect(reason: .lifecycle)` so VM teardown also produces a clean lifecycle signal.
+- **Additive** — no breaking changes. Default `onDisconnect = nil` makes the entire feature a no-op for existing consumers; every existing call site (`sseClient?.disconnect()`) continues to compile and behave identically.
 
 ### 3.0.0
 

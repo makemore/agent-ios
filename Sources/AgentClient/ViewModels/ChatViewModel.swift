@@ -540,7 +540,7 @@ public class ChatViewModel: ObservableObject {
             runState = .cancelling
             try await apiClient.cancelRun(id: runId)
 
-            sseClient?.disconnect()
+            sseClient?.disconnect(reason: .explicit)
             sseClient = nil
             // Drop any buffered-but-not-yet-drained characters and stop the
             // typewriter timer. Without this, the drain timer keeps revealing
@@ -1146,7 +1146,13 @@ public class ChatViewModel: ObservableObject {
     // MARK: - Private Methods
 
     private func subscribeToEvents(runId: String) async {
-        sseClient?.disconnect()
+        // Tear down any prior run's stream. This is hit both when a
+        // user cancels (see `cancelRun`) and when a new run replaces
+        // a prior one. Both are client-initiated closes, so we
+        // surface `.explicit`; the host can disambiguate "user
+        // cancelled" from "new run started" by tracking the runId
+        // they passed to `cancelRun`.
+        sseClient?.disconnect(reason: .explicit)
 
         let eventPath = config.apiPaths.runEventsUrl(for: runId)
         var urlString = "\(config.backendUrl)\(eventPath)"
@@ -1178,6 +1184,17 @@ public class ChatViewModel: ObservableObject {
             }
         }
 
+        // Forward the host-configured onDisconnect through the SSE
+        // owner. The SSEClient fires this exactly once per run with
+        // a classified reason (`.explicit` for cancelRun / replace,
+        // `.network` for transport errors, `.lifecycle` for VM/view
+        // teardown). The library does NOT do any networking in
+        // response — it just signals.
+        let onDisconnect = config.onDisconnect
+        client.onDisconnect = { disconnectedRunId, reason in
+            onDisconnect?(disconnectedRunId, reason)
+        }
+
         // Suspend until the stream reaches a terminal state. Resolution
         // happens in `onError`, `onComplete`, or `cancelRun` — whichever
         // fires first. `resumeStreamContinuation` is single-shot so a late
@@ -1203,7 +1220,7 @@ public class ChatViewModel: ObservableObject {
             }
 
             print("[ChatViewModel] subscribing runId=\(runId) url=\(redactURLForLogging(url))")
-            client.connect(url: url, headers: apiClient.authHeaders())
+            client.connect(url: url, headers: apiClient.authHeaders(), runId: runId)
         }
     }
 
@@ -1747,7 +1764,11 @@ public class ChatViewModel: ObservableObject {
         }
 
         isLoading = false
-        sseClient?.disconnect()
+        // The server asked us to pause (required action / run.suspended).
+        // The run continues server-side; we're dropping the socket
+        // because the user is no longer actively watching. This is a
+        // lifecycle teardown from the backend's perspective.
+        sseClient?.disconnect(reason: .lifecycle)
         sseClient = nil
         currentRunId = nil
         runState = .waiting
@@ -1958,7 +1979,15 @@ public class ChatViewModel: ObservableObject {
         }
 
         isLoading = false
-        sseClient?.disconnect()
+        // Terminal event arrived (`run.succeeded` / `run.failed` /
+        // `run.cancelled` / `run.timed_out`). The run is over
+        // server-side; the client is just dropping the now-idle
+        // socket. Map to `.lifecycle` — the run itself reached end
+        // of life. Hosts that need to distinguish "I cancelled"
+        // from "the server finished" can track which runId they
+        // passed to `cancelRun` and ignore the callback for
+        // unrecognised ids.
+        sseClient?.disconnect(reason: .lifecycle)
         sseClient = nil
         currentRunId = nil
 
@@ -2040,6 +2069,15 @@ public class ChatViewModel: ObservableObject {
             timestamp: timestamp,
             type: .message
         )]
+    }
+
+    /// Tear down any in-flight SSE stream when the VM is deinit'd. The
+    /// run continues server-side; this is a `.lifecycle` teardown
+    /// from the backend's perspective — the user has navigated away.
+    /// `disconnect(reason:)` is no-op if no client is attached, so
+    /// this is safe to call unconditionally.
+    deinit {
+        sseClient?.disconnect(reason: .lifecycle)
     }
 }
 
