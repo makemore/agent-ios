@@ -16,6 +16,7 @@ import Combine
 public final class VoiceController: ObservableObject {
     @Published public private(set) var isSpeaking: Bool = false
     @Published public var isEnabled: Bool
+    @Published public private(set) var voiceMode: VoiceMode
     /// Rolling window of recently-spoken agent text. Consumed by the
     /// iOS InputView's barge-in monitor to filter AEC leak-back: any
     /// transcription the recognizer produces while the agent is talking
@@ -29,17 +30,25 @@ public final class VoiceController: ObservableObject {
     /// is enough lookback for the monitor's word-overlap check.
     private let recentSpokenTextMaxChars: Int = 1500
 
-    private let provider: TTSProvider
+    private let provider: TTSProvider?
     private var queue: [String] = []
     private var isDraining: Bool = false
     private var currentTask: Task<Void, Never>?
     private var currentEmotion: Emotion?
     private var chunker: SentenceChunker!
 
-    public init(provider: TTSProvider, enabled: Bool = true,
+    public init(provider: TTSProvider?, enabled: Bool = true,
+                voiceMode: VoiceMode? = nil,
                 minChars: Int = 40, maxChars: Int = 240) {
         self.provider = provider
-        self.isEnabled = enabled
+        let resolvedMode = voiceMode ?? (provider == nil ? VoiceMode.disabled : .local)
+        let resolvedModeCanEnable: Bool
+        switch resolvedMode {
+        case .remote, .local: resolvedModeCanEnable = true
+        case .unavailable, .disabled: resolvedModeCanEnable = false
+        }
+        self.voiceMode = resolvedMode
+        self.isEnabled = enabled && provider != nil && resolvedModeCanEnable
         self.chunker = SentenceChunker(minChars: minChars, maxChars: maxChars) { [weak self] text in
             self?.enqueue(text)
         }
@@ -74,7 +83,7 @@ public final class VoiceController: ObservableObject {
         chunker.reset()
         currentTask?.cancel()
         currentTask = nil
-        provider.cancel()
+        provider?.cancel()
         setSpeaking(false)
         // Wipe the leak-back filter buffer so the next turn starts fresh.
         recentSpokenText = ""
@@ -90,7 +99,7 @@ public final class VoiceController: ObservableObject {
 
     /// Toggle speech on/off. Disabling stops any current playback.
     public func setEnabled(_ enabled: Bool) {
-        isEnabled = enabled
+        isEnabled = enabled && provider != nil && Self.canEnable(voiceMode)
         if !enabled { stop() }
     }
 
@@ -117,6 +126,10 @@ public final class VoiceController: ObservableObject {
             // the InputView monitor already has the text by the time the
             // first audio frame leaks into the mic.
             appendRecentSpoken(text)
+            guard let provider = provider else {
+                queue.removeAll()
+                break
+            }
             let opts = TTSSpeakOptions(emotion: currentEmotion)
             do {
                 try Task.checkCancellation()
@@ -132,6 +145,8 @@ public final class VoiceController: ObservableObject {
                 #if DEBUG
                 print("[VoiceController] speak failed: \(error)")
                 #endif
+                voiceMode = .unavailable(reason: error.localizedDescription)
+                isEnabled = false
                 queue.removeAll()
                 break
             }
@@ -155,5 +170,12 @@ public final class VoiceController: ObservableObject {
             joined = String(joined.suffix(recentSpokenTextMaxChars))
         }
         recentSpokenText = joined
+    }
+
+    private static func canEnable(_ mode: VoiceMode) -> Bool {
+        switch mode {
+        case .remote, .local: return true
+        case .unavailable, .disabled: return false
+        }
     }
 }

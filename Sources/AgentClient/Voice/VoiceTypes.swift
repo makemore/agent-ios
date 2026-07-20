@@ -1,5 +1,38 @@
 import Foundation
 
+/// Policy used to choose how assistant text is converted to speech.
+public enum TTSProviderPolicy: Equatable {
+    /// Backwards-compatible behavior: prefer the configured remote provider,
+    /// except protected/private-only mode biases to local system TTS.
+    case automatic
+    /// Use only remote/provider-backed TTS. Blocked in private-only mode.
+    case remote
+    /// Use only system/on-device TTS; never sends assistant text to the network.
+    case localOnly
+    /// Do not create a voice provider.
+    case disabled
+}
+
+/// Policy used to choose speech-recognition privacy behavior for mic input.
+public enum SpeechInputPolicy: Equatable {
+    /// Backwards-compatible behavior; protected/private-only mode biases local-only.
+    case automatic
+    /// Allow platform remote speech recognition when the OS chooses it.
+    case remote
+    /// Require on-device speech recognition. If unsupported, mic input is disabled.
+    case localOnly
+    /// Hide/disable mic input.
+    case disabled
+}
+
+/// Host-visible voice output status.
+public enum VoiceMode: Equatable {
+    case remote
+    case local
+    case unavailable(reason: String)
+    case disabled
+}
+
 /// Affective metadata attached to an assistant message or delta.
 ///
 /// Mirrors ``agent_runtime_core.interfaces.Emotion`` on the Python side.

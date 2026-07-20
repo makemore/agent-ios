@@ -72,6 +72,7 @@ public struct MessageView: View {
                 .foregroundColor(appearance.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, 2)
@@ -174,13 +175,22 @@ public struct MessageView: View {
                 }
             }
             
-            // Content — markdown for assistant messages, plain text for user/system
+            // Content — markdown for assistant messages, plain text for user/system.
+            // `.textSelection(.enabled)` is applied per-bubble so users can
+            // long-press and drag the selection handles to pick a *range*
+            // (not the whole message) and copy just that substring. We do
+            // NOT apply selection at the widget level (the host previously
+            // did) because that turns the whole chat into one big selectable
+            // region — pressing near the composer would select through the
+            // message list and the input bar.
             if !isUser && !isSystem && !isToolMessage && config.enableMarkdown {
                 MarkdownTextView(content: message.content, foregroundColor: messageTextColor, linkColor: linkColor)
+                    .textSelection(.enabled)
             } else {
                 Text(message.content)
                     .font(.body)
                     .foregroundColor(messageTextColor)
+                    .textSelection(.enabled)
             }
 
             if message.type == .requiredAction, let label = message.metadata?.actionLabel {

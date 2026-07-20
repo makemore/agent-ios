@@ -8,14 +8,22 @@ public struct Conversation: Identifiable, Codable {
     public var hasMore: Bool?
     public var createdAt: Date?
     public var updatedAt: Date?
-    
+    /// Server-persisted conversation metadata. Used by the client
+    /// to restore the last known `context.usage` snapshot
+    /// (`metadata["last_context_usage"]`) when a conversation is
+    /// reloaded — the banner then shows the freshest known token
+    /// count immediately, before the next LLM call has a chance to
+    /// ship a fresh `context.usage` event.
+    public var metadata: [String: AnyCodable]?
+
     public init(
         id: String,
         title: String? = nil,
         messages: [APIMessage]? = nil,
         hasMore: Bool? = nil,
         createdAt: Date? = nil,
-        updatedAt: Date? = nil
+        updatedAt: Date? = nil,
+        metadata: [String: AnyCodable]? = nil
     ) {
         self.id = id
         self.title = title
@@ -23,6 +31,7 @@ public struct Conversation: Identifiable, Codable {
         self.hasMore = hasMore
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.metadata = metadata
     }
 }
 

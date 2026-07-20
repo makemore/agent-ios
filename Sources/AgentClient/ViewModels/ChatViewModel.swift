@@ -21,6 +21,30 @@ public class ChatViewModel: ObservableObject {
     /// single optional source of truth either way.
     @Published public var subAgentActivity: SubAgentActivityState = SubAgentActivityState()
 
+    // MARK: - Context Usage (banner state)
+
+    /// Total tokens used so far in this conversation, as last reported
+    /// by the server's `context.usage` SSE event. `nil` until the first
+    /// event arrives (or after a reload when the conversation has no
+    /// stored snapshot). The runtime emits one after every LLM call with
+    /// cumulative numbers, so this is the single source of truth for
+    /// the context-usage banner — no client-side estimation.
+    @Published public var contextTokens: Int?
+
+    /// `context_window` for the active model, as reported by the most
+    /// recent `context.usage` event (the runtime stamps it per-event so
+    /// a model switch mid-conversation takes effect on the very next
+    /// event). `nil` when the model registry has no `context_window`
+    /// for the active model.
+    @Published public var contextWindow: Int?
+
+    /// Identifier of the model the most recent `context.usage` event
+    /// was billed against. Lets the UI distinguish a real model change
+    /// (the model id differs from the current picker selection) from
+    /// the same model sending another event. Not currently surfaced in
+    /// the banner — it's there for host overlays and tests.
+    @Published public var contextModelId: String?
+
     // MARK: - Model Options (per-conversation / per-app)
 
     /// Per-conversation toggle for the LLM's extended-reasoning / "thinking"
@@ -590,7 +614,45 @@ public class ChatViewModel: ObservableObject {
         pendingPersistAfterDrain = false
         subAgentActivity = SubAgentActivityState()
         firstAssistantMessageFired = false
+        // Reset context-usage state — the previous conversation's
+        // banner values are no longer relevant. The next `sendMessage`
+        // will produce a fresh `context.usage` event from the runtime.
+        contextTokens = nil
+        contextWindow = nil
+        contextModelId = nil
         storage.set(config.conversationIdKey, value: nil)
+    }
+
+    /// Apply a `context.usage` event from the server. The runtime emits
+    /// one of these after every LLM call with cumulative totals for the
+    /// whole conversation, plus the active model's `context_window` and
+    /// `model_id`. The client just mirrors whatever the server says —
+    /// no estimation, no heuristics. Subsequent events overwrite
+    /// earlier ones, so the banner always shows the freshest state.
+    ///
+    /// Number-typed JSON values may decode as `Int` or `Double`
+    /// depending on the SSE parser, so both are accepted.
+    public func applyContextUsage(_ payload: [String: Any]) {
+        let total: Int? = (payload["total_tokens"] as? Int)
+            ?? (payload["total_tokens"] as? Double).map { Int($0) }
+            ?? combinedTokens(payload)
+        contextTokens = total
+        if let win = (payload["context_window"] as? Int)
+            ?? (payload["context_window"] as? Double).map({ Int($0) }) {
+            contextWindow = win
+        }
+        if let mid = payload["model_id"] as? String {
+            contextModelId = mid
+        }
+    }
+
+    private func combinedTokens(_ payload: [String: Any]) -> Int? {
+        let prompt = (payload["prompt_tokens"] as? Int)
+            ?? (payload["prompt_tokens"] as? Double).map { Int($0) }
+        let completion = (payload["completion_tokens"] as? Int)
+            ?? (payload["completion_tokens"] as? Double).map { Int($0) }
+        if let prompt, let completion { return prompt + completion }
+        return nil
     }
 
     /// Append an assistant message to the conversation without a
@@ -1066,6 +1128,24 @@ public class ChatViewModel: ObservableObject {
             // conversations that already contain an assistant turn.
             firstAssistantMessageFired = messages.contains { $0.role == .assistant }
 
+            // Restore the last `context.usage` snapshot the runtime
+            // stamped on `AgentConversation.metadata` at the end of
+            // the previous run. Lets the banner show the freshest
+            // known token count immediately, before the next LLM
+            // call has a chance to ship a fresh `context.usage`
+            // event. Missing / malformed fields fall back to nil
+            // (banner stays hidden) — never crashes the load.
+            if let meta = conversation.metadata?["last_context_usage"] {
+                contextTokens = meta.intValue()
+                    ?? meta.field("total_tokens")?.intValue()
+                contextWindow = meta.field("context_window")?.intValue()
+                contextModelId = meta.field("model_id")?.stringValue()
+            } else {
+                contextTokens = nil
+                contextWindow = nil
+                contextModelId = nil
+            }
+
         } catch APIError.notFound {
             conversationId = nil
             storage.set(config.conversationIdKey, value: nil)
@@ -1277,6 +1357,14 @@ public class ChatViewModel: ObservableObject {
 
         case "memory.update":
             handleMemoryUpdate(payload)
+
+        case "context.usage":
+            // Server-driven context-usage update. The runtime emits
+            // one of these after every LLM call with cumulative
+            // totals + the active model's `context_window` +
+            // `model_id`. The client just mirrors whatever the server
+            // says — no estimation, no heuristics.
+            applyContextUsage(payload)
 
         case "client.action.required", "run.suspended":
             handleRequiredAction(payload)

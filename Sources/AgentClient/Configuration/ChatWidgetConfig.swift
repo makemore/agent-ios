@@ -144,23 +144,6 @@ public struct ChatWidgetConfig {
     /// hosts). Only enable for local development against an http:// backend.
     public var allowInsecureHTTP: Bool
 
-    /// Follow the assistant's streaming reply by auto-scrolling to the
-    /// bottom on every token. When `false` the list stays put while the
-    /// reply is being generated and the user controls scrolling. The
-    /// pin-to-bottom on user submit and on initial render is unaffected.
-    /// Default is `true` for backwards compatibility.
-    public var followStreamingEnabled: Bool
-
-    /// Distance in points from the bottom of the scroll viewport within
-    /// which the list is considered "at the bottom" for the purposes of
-    /// streaming auto-follow. While the user is within this distance the
-    /// list pins to the latest token; once they scroll further away the
-    /// stream stops dragging them down and they control scrolling. A
-    /// larger value is more forgiving (small upward scrolls still follow);
-    /// a smaller value yields the moment the user touches the scroller.
-    /// Default is `100`.
-    public var nearBottomThresholdPt: CGFloat
-    
     // MARK: - Authentication
     
     /// Authentication strategy
@@ -337,8 +320,6 @@ public struct ChatWidgetConfig {
         self.ephemeral = false
         self.privateOnly = false
         self.allowInsecureHTTP = false
-        self.followStreamingEnabled = true
-        self.nearBottomThresholdPt = 100
         self.authStrategy = nil
         self.authToken = nil
         self.authHeader = nil

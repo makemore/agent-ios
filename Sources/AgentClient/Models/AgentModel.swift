@@ -12,12 +12,19 @@ public struct AgentModel: Identifiable, Codable, Equatable {
     public var supportsThinking: Bool
     public var supportsTools: Bool
     public var supportsVision: Bool
+    /// Maximum input context in tokens. Sourced from the runtime's
+    /// `/api/agent-runtime/models/` response (`context_window` key).
+    /// Optional because some hosts / OpenRouter responses may omit the
+    /// field; the context-usage banner hides the progress bar in that
+    /// case (the count is still shown, just without a denominator).
+    public var contextWindow: Int?
 
     private enum CodingKeys: String, CodingKey {
         case id, name, provider, description
         case supportsThinking = "supports_thinking"
         case supportsTools = "supports_tools"
         case supportsVision = "supports_vision"
+        case contextWindow = "context_window"
     }
 
     public init(
@@ -27,7 +34,8 @@ public struct AgentModel: Identifiable, Codable, Equatable {
         description: String? = nil,
         supportsThinking: Bool = false,
         supportsTools: Bool = true,
-        supportsVision: Bool = false
+        supportsVision: Bool = false,
+        contextWindow: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -36,6 +44,7 @@ public struct AgentModel: Identifiable, Codable, Equatable {
         self.supportsThinking = supportsThinking
         self.supportsTools = supportsTools
         self.supportsVision = supportsVision
+        self.contextWindow = contextWindow
     }
 
     public init(from decoder: Decoder) throws {
@@ -47,6 +56,7 @@ public struct AgentModel: Identifiable, Codable, Equatable {
         self.supportsThinking = (try? c.decodeIfPresent(Bool.self, forKey: .supportsThinking)) ?? false
         self.supportsTools = (try? c.decodeIfPresent(Bool.self, forKey: .supportsTools)) ?? true
         self.supportsVision = (try? c.decodeIfPresent(Bool.self, forKey: .supportsVision)) ?? false
+        self.contextWindow = (try? c.decodeIfPresent(Int.self, forKey: .contextWindow)) ?? nil
     }
 }
 

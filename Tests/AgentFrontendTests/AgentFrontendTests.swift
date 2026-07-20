@@ -25,20 +25,49 @@ final class AgentFrontendTests: XCTestCase {
             oldCount: 0, newCount: 12,
             lastMessageIsUser: false, isNearBottom: false, pendingAnchorId: nil
         )
-        XCTAssertEqual(action, .pinBottom(delayMs: 0))
+        XCTAssertEqual(action, .pinBottom)
     }
 
-    func testScrollDecisionUserSubmitDelaysForKeyboardAnimation() {
-        // The submit path must wait past the UIKit keyboard-hide animation
-        // (~250ms) before committing, otherwise the scroll lands on an
-        // intermediate geometry and the row flies off. The exact delay value
-        // is load-bearing — changing it is a deliberate behavioural change.
+    func testScrollDecisionUserSubmitPinsWhenNearBottom() {
+        // The new default behaviour respects the user's scroll position:
+        // a user-submit only pins when the user is already near the
+        // bottom. ``testScrollDecisionUserSubmitScrolledUpDoesNothing``
+        // covers the "don't yank the user back" case; this one covers
+        // the "pin when already near bottom" case.
+        //
+        // There is no longer a delay baked into the decision: the view
+        // layer handles scheduling (one-frame wait + corrective clamp
+        // loop). The decision layer only states the *intent*.
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: true, isNearBottom: true, pendingAnchorId: nil
+        )
+        XCTAssertEqual(action, .pinBottom)
+    }
+
+    func testScrollDecisionUserSubmitScrolledUpDoesNothing() {
+        // When the user has scrolled up to read old content, sending a
+        // reply must not yank them back to the bottom — that's the
+        // "screen jumps down" symptom reported on long conversations.
+        // The new message appears above the viewport and the user can
+        // scroll down when they're ready. ``forcePinOnUserSubmit`` is
+        // the opt-in escape hatch for guided flows.
         let action = ScrollDecision.onCountChange(
             oldCount: 8, newCount: 9,
             lastMessageIsUser: true, isNearBottom: false, pendingAnchorId: nil
         )
-        XCTAssertEqual(action, .pinBottom(delayMs: ScrollDecision.userSubmitDelayMs))
-        XCTAssertGreaterThanOrEqual(ScrollDecision.userSubmitDelayMs, 300)
+        XCTAssertEqual(action, .none)
+    }
+
+    func testScrollDecisionUserSubmitScrolledUpForcePins() {
+        // Guided flows that must show the agent's reply opt in via
+        // ``forcePinOnUserSubmit: true``.
+        let action = ScrollDecision.onCountChange(
+            oldCount: 8, newCount: 9,
+            lastMessageIsUser: true, isNearBottom: false,
+            pendingAnchorId: nil, forcePinOnUserSubmit: true
+        )
+        XCTAssertEqual(action, .pinBottom)
     }
 
     func testScrollDecisionAssistantAppendNearBottomPinsImmediately() {
@@ -47,7 +76,7 @@ final class AgentFrontendTests: XCTestCase {
             oldCount: 8, newCount: 9,
             lastMessageIsUser: false, isNearBottom: true, pendingAnchorId: nil
         )
-        XCTAssertEqual(action, .pinBottom(delayMs: 0))
+        XCTAssertEqual(action, .pinBottom)
     }
 
     func testScrollDecisionAssistantAppendScrolledUpDoesNothing() {
@@ -76,7 +105,7 @@ final class AgentFrontendTests: XCTestCase {
             lastMessageIsUser: false, isNearBottom: false,
             pendingAnchorId: "msg-0"
         )
-        XCTAssertEqual(action, .pinBottom(delayMs: 0))
+        XCTAssertEqual(action, .pinBottom)
     }
 
     func testScrollDecisionCountUnchangedDoesNothing() {
@@ -136,6 +165,16 @@ final class AgentFrontendTests: XCTestCase {
         config.onVideoFullScreenChange?(true)
         config.onVideoFullScreenChange?(false)
         XCTAssertEqual(received, [true, false])
+    }
+
+    // MARK: - ChatWidgetConfig forcePinOnUserSubmit
+
+    func testChatWidgetConfigForcePinOnUserSubmitDefaultsToFalse() {
+        // The new default respects the user's scroll position on submit.
+        // Hosts that need the legacy "always pin" behaviour (e.g. a
+        // guided flow) opt in explicitly.
+        let config = ChatWidgetConfig()
+        XCTAssertFalse(config.forcePinOnUserSubmit)
     }
 }
 

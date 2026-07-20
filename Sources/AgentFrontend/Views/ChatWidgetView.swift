@@ -65,18 +65,12 @@ public struct ChatWidgetView: View {
         let initial: VoiceController
         if let injected = voiceController {
             initial = injected
-        } else if let api = apiClient,
-                  let built = VoiceFactory.makeController(
-                      config: config,
-                      apiClient: api,
-                      voiceId: config.voiceId,
-                      modelId: config.voiceModelId
-                  ) {
-            initial = built
         } else {
-            initial = VoiceController(
-                provider: AVSpeechTTSProvider(voiceIdentifier: config.voiceId),
-                enabled: config.enableTTS
+            initial = VoiceFactory.makeController(
+                config: config,
+                apiClient: apiClient,
+                voiceId: config.voiceId,
+                modelId: config.voiceModelId
             )
         }
         _voiceController = StateObject(wrappedValue: initial)
@@ -128,6 +122,22 @@ public struct ChatWidgetView: View {
             // equivalents themselves.
             if config.showInternalTopBar {
                 anthropicTopBar
+            }
+
+            // Context-usage banner. Server-driven: renders only when
+            // the runtime has shipped at least one `context.usage`
+            // event for this conversation (i.e. `contextTokens` is
+            // non-nil on the view model). The denominator and
+            // progress bar appear when the runtime also shipped a
+            // `context_window` for the active model. There is no
+            // client-side estimation — the banner stays hidden until
+            // the server has something to show.
+            if let tokens = viewModel.contextTokens {
+                ContextUsageBanner(
+                    totalTokens: tokens,
+                    contextWindow: viewModel.contextWindow,
+                    modelId: viewModel.contextModelId
+                )
             }
 
             // Messages list. `agentIsSpeaking` propagates the TTS

@@ -12,7 +12,8 @@ public struct AgentStreamEvent {
         "run.cancelled", "run.timed_out", "run.suspended", "run.resumed",
         "client.action.required", "run.heartbeat", "state.checkpoint",
         "step.started", "step.completed", "step.failed", "step.skipped",
-        "step.retrying", "progress.update", "memory.update"
+        "step.retrying", "progress.update", "memory.update",
+        "context.usage"
     ]
 
     public let type: String

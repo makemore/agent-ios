@@ -197,6 +197,21 @@ public struct InputView: View {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
     }
 
+    private var effectiveSpeechInputPolicy: SpeechInputPolicy {
+        config.effectiveSpeechInputPolicy
+    }
+
+    private var speechInputAvailable: Bool {
+        guard config.enableVoice else { return false }
+        switch effectiveSpeechInputPolicy {
+        case .disabled: return false
+        case .localOnly:
+            return speechRecognizer?.supportsOnDeviceRecognition == true
+        case .automatic, .remote:
+            return speechRecognizer?.isAvailable == true
+        }
+    }
+
     #if canImport(UIKit)
     /// Convert a `UIImage` captured by the camera tile into a
     /// `FileAttachment` so it flows through the same upload pipeline as
@@ -258,6 +273,7 @@ public struct InputView: View {
     /// after each submit). Tap once on the mic to enable; tap again to
     /// fully tear down.
     private func startRecording() {
+        guard speechInputAvailable else { return }
         guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else { return }
 
         SFSpeechRecognizer.requestAuthorization { status in
@@ -339,6 +355,13 @@ public struct InputView: View {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        if effectiveSpeechInputPolicy == .localOnly {
+            guard recognizer.supportsOnDeviceRecognition else {
+                print("[InputView] installRecognitionRequest: on-device recognition unavailable")
+                return false
+            }
+            request.requiresOnDeviceRecognition = true
+        }
         recognitionRequest = request
 
         let inputNode = audioEngine.inputNode
@@ -563,6 +586,13 @@ public struct InputView: View {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        if effectiveSpeechInputPolicy == .localOnly {
+            guard recognizer.supportsOnDeviceRecognition else {
+                print("[InputView] installMonitorRecognition: on-device recognition unavailable")
+                return
+            }
+            request.requiresOnDeviceRecognition = true
+        }
         monitorRequest = request
 
         let inputNode = audioEngine.inputNode
@@ -682,7 +712,7 @@ public struct InputView: View {
                     }
                 }
 
-                if config.enableVoice {
+                if speechInputAvailable {
                     Button(action: { toggleRecording() }) {
                         ZStack {
                             if autoSendEnabled && isRecording && countdownProgress > 0 {
@@ -700,7 +730,7 @@ public struct InputView: View {
                     }
                 }
 
-                if config.enableVoice {
+                if speechInputAvailable {
                     Button(action: { toggleAutoSend() }) {
                         Image(systemName: autoSendEnabled
                               ? "arrow.triangle.2.circlepath.circle.fill"
@@ -789,7 +819,7 @@ public struct InputView: View {
                 modelPill(label: label)
             }
             Spacer(minLength: 0)
-            if config.enableVoice {
+            if speechInputAvailable {
                 Button(action: { toggleAutoSend() }) {
                     Image(systemName: autoSendEnabled
                           ? "arrow.triangle.2.circlepath.circle.fill"
@@ -804,7 +834,7 @@ public struct InputView: View {
                                     ? "Disable hands-free auto-send"
                                     : "Enable hands-free auto-send")
             }
-            if config.enableVoice {
+            if speechInputAvailable {
                 Button(action: { toggleRecording() }) {
                     ZStack {
                         if autoSendEnabled && isRecording && countdownProgress > 0 {

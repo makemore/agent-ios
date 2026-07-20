@@ -149,6 +149,7 @@ struct MarkdownTextView: View {
         switch block {
         case .paragraph(let text):
             inlineMarkdownText(text)
+                .textSelection(.enabled)
 
         case .codeBlock(let code, let lang):
             VStack(alignment: .leading, spacing: 4) {
@@ -156,11 +157,13 @@ struct MarkdownTextView: View {
                     Text(lang)
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                        .textSelection(.enabled)
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(code)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.primary)
+                        .textSelection(.enabled)
                 }
             }
             .padding(10)
@@ -172,6 +175,7 @@ struct MarkdownTextView: View {
             inlineMarkdownText(text)
                 .font(headingFont(level))
                 .fontWeight(.bold)
+                .textSelection(.enabled)
 
         case .bulletList(let items):
             VStack(alignment: .leading, spacing: 4) {
@@ -180,6 +184,7 @@ struct MarkdownTextView: View {
                         Text("•")
                             .foregroundColor(foregroundColor)
                         inlineMarkdownText(item)
+                            .textSelection(.enabled)
                     }
                 }
             }
@@ -192,6 +197,7 @@ struct MarkdownTextView: View {
                             .foregroundColor(foregroundColor)
                             .monospacedDigit()
                         inlineMarkdownText(item)
+                            .textSelection(.enabled)
                     }
                 }
             }
