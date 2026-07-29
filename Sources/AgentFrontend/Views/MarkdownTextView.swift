@@ -1,46 +1,25 @@
 import SwiftUI
 import AgentClient
 
-/// Lightweight markdown renderer for assistant message bubbles.
+/// Block-level markdown structure, split out from the view so the parsing
+/// rules can be unit-tested without rendering (same shape as `ScrollDecision`).
+enum MarkdownBlock: Equatable {
+    case paragraph(String)
+    case codeBlock(code: String, language: String?)
+    case heading(text: String, level: Int)          // level 1-3
+    case bulletList([String])
+    case numberedList(items: [String], start: Int)  // start = first item's number
+}
+
+/// Block-level parser for assistant message bodies.
 ///
-/// Supports:
-/// - **Bold** and *italic*
-/// - `inline code`
-/// - Fenced code blocks (``` ... ```)
-/// - Bullet lists (- item) and numbered lists (1. item)
-/// - Headers (# h1, ## h2, ### h3)
-/// - [Links](url) — tappable, open in Safari
-/// - Line breaks / paragraphs
-///
-/// Uses SwiftUI's built-in `AttributedString(markdown:)` for inline formatting
-/// and a block-level parser for code blocks, lists, and headers.
-struct MarkdownTextView: View {
-    let content: String
-    let foregroundColor: Color
-    var linkColor: Color = Color(hex: "#4a6b8e")
+/// Inline formatting (bold, italic, code, links) is left to
+/// `AttributedString(markdown:)` at render time; this only splits the text
+/// into blocks.
+enum MarkdownBlockParser {
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(parseBlocks().enumerated()), id: \.offset) { _, block in
-                blockView(block)
-            }
-        }
-    }
-
-    // MARK: - Block types
-
-    private enum Block {
-        case paragraph(String)
-        case codeBlock(String, String?) // code, language
-        case heading(String, Int)       // text, level 1-3
-        case bulletList([String])
-        case numberedList([String])
-    }
-
-    // MARK: - Block parser
-
-    private func parseBlocks() -> [Block] {
-        var blocks: [Block] = []
+    static func parse(_ content: String) -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
         let lines = content.components(separatedBy: "\n")
         var i = 0
 
@@ -57,50 +36,58 @@ struct MarkdownTextView: View {
                     i += 1
                 }
                 i += 1 // skip closing ```
-                blocks.append(.codeBlock(codeLines.joined(separator: "\n"), lang.isEmpty ? nil : lang))
+                blocks.append(.codeBlock(code: codeLines.joined(separator: "\n"),
+                                         language: lang.isEmpty ? nil : lang))
                 continue
             }
 
             // Heading
-            if let heading = parseHeading(line) {
+            if let heading = heading(line) {
                 blocks.append(heading)
                 i += 1
                 continue
             }
 
             // Bullet list
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("- ") ||
-               line.trimmingCharacters(in: .whitespaces).hasPrefix("* ") {
+            if bulletItemText(line) != nil {
                 var items: [String] = []
                 while i < lines.count {
-                    let l = lines[i].trimmingCharacters(in: .whitespaces)
-                    if l.hasPrefix("- ") { items.append(String(l.dropFirst(2))) }
-                    else if l.hasPrefix("* ") { items.append(String(l.dropFirst(2))) }
-                    else { break }
-                    i += 1
+                    if let text = bulletItemText(lines[i]) {
+                        items.append(text)
+                        i += 1
+                        continue
+                    }
+                    if let next = continuationIndex(from: i, in: lines, isItem: { bulletItemText($0) != nil }) {
+                        i = next
+                        continue
+                    }
+                    break
                 }
                 blocks.append(.bulletList(items))
                 continue
             }
 
             // Numbered list
-            if isNumberedListItem(line) {
+            if let first = numberedItem(line) {
                 var items: [String] = []
-                while i < lines.count && isNumberedListItem(lines[i]) {
-                    let l = lines[i].trimmingCharacters(in: .whitespaces)
-                    if let dotIdx = l.firstIndex(of: ".") {
-                        let afterDot = l[l.index(after: dotIdx)...]
-                            .trimmingCharacters(in: .whitespaces)
-                        items.append(afterDot)
+                while i < lines.count {
+                    if let item = numberedItem(lines[i]) {
+                        items.append(item.text)
+                        i += 1
+                        continue
                     }
-                    i += 1
+                    if let next = continuationIndex(from: i, in: lines, isItem: { numberedItem($0) != nil }) {
+                        i = next
+                        continue
+                    }
+                    break
                 }
-                blocks.append(.numberedList(items))
+                blocks.append(.numberedList(items: items, start: first.number))
                 continue
             }
 
             // Blank line — skip
-            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            if isBlank(line) {
                 i += 1
                 continue
             }
@@ -109,11 +96,8 @@ struct MarkdownTextView: View {
             var paraLines: [String] = []
             while i < lines.count {
                 let l = lines[i]
-                if l.hasPrefix("```") || parseHeading(l) != nil ||
-                   l.trimmingCharacters(in: .whitespaces).hasPrefix("- ") ||
-                   l.trimmingCharacters(in: .whitespaces).hasPrefix("* ") ||
-                   isNumberedListItem(l) ||
-                   l.trimmingCharacters(in: .whitespaces).isEmpty {
+                if l.hasPrefix("```") || heading(l) != nil ||
+                   bulletItemText(l) != nil || numberedItem(l) != nil || isBlank(l) {
                     break
                 }
                 paraLines.append(l)
@@ -127,25 +111,90 @@ struct MarkdownTextView: View {
         return blocks
     }
 
-    private func parseHeading(_ line: String) -> Block? {
+    // MARK: - Line classification
+
+    /// Index of the next item in the current list, skipping blank lines.
+    ///
+    /// A blank line between items makes a *loose* list, not two lists — the
+    /// agent emits these constantly, and treating each item as its own list
+    /// restarted the numbering at 1 for every entry.
+    private static func continuationIndex(from index: Int,
+                                          in lines: [String],
+                                          isItem: (String) -> Bool) -> Int? {
+        guard isBlank(lines[index]) else { return nil }
+        var j = index
+        while j < lines.count, isBlank(lines[j]) { j += 1 }
+        guard j < lines.count, isItem(lines[j]) else { return nil }
+        return j
+    }
+
+    private static func isBlank(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private static func heading(_ line: String) -> MarkdownBlock? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        if trimmed.hasPrefix("### ") { return .heading(String(trimmed.dropFirst(4)), 3) }
-        if trimmed.hasPrefix("## ") { return .heading(String(trimmed.dropFirst(3)), 2) }
-        if trimmed.hasPrefix("# ") { return .heading(String(trimmed.dropFirst(2)), 1) }
+        if trimmed.hasPrefix("### ") { return .heading(text: String(trimmed.dropFirst(4)), level: 3) }
+        if trimmed.hasPrefix("## ") { return .heading(text: String(trimmed.dropFirst(3)), level: 2) }
+        if trimmed.hasPrefix("# ") { return .heading(text: String(trimmed.dropFirst(2)), level: 1) }
         return nil
     }
 
-    private func isNumberedListItem(_ line: String) -> Bool {
+    private static func bulletItemText(_ line: String) -> String? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard let dotIdx = trimmed.firstIndex(of: ".") else { return false }
-        let prefix = trimmed[trimmed.startIndex..<dotIdx]
-        return !prefix.isEmpty && prefix.allSatisfy(\.isNumber)
+        if trimmed.hasPrefix("- ") { return String(trimmed.dropFirst(2)) }
+        if trimmed.hasPrefix("* ") { return String(trimmed.dropFirst(2)) }
+        return nil
+    }
+
+    /// Splits "2. Grounding" into its number and text.
+    ///
+    /// The dot must be followed by whitespace or end the line, so decimals
+    /// ("3.5 seconds in") stay prose rather than opening a list.
+    private static func numberedItem(_ line: String) -> (number: Int, text: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let dotIdx = trimmed.firstIndex(of: ".") else { return nil }
+        let digits = trimmed[trimmed.startIndex..<dotIdx]
+        guard !digits.isEmpty, digits.count <= 9,
+              digits.allSatisfy(\.isNumber),
+              let number = Int(digits) else { return nil }
+        let rest = trimmed[trimmed.index(after: dotIdx)...]
+        guard rest.isEmpty || rest.first == " " || rest.first == "\t" else { return nil }
+        return (number, rest.trimmingCharacters(in: .whitespaces))
+    }
+}
+
+/// Lightweight markdown renderer for assistant message bubbles.
+///
+/// Supports:
+/// - **Bold** and *italic*
+/// - `inline code`
+/// - Fenced code blocks (``` ... ```)
+/// - Bullet lists (- item) and numbered lists (1. item), including loose
+///   lists with blank lines between items
+/// - Headers (# h1, ## h2, ### h3)
+/// - [Links](url) — tappable, open in Safari
+/// - Line breaks / paragraphs
+///
+/// Uses SwiftUI's built-in `AttributedString(markdown:)` for inline formatting
+/// and `MarkdownBlockParser` for code blocks, lists, and headers.
+struct MarkdownTextView: View {
+    let content: String
+    let foregroundColor: Color
+    var linkColor: Color = Color(hex: "#4a6b8e")
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(MarkdownBlockParser.parse(content).enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
     }
 
     // MARK: - Block rendering
 
     @ViewBuilder
-    private func blockView(_ block: Block) -> some View {
+    private func blockView(_ block: MarkdownBlock) -> some View {
         switch block {
         case .paragraph(let text):
             inlineMarkdownText(text)
@@ -189,11 +238,11 @@ struct MarkdownTextView: View {
                 }
             }
 
-        case .numberedList(let items):
+        case .numberedList(let items, let start):
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
                     HStack(alignment: .top, spacing: 6) {
-                        Text("\(idx + 1).")
+                        Text("\(start + idx).")
                             .foregroundColor(foregroundColor)
                             .monospacedDigit()
                         inlineMarkdownText(item)
@@ -228,4 +277,3 @@ struct MarkdownTextView: View {
         }
     }
 }
-
