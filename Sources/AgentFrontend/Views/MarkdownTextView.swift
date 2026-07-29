@@ -2,7 +2,7 @@ import SwiftUI
 import AgentClient
 
 /// Block-level markdown structure, split out from the view so the parsing
-/// rules can be unit-tested without rendering (same shape as `ScrollDecision`).
+/// rules can be unit-tested without rendering.
 enum MarkdownBlock: Equatable {
     case paragraph(String)
     case codeBlock(code: String, language: String?)
