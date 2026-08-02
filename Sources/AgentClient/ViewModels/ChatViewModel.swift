@@ -464,12 +464,20 @@ public class ChatViewModel: ObservableObject {
     // MARK: - Public Methods
     
     /// Send a message to the agent
+    /// - Parameter hidden: send the message to the agent without ever
+    ///   appending it to the visible transcript. For scripted triggers
+    ///   (check-in / debrief session openers): hosts previously appended
+    ///   the trigger and deleted it a runloop tick later, which flashed a
+    ///   structured blob at the user and left the scroll offset with a
+    ///   ghost gap the size of the removed row. A message that never
+    ///   enters `messages` can do neither.
     public func sendMessage(
         _ content: String,
         files: [FileAttachment] = [],
         model: String? = nil,
         thinking: Bool = false,
-        supersedeFromMessageIndex: Int? = nil
+        supersedeFromMessageIndex: Int? = nil,
+        hidden: Bool = false
     ) async {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
 
@@ -481,24 +489,28 @@ public class ChatViewModel: ObservableObject {
         // response and clear the chunker's buffer.
         voiceController?.reset()
 
-        // Add user message
-        let userMessage = Message(
-            role: .user,
-            content: content.trimmingCharacters(in: .whitespacesAndNewlines),
-            files: files.isEmpty ? nil : files
-        )
-        messages.append(userMessage)
-        
+        // Add user message (skipped for hidden scripted triggers — the
+        // agent still receives the content below, the transcript doesn't).
+        if !hidden {
+            let userMessage = Message(
+                role: .user,
+                content: content.trimmingCharacters(in: .whitespacesAndNewlines),
+                files: files.isEmpty ? nil : files
+            )
+            messages.append(userMessage)
+        }
+
         do {
             // In ephemeral mode send the full conversation history so the
             // server has complete context (it won't load from the DB).
             let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
             let apiMessages: [[String: Any]]
             if config.ephemeral {
-                let history: [[String: Any]] = messages
+                var history: [[String: Any]] = messages
                     .filter { $0.role == .user || $0.role == .assistant }
-                    .dropLast()  // the user message we just appended is re-added below
                     .map { ["role": $0.role.rawValue, "content": $0.content] }
+                // The visible tail duplicates trimmedContent unless hidden.
+                if !hidden { history.removeLast() }
                 apiMessages = history + [["role": "user", "content": trimmedContent]]
             } else {
                 apiMessages = [["role": "user", "content": trimmedContent]]
