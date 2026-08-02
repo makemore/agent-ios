@@ -29,6 +29,11 @@ public struct MessageListView: View {
     let onLoadMore: () -> Void
     let onRetry: (Int) -> Void
     let onEdit: (Int, String) -> Void
+    /// Speak a message aloud. Receives the message's text so the host
+    /// owns the TTS plumbing; the list only decides *which* rows get a
+    /// Play affordance (assistant text, never user or tool rows).
+    /// `nil` when the host has TTS disabled, which hides Play entirely.
+    let onSpeak: ((String) -> Void)?
     /// Live sub-agent activity from the view model. When non-empty in
     /// pill mode the list renders a quiet activity pill in place of
     /// the generic "Thinking..." spinner. Defaults to an empty state
@@ -57,6 +62,7 @@ public struct MessageListView: View {
         onLoadMore: @escaping () -> Void,
         onRetry: @escaping (Int) -> Void,
         onEdit: @escaping (Int, String) -> Void,
+        onSpeak: ((String) -> Void)? = nil,
         activity: SubAgentActivityState = SubAgentActivityState(),
         agentIsSpeaking: Bool = false,
         onBlockAction: ((BlockAction) -> Void)? = nil
@@ -69,6 +75,7 @@ public struct MessageListView: View {
         self.onLoadMore = onLoadMore
         self.onRetry = onRetry
         self.onEdit = onEdit
+        self.onSpeak = onSpeak
         self.activity = activity
         self.agentIsSpeaking = agentIsSpeaking
         self.onBlockAction = onBlockAction
@@ -233,16 +240,6 @@ public struct MessageListView: View {
         }
     }
 
-    /// Dismiss the keyboard by resigning first responder.
-    private func dismissKeyboard() {
-        #if canImport(UIKit)
-        UIApplication.shared.sendAction(
-            #selector(UIResponder.resignFirstResponder),
-            to: nil, from: nil, for: nil
-        )
-        #endif
-    }
-
     @ViewBuilder
     private var scrollContent: some View {
         // GeometryReader supplies the viewport height used as the
@@ -335,12 +332,15 @@ public struct MessageListView: View {
                 .padding()
             }
             #if os(iOS)
+            // Interactive drag-to-dismiss only. Do NOT add a tap gesture here
+            // to dismiss the keyboard: `simultaneousGesture` fires alongside
+            // the child gestures it runs beside, so the tap that begins a
+            // text selection on a bubble also resigns first responder. The
+            // keyboard drops, the list re-lays-out mid-gesture, and the
+            // selection drag is lost — which breaks long-press-and-drag
+            // selection on every message.
             .scrollDismissesKeyboard(.interactively)
             #endif
-            // Tap on message list area dismisses keyboard without swallowing child taps
-            .simultaneousGesture(
-                TapGesture().onEnded { _ in dismissKeyboard() }
-            )
         }
     }
 
@@ -377,6 +377,7 @@ public struct MessageListView: View {
                     editText = message.content
                     editingIndex = index
                 } : nil,
+                onSpeak: speakAction(for: message),
                 showAgentAvatar: config.showPresenceOrb,
                 agentAvatarSpeaking: agentIsSpeaking
                     && message.id == latestAssistantId,
@@ -384,6 +385,21 @@ public struct MessageListView: View {
             )
             .id(message.id)
         }
+    }
+
+    /// Per-row Play action, or `nil` to hide the affordance.
+    ///
+    /// Gated twice: the host must have supplied ``onSpeak`` at all (TTS
+    /// enabled), and the row must be an assistant *text* reply. Tool
+    /// calls, tool results and content-block rows carry no prose worth
+    /// reading aloud.
+    private func speakAction(for message: Message) -> (() -> Void)? {
+        guard let onSpeak = onSpeak else { return nil }
+        guard message.role == .assistant,
+              message.type != .toolCall,
+              message.type != .toolResult,
+              message.type != .contentBlocks else { return nil }
+        return { onSpeak(message.content) }
     }
 
     /// Loading indicator. Pill mode + active sub-agent → render the

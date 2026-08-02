@@ -163,6 +163,13 @@ public struct ChatWidgetView: View {
                 onEdit: { index, content in
                     Task { await viewModel.editMessage(at: index, newContent: content) }
                 },
+                // `stop()` both cancels in-flight playback and clears the
+                // turn-failed latch, so replaying a message still works
+                // after the provider errored earlier in the same turn.
+                onSpeak: effectiveConfig.enableTTS ? { text in
+                    voiceController.stop()
+                    voiceController.finishTurn(finalText: text)
+                } : nil,
                 activity: viewModel.subAgentActivity,
                 agentIsSpeaking: voiceController.isSpeaking,
                 onBlockAction: { action in

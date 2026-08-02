@@ -13,6 +13,11 @@ public struct MessageView: View {
     let showDebug: Bool
     let onRetry: (() -> Void)?
     let onEdit: (() -> Void)?
+    /// Speak this message aloud. Supplied by the parent list only when
+    /// the host enabled TTS (`ChatWidgetConfig.enableTTS`); `nil` hides
+    /// the Play affordances entirely. Defaulted so preview/harness call
+    /// sites keep compiling.
+    var onSpeak: (() -> Void)? = nil
     /// When `true` and this is an assistant text/tool/system message,
     /// render the S'Ai presence orb as a small avatar at the leading
     /// edge of the row. The parent list decides per-message whether
@@ -145,6 +150,14 @@ public struct MessageView: View {
                                 Label("Edit", systemImage: "pencil")
                             }
                         }
+
+                        if let onSpeak = onSpeak {
+                            Button {
+                                onSpeak()
+                            } label: {
+                                Label("Play", systemImage: "speaker.wave.2")
+                            }
+                        }
                     }
 
                 // Actions row
@@ -268,6 +281,29 @@ public struct MessageView: View {
     @ViewBuilder
     private var actionsRow: some View {
         HStack(spacing: 12) {
+            if !isUser {
+                Button {
+                    #if os(iOS)
+                    UIPasteboard.general.string = message.content
+                    #else
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message.content, forType: .string)
+                    #endif
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption)
+                }
+                .foregroundColor(.secondary)
+            }
+
+            if let onSpeak = onSpeak {
+                Button(action: onSpeak) {
+                    Image(systemName: "speaker.wave.2")
+                        .font(.caption)
+                }
+                .foregroundColor(.secondary)
+            }
+
             if let onRetry = onRetry {
                 Button(action: onRetry) {
                     Image(systemName: "arrow.clockwise")

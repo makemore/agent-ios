@@ -33,6 +33,12 @@ public final class VoiceController: ObservableObject {
     private let provider: TTSProvider?
     private var queue: [String] = []
     private var isDraining: Bool = false
+    /// Set when the TTS provider fails with a non-transient error (e.g.
+    /// HTTP 403). Prevents the drain loop from restarting on subsequent
+    /// enqueue calls, which would otherwise flicker `isSpeaking`
+    /// true→false on every chunker emission for the rest of the turn.
+    /// Cleared by `reset()` at the start of the next assistant turn.
+    private var turnFailed: Bool = false
     private var currentTask: Task<Void, Never>?
     private var currentEmotion: Emotion?
     private var chunker: SentenceChunker!
@@ -81,6 +87,7 @@ public final class VoiceController: ObservableObject {
     public func stop() {
         queue.removeAll()
         chunker.reset()
+        turnFailed = false
         currentTask?.cancel()
         currentTask = nil
         provider?.cancel()
@@ -93,6 +100,7 @@ public final class VoiceController: ObservableObject {
     /// Does not stop in-flight playback — call ``stop()`` for that.
     public func reset() {
         currentEmotion = nil
+        turnFailed = false
         chunker.reset()
         recentSpokenText = ""
     }
@@ -106,7 +114,7 @@ public final class VoiceController: ObservableObject {
     // MARK: - Internals
 
     private func enqueue(_ text: String) {
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, !turnFailed else { return }
         queue.append(text)
         if !isDraining { drain() }
     }
@@ -139,12 +147,16 @@ public final class VoiceController: ObservableObject {
                 queue.removeAll()
                 break
             } catch {
-                // Non-cancel error: drop the queue so the user isn't bombarded
-                // by stale audio after recovery, but keep the controller
-                // usable for the next turn.
+                // Non-cancel error (e.g. TTS proxy 403): mark the turn as
+                // failed so subsequent enqueue calls are no-ops. Without
+                // this, each chunker emission restarts the drain loop,
+                // flickers isSpeaking true→false, and causes the presence
+                // orb and layout to jitter. The flag is cleared by reset()
+                // at the start of the next assistant turn.
                 #if DEBUG
                 print("[VoiceController] speak failed: \(error)")
                 #endif
+                turnFailed = true
                 voiceMode = .unavailable(reason: error.localizedDescription)
                 isEnabled = false
                 queue.removeAll()

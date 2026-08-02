@@ -89,6 +89,10 @@ public struct InputView: View {
     /// transcription on the main queue *after* `cancel()` returns, which
     /// is the race that caused the input field to refill after submit.
     @State private var recordingSession: Int = 0
+    /// Text that was already in the input field when recording started.
+    /// Prepended to each transcription result so dictation appends
+    /// rather than replacing existing text.
+    @State private var preRecordingText: String = ""
 
     // ----- Auto-send (hands-free) -----
     /// User toggle. Persists across launches. When on:
@@ -303,6 +307,9 @@ public struct InputView: View {
                         return
                     }
 
+                    // Snapshot existing text so dictation appends to it
+                    preRecordingText = inputText
+
                     audioEngine.prepare()
                     try audioEngine.start()
                     isRecording = true
@@ -355,6 +362,7 @@ public struct InputView: View {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        request.addsPunctuation = true
         if effectiveSpeechInputPolicy == .localOnly {
             guard recognizer.supportsOnDeviceRecognition else {
                 print("[InputView] installRecognitionRequest: on-device recognition unavailable")
@@ -376,7 +384,9 @@ public struct InputView: View {
             if let result = result {
                 DispatchQueue.main.async {
                     guard self.recordingSession == session else { return }
-                    let newText = result.bestTranscription.formattedString
+                    let transcribed = result.bestTranscription.formattedString
+                    let separator = self.preRecordingText.isEmpty ? "" : " "
+                    let newText = self.preRecordingText + separator + transcribed
                     let changed = newText != self.inputText
                     self.inputText = newText
                     // Reset the silence countdown only once we actually

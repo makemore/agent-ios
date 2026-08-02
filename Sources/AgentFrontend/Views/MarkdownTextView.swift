@@ -254,6 +254,11 @@ struct MarkdownTextView: View {
     }
 
     /// Render inline markdown (bold, italic, code, links) using AttributedString
+    ///
+    /// `fixedSize(horizontal: false, vertical: true)` is required on both
+    /// branches: these Texts sit inside the message list's lazy stack, which
+    /// proposes a height rather than letting the Text grow. Without it a long
+    /// run of text clips to a single line and ellipsises instead of wrapping.
     @ViewBuilder
     private func inlineMarkdownText(_ text: String) -> some View {
         if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
@@ -261,11 +266,13 @@ struct MarkdownTextView: View {
                 .font(.body)
                 .foregroundColor(foregroundColor)
                 .tint(linkColor)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             // Fallback to plain text if markdown parsing fails
             Text(text)
                 .font(.body)
                 .foregroundColor(foregroundColor)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
