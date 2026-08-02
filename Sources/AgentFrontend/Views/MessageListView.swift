@@ -442,6 +442,20 @@ public struct MessageListView: View {
     private func handleCountChange(newCount: Int, proxy: ScrollViewProxy) {
         let countBeforeThisChange = previousMessageCount
         previousMessageCount = newCount
+
+        // Content SHRANK — a message was removed. The hosts do this
+        // deliberately: scripted flows (check-in, debrief) send a
+        // structured trigger as a real user message and strip it from the
+        // transcript one runloop tick later. The row's height leaves a
+        // ghost gap at the scroll offset where it used to be, and the
+        // reply then streams in floating mid-viewport below the gap.
+        // Re-pin the bottom — unless the user has scrolled away, in which
+        // case yanking them is worse than the gap.
+        if newCount < countBeforeThisChange, !showScrollToBottom {
+            scrollToBottom(proxy: proxy)
+            return
+        }
+
         guard newCount > countBeforeThisChange else { return }
 
         // Initial load of an existing conversation: land on the newest
