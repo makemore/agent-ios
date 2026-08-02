@@ -33,6 +33,12 @@ public struct ChatWidgetView: View {
     /// level (not inside `InputView`) so the sheet is anchored to the
     /// whole screen and the input view stays purely about the composer.
     @State private var showModelOptions = false
+    /// Drives the transient "Copied" confirmation over the transcript.
+    @State private var copyConfirmationVisible = false
+    /// Incremented per copy so a second copy while the toast is still up
+    /// restarts the dismiss timer instead of the first one cutting the
+    /// second one short.
+    @State private var copyConfirmationToken = 0
     /// TTS controller, created lazily on first appear so the view can be
     /// previewed without a backend. Bound to the viewModel so SSE events
     /// flow into voice playback.
@@ -99,6 +105,21 @@ public struct ChatWidgetView: View {
             }
         }
         .background(config.appearance.background.ignoresSafeArea())
+    }
+
+    /// Flash the "Text has been copied" confirmation over the transcript.
+    ///
+    /// The token guard means copying a second message while the first
+    /// toast is still on screen restarts the dwell rather than letting
+    /// the earlier timer dismiss the newer confirmation early.
+    private func showCopyConfirmation() {
+        copyConfirmationToken += 1
+        let token = copyConfirmationToken
+        copyConfirmationVisible = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            guard copyConfirmationToken == token else { return }
+            copyConfirmationVisible = false
+        }
     }
 
     /// UI-facing config after applying view-model runtime preferences.
@@ -170,6 +191,7 @@ public struct ChatWidgetView: View {
                     voiceController.stop()
                     voiceController.finishTurn(finalText: text)
                 } : nil,
+                onCopy: { showCopyConfirmation() },
                 activity: viewModel.subAgentActivity,
                 agentIsSpeaking: voiceController.isSpeaking,
                 onBlockAction: { action in
@@ -273,6 +295,16 @@ public struct ChatWidgetView: View {
                 }
             )
         }
+        .overlay(alignment: .top) {
+            if copyConfirmationVisible {
+                CopyConfirmationToast(appearance: effectiveConfig.appearance)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    // Never intercept taps — it sits over the transcript.
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: copyConfirmationVisible)
         // Auto-restore saved conversation on launch (paginated, not full history)
         .task {
             // Bind the voice controller to the viewModel so SSE deltas
@@ -440,3 +472,35 @@ struct ChatWidgetView_Previews: PreviewProvider {
 }
 #endif
 
+
+/// Transient "Copied" confirmation shown over the top of the transcript.
+///
+/// Exists because copying a message was previously silent: a successful
+/// copy and a tap that missed the icon looked identical, so the button
+/// read as broken. Purely presentational — the copy itself happens in
+/// ``MessageView``.
+private struct CopyConfirmationToast: View {
+    let appearance: ChatAppearance
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption)
+            Text("Text has been copied")
+                .font(.caption)
+        }
+        .foregroundColor(appearance.textPrimary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                // `assistantBubble` is optional in ChatAppearance — fall
+                // back to the themed surface so the toast is never
+                // transparent against the transcript.
+                .fill(appearance.assistantBubble ?? appearance.background)
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Text has been copied")
+    }
+}

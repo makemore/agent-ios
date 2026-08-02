@@ -265,7 +265,12 @@ public class ChatViewModel: ObservableObject {
     // and drain them at a steady cadence so the displayed text flows smoothly.
     private var streamBuffer: String = ""
     private var drainTimer: Timer?
-    private let drainInterval: TimeInterval = 0.03   // ~33 Hz
+    // ~20 Hz. Every tick mutates `messages`, which re-renders the whole
+    // transcript, so this is effectively the UI's refresh budget during a
+    // streamed reply rather than just a typewriter speed. 33 Hz left no
+    // headroom on a long conversation; 20 Hz reads identically and cuts
+    // the render load by nearly half.
+    private let drainInterval: TimeInterval = 0.05
     /// Set true when server signals stream end — lets the drain catch up
     /// at a higher rate without flushing everything instantly.
     private var streamingDone: Bool = false
@@ -1326,13 +1331,21 @@ public class ChatViewModel: ObservableObject {
         print("[AgentFrontend][ChatVM] dispatch type=\(event.type) payload_keys=[\(payloadKeys)]")
         #endif
 
-        // Notify callback
-        config.onEvent?(event.type, payload)
+        // TEMP diagnostics (see HangDiagnostics): the freeze signature in
+        // the logs is main-thread dispatch stopping right after the FIRST
+        // assistant.delta of a turn, while SSE keeps arriving on the
+        // background thread. Time each phase of that path so whichever one
+        // wedges names itself.
+        HangDiagnostics.measure("onEvent callback (\(event.type))") {
+            config.onEvent?(event.type, payload)
+        }
         runState = runState.applying(eventType: event.type)
 
         switch event.type {
         case "assistant.delta":
-            handleAssistantDelta(payload)
+            HangDiagnostics.measure("handleAssistantDelta") {
+                handleAssistantDelta(payload)
+            }
 
         case "assistant.message":
             handleAssistantMessage(payload)

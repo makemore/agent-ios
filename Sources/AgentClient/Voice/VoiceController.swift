@@ -43,6 +43,20 @@ public final class VoiceController: ObservableObject {
     private var currentEmotion: Emotion?
     private var chunker: SentenceChunker!
 
+    /// Latches when the TTS backend proves unavailable (e.g. the voice
+    /// token endpoint 404s because voice isn't configured on this
+    /// deployment).
+    ///
+    /// Process-wide rather than per-instance because the controller is a
+    /// `@StateObject` on `ChatWidgetView`, and that view is rebuilt whenever
+    /// its identity changes — a new conversation, a config change. Each
+    /// rebuild produced a fresh controller that started enabled and hit the
+    /// dead endpoint again, so a backend without voice was re-probed on
+    /// essentially every turn. One failure is enough; stop asking until the
+    /// app restarts.
+    private static var providerUnavailableThisSession = false
+    private static var unavailableReason: String?
+
     public init(provider: TTSProvider?, enabled: Bool = true,
                 voiceMode: VoiceMode? = nil,
                 minChars: Int = 40, maxChars: Int = 240) {
@@ -53,8 +67,12 @@ public final class VoiceController: ObservableObject {
         case .remote, .local: resolvedModeCanEnable = true
         case .unavailable, .disabled: resolvedModeCanEnable = false
         }
-        self.voiceMode = resolvedMode
-        self.isEnabled = enabled && provider != nil && resolvedModeCanEnable
+        self.voiceMode = Self.providerUnavailableThisSession ? .unavailable(reason: Self.unavailableReason ?? "Voice unavailable")
+                                                             : resolvedMode
+        self.isEnabled = enabled
+            && provider != nil
+            && resolvedModeCanEnable
+            && !Self.providerUnavailableThisSession
         self.chunker = SentenceChunker(minChars: minChars, maxChars: maxChars) { [weak self] text in
             self?.enqueue(text)
         }
@@ -107,6 +125,16 @@ public final class VoiceController: ObservableObject {
 
     /// Toggle speech on/off. Disabling stops any current playback.
     public func setEnabled(_ enabled: Bool) {
+        // An explicit user tap clears the session latch — if they're turning
+        // voice back on they're asking us to try again, perhaps because the
+        // backend has since been fixed.
+        if enabled {
+            Self.providerUnavailableThisSession = false
+            Self.unavailableReason = nil
+            if case .unavailable = voiceMode, provider != nil {
+                voiceMode = .local
+            }
+        }
         isEnabled = enabled && provider != nil && Self.canEnable(voiceMode)
         if !enabled { stop() }
     }
@@ -157,6 +185,11 @@ public final class VoiceController: ObservableObject {
                 print("[VoiceController] speak failed: \(error)")
                 #endif
                 turnFailed = true
+                // Latch for the whole process, not just this instance —
+                // otherwise the next rebuilt controller retries the same
+                // dead endpoint on the next turn.
+                Self.providerUnavailableThisSession = true
+                Self.unavailableReason = error.localizedDescription
                 voiceMode = .unavailable(reason: error.localizedDescription)
                 isEnabled = false
                 queue.removeAll()

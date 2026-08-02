@@ -16,6 +16,70 @@ enum MarkdownBlock: Equatable {
 /// Inline formatting (bold, italic, code, links) is left to
 /// `AttributedString(markdown:)` at render time; this only splits the text
 /// into blocks.
+/// Memoises markdown work across renders.
+///
+/// `MarkdownTextView.body` runs on every SwiftUI render, and during a
+/// streamed reply the typewriter drain timer mutates `messages` at ~33 Hz.
+/// Without caching, every tick re-parses the block structure *and* rebuilds
+/// an `AttributedString` per paragraph for every visible message — enough
+/// to block the main thread for over a second on a long conversation.
+///
+/// Keyed by the source string, so a message that hasn't changed costs a
+/// dictionary lookup. The streaming message's text does change each tick
+/// and still re-parses; everything above it in the scrollback does not,
+/// which is where the win is.
+///
+/// Body runs on the main actor, so a plain dictionary needs no locking.
+@MainActor
+enum MarkdownRenderCache {
+    /// Bounded so a long session can't grow these without limit. On
+    /// overflow we drop everything rather than track recency — cheap, and
+    /// the next few renders simply repopulate what's on screen.
+    private static let capacity = 256
+
+    /// Block cache keyed by *message identity*, not by content.
+    ///
+    /// Keying by content looks natural but behaves badly while streaming:
+    /// the growing message yields a fresh key ~33 times a second, so the
+    /// cache fills in seconds and the overflow flush evicts every stable
+    /// message along with it. One entry per message, overwritten as its
+    /// text grows, keeps the entry count equal to the conversation length
+    /// and leaves finished messages permanently warm.
+    private static var blockCache: [String: (content: String, blocks: [MarkdownBlock])] = [:]
+    private static var inlineCache: [String: AttributedString] = [:]
+
+    static func blocks(id: String, content: String) -> [MarkdownBlock] {
+        if let hit = blockCache[id], hit.content == content { return hit.blocks }
+        let parsed = HangDiagnostics.measure("markdown parse (\(content.count) chars)") {
+            MarkdownBlockParser.parse(content)
+        }
+        if blockCache.count >= capacity { blockCache.removeAll(keepingCapacity: true) }
+        blockCache[id] = (content, parsed)
+        return parsed
+    }
+
+    /// `nil` when the text isn't valid inline markdown — callers fall back
+    /// to plain `Text`. The failure is cached too, via the sentinel below,
+    /// so unparseable content doesn't retry 33 times a second.
+    static func attributed(for text: String) -> AttributedString? {
+        if let hit = inlineCache[text] {
+            return hit == Self.failureSentinel ? nil : hit
+        }
+        let parsed = HangDiagnostics.measure("AttributedString build (\(text.count) chars)") {
+            try? AttributedString(
+                markdown: text,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )
+        }
+        if inlineCache.count >= capacity { inlineCache.removeAll(keepingCapacity: true) }
+        inlineCache[text] = parsed ?? Self.failureSentinel
+        return parsed
+    }
+
+    /// Distinguishes "parsed to empty" from "failed to parse" in the cache.
+    private static let failureSentinel = AttributedString("\u{0}__markdown_parse_failed__")
+}
+
 enum MarkdownBlockParser {
 
     static func parse(_ content: String) -> [MarkdownBlock] {
@@ -182,10 +246,15 @@ struct MarkdownTextView: View {
     let content: String
     let foregroundColor: Color
     var linkColor: Color = Color(hex: "#4a6b8e")
+    /// Stable identity for the block cache — the owning message's id.
+    /// Falls back to the content itself so preview/harness call sites that
+    /// don't have an id still behave correctly, just without the
+    /// streaming-friendly reuse.
+    var cacheKey: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(MarkdownBlockParser.parse(content).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(MarkdownRenderCache.blocks(id: cacheKey ?? content, content: content).enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
@@ -255,24 +324,33 @@ struct MarkdownTextView: View {
 
     /// Render inline markdown (bold, italic, code, links) using AttributedString
     ///
-    /// `fixedSize(horizontal: false, vertical: true)` is required on both
-    /// branches: these Texts sit inside the message list's lazy stack, which
-    /// proposes a height rather than letting the Text grow. Without it a long
-    /// run of text clips to a single line and ellipsises instead of wrapping.
+    /// Wrapping fix: these Texts sit inside the message list's lazy stack,
+    /// which proposes a height rather than letting the Text grow — without
+    /// intervention a long run of text clips to one line and ellipsises.
+    ///
+    /// Deliberately `.frame(maxWidth:)`, NOT `fixedSize(horizontal:false,
+    /// vertical:true)`. The fixedSize form (the original July fix, written
+    /// against the pre-rewrite list) makes every Text negotiate its
+    /// intrinsic height with the rewritten list's `LazyVStack`, and that
+    /// negotiation never converges — the main thread spins inside
+    /// `LazyVStackLayout` / `AGGraphGetValue` indefinitely (2-minute hangs
+    /// captured in the debugger, no app code on the stack). Pinning the
+    /// width instead gives the Text a definite proposal to wrap against
+    /// and stays out of the lazy layout's size negotiation entirely.
     @ViewBuilder
     private func inlineMarkdownText(_ text: String) -> some View {
-        if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+        if let attributed = MarkdownRenderCache.attributed(for: text) {
             Text(attributed)
                 .font(.body)
                 .foregroundColor(foregroundColor)
                 .tint(linkColor)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             // Fallback to plain text if markdown parsing fails
             Text(text)
                 .font(.body)
                 .foregroundColor(foregroundColor)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

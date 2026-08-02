@@ -18,6 +18,11 @@ public struct MessageView: View {
     /// the Play affordances entirely. Defaulted so preview/harness call
     /// sites keep compiling.
     var onSpeak: (() -> Void)? = nil
+    /// Fired *after* this message's text has been put on the pasteboard,
+    /// by either the actions-row button or the context menu. Purely a
+    /// notification so the host can confirm the copy — the copy itself
+    /// happens here.
+    var onCopy: (() -> Void)? = nil
     /// When `true` and this is an assistant text/tool/system message,
     /// render the S'Ai presence orb as a small avatar at the leading
     /// edge of the row. The parent list decides per-message whether
@@ -94,6 +99,7 @@ public struct MessageView: View {
                 #endif
             }()
             ContentBlockRenderer(blocks: blocks, config: config, onAction: onBlockAction)
+                .onAppear { HangDiagnostics.mark("ContentBlockRenderer appear") }
                 .padding(.horizontal, 12)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
@@ -125,12 +131,7 @@ public struct MessageView: View {
                 messageBubble
                     .contextMenu {
                         Button {
-                            #if os(iOS)
-                            UIPasteboard.general.string = message.content
-                            #else
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(message.content, forType: .string)
-                            #endif
+                            copyMessage()
                         } label: {
                             Label("Copy", systemImage: "doc.on.doc")
                         }
@@ -197,7 +198,10 @@ public struct MessageView: View {
             // region — pressing near the composer would select through the
             // message list and the input bar.
             if !isUser && !isSystem && !isToolMessage && config.enableMarkdown {
-                MarkdownTextView(content: message.content, foregroundColor: messageTextColor, linkColor: linkColor)
+                MarkdownTextView(content: message.content,
+                                 foregroundColor: messageTextColor,
+                                 linkColor: linkColor,
+                                 cacheKey: message.id)
                     .textSelection(.enabled)
             } else {
                 Text(message.content)
@@ -278,51 +282,78 @@ public struct MessageView: View {
         return appearance.assistantBubble ?? PlatformColors.systemGray5
     }
     
+    /// Put this message's text on the pasteboard and notify the host so
+    /// it can confirm the copy. Shared by the actions-row button and the
+    /// bubble's context menu so both paths behave identically.
+    private func copyMessage() {
+        #if os(iOS)
+        UIPasteboard.general.string = message.content
+        #else
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.content, forType: .string)
+        #endif
+        onCopy?()
+    }
+
     @ViewBuilder
     private var actionsRow: some View {
-        HStack(spacing: 12) {
+        // Spacing is 0 because `actionIconHitTarget()` carries its own
+        // horizontal padding — the frames supply the 12pt between glyphs
+        // that this row used to get from stack spacing. Adding spacing on
+        // top of the frames double-counts it and the row sprawls.
+        HStack(spacing: 0) {
             if !isUser {
                 Button {
-                    #if os(iOS)
-                    UIPasteboard.general.string = message.content
-                    #else
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(message.content, forType: .string)
-                    #endif
+                    copyMessage()
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.caption)
+                        .actionIconHitTarget()
                 }
+                .buttonStyle(.plain)
                 .foregroundColor(.secondary)
+                .accessibilityLabel("Copy message")
             }
 
             if let onSpeak = onSpeak {
                 Button(action: onSpeak) {
                     Image(systemName: "speaker.wave.2")
                         .font(.caption)
+                        .actionIconHitTarget()
                 }
+                .buttonStyle(.plain)
                 .foregroundColor(.secondary)
+                .accessibilityLabel("Play message")
             }
 
             if let onRetry = onRetry {
                 Button(action: onRetry) {
                     Image(systemName: "arrow.clockwise")
                         .font(.caption)
+                        .actionIconHitTarget()
                 }
+                .buttonStyle(.plain)
                 .foregroundColor(.secondary)
+                .accessibilityLabel("Retry")
             }
-            
+
             if let onEdit = onEdit {
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
                         .font(.caption)
+                        .actionIconHitTarget()
                 }
+                .buttonStyle(.plain)
                 .foregroundColor(.secondary)
+                .accessibilityLabel("Edit")
             }
-            
+
             Text(message.timestamp, style: .time)
                 .font(.caption2)
                 .foregroundColor(.secondary)
+                // The icons' hit frames end 6pt past the last glyph, so
+                // add the other 6 to keep the original 12pt gap here too.
+                .padding(.leading, 6)
         }
     }
     
@@ -356,3 +387,23 @@ public struct MessageView: View {
     }
 }
 
+
+private extension View {
+    /// Expand a caption-sized glyph into a real tap target.
+    ///
+    /// The action-row icons render at `.font(.caption)`, so without this
+    /// the hit area is the glyph itself — roughly 10pt, well under the
+    /// 44pt Apple asks for. Taps landed next to the icon and silently did
+    /// nothing, which read as the button being broken. `contentShape`
+    /// makes the padded frame hit-testable rather than just the drawn
+    /// pixels.
+    ///
+    /// Width is deliberately tighter than height. 22pt around a ~10pt
+    /// glyph leaves 6pt each side, so two adjacent icons sit 12pt apart —
+    /// the row's original spacing — while height can be generous because
+    /// nothing crowds the row vertically.
+    func actionIconHitTarget() -> some View {
+        self.frame(minWidth: 22, minHeight: 30)
+            .contentShape(Rectangle())
+    }
+}

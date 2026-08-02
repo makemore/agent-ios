@@ -17,7 +17,8 @@ public struct ContentBlockRenderer: View {
     var onAction: ((BlockAction) -> Void)?
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let _ = HangDiagnostics.mark("ContentBlockRenderer body (\(blocks.count) blocks)")
+        return VStack(alignment: .leading, spacing: 8) {
             ForEach(blocks) { block in
                 renderBlock(block)
             }
