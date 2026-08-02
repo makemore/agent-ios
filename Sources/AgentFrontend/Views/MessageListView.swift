@@ -911,11 +911,26 @@ private struct ScrollMetricsPreferenceKey: PreferenceKey {
     }
 }
 
-/// Applies `defaultScrollAnchor(.bottom)` where it exists; no-op earlier.
+/// Bottom anchoring with iMessage semantics; no-op before iOS 18.
+///
+/// Deliberately NOT the plain `defaultScrollAnchor(.bottom)`: that also
+/// sets the `.alignment` role, which bottom-aligns content that doesn't
+/// fill the viewport — an empty chat's thinking spinner ends up alone at
+/// the foot of a blank page (geometry probe confirmed the content was
+/// pixel-flush with the container bottom the whole time; the "bug" was
+/// the alignment policy itself). Setting only the offset roles gives:
+///
+///   * short conversations start at the TOP and grow downward,
+///   * opening a long conversation lands at the newest message
+///     (`.initialOffset`),
+///   * streaming keeps the bottom pinned once content overflows, while
+///     the user is at the bottom (`.sizeChanges`).
 private struct NativeBottomAnchorModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
-            content.defaultScrollAnchor(.bottom)
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
         } else {
             content
         }
@@ -934,15 +949,27 @@ private struct ScrollAwayDetector: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                let distanceFromBottom = g.contentSize.height
-                    + g.contentInsets.bottom
-                    - g.containerSize.height
-                    - g.contentOffset.y
-                return distanceFromBottom > threshold
-            } action: { _, away in
-                onChange(away)
-            }
+            content
+                .onScrollGeometryChange(for: Bool.self) { g in
+                    let distanceFromBottom = g.contentSize.height
+                        + g.contentInsets.bottom
+                        - g.containerSize.height
+                        - g.contentOffset.y
+                    return distanceFromBottom > threshold
+                } action: { _, away in
+                    onChange(away)
+                }
+                #if DEBUG
+                // TEMP probe: quantised to 8pt so it logs on real movement,
+                // not per-frame noise. Shows where the content actually sits
+                // relative to the viewport at each phase of a scripted flow.
+                .onScrollGeometryChange(for: String.self) { g in
+                    let q: (CGFloat) -> Int = { Int(($0 / 8).rounded()) * 8 }
+                    return "content=\(q(g.contentSize.height)) container=\(q(g.containerSize.height)) offsetY=\(q(g.contentOffset.y)) insetTop=\(q(g.contentInsets.top)) insetBottom=\(q(g.contentInsets.bottom))"
+                } action: { _, desc in
+                    print("[ScrollGeo] \(desc)")
+                }
+                #endif
         } else {
             content
         }
