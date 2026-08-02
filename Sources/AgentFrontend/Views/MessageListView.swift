@@ -959,17 +959,6 @@ private struct ScrollAwayDetector: ViewModifier {
                 } action: { _, away in
                     onChange(away)
                 }
-                #if DEBUG
-                // TEMP probe: quantised to 8pt so it logs on real movement,
-                // not per-frame noise. Shows where the content actually sits
-                // relative to the viewport at each phase of a scripted flow.
-                .onScrollGeometryChange(for: String.self) { g in
-                    let q: (CGFloat) -> Int = { Int(($0 / 8).rounded()) * 8 }
-                    return "content=\(q(g.contentSize.height)) container=\(q(g.containerSize.height)) offsetY=\(q(g.contentOffset.y)) insetTop=\(q(g.contentInsets.top)) insetBottom=\(q(g.contentInsets.bottom))"
-                } action: { _, desc in
-                    print("[ScrollGeo] \(desc)")
-                }
-                #endif
         } else {
             content
         }

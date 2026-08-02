@@ -12,10 +12,14 @@ import Foundation
 /// symbolicate the blocked main thread, which a watchdog inside the process
 /// cannot do safely.
 ///
-/// TEMPORARILY unconditional (not #if DEBUG): the app uses custom build
-/// configuration names (Debug-Local etc.), and the SPM package can end up
-/// compiled as release under them, silently stripping gated diagnostics.
-/// Strip this file before the PR.
+/// Fully `#if DEBUG` gated — every entry point compiles to a no-op in
+/// release, so TestFlight/App Store builds carry no watchdog thread, no
+/// lock traffic, and no prints. Caveat for development: the host app's
+/// custom build configuration names (Debug-Local etc.) have been seen to
+/// compile this package WITHOUT the DEBUG condition, which silently
+/// disables these diagnostics in dev builds too — if `[Hang] watchdog
+/// installed` doesn't appear at chat startup, that's why (fix the
+/// package's compilation conditions, don't ungate this file again).
 public enum HangDiagnostics {
 
     /// Threshold above which a stalled runloop is reported.
@@ -36,11 +40,13 @@ public enum HangDiagnostics {
     /// Deliberately coarse — a handful of call sites around the expensive
     /// phases. Marking too finely costs more than it reveals.
     public static func mark(_ activity: @autoclosure () -> String) {
+        #if DEBUG
         let label = activity()
         lock.lock()
         currentActivity = label
         activityStarted = CFAbsoluteTimeGetCurrent()
         lock.unlock()
+        #endif
     }
 
     /// Time a synchronous block and report it if it runs long.
@@ -53,6 +59,7 @@ public enum HangDiagnostics {
     @discardableResult
     public static func measure<T>(_ label: @autoclosure () -> String,
                                   _ work: () -> T) -> T {
+        #if DEBUG
         let name = label()
         mark(name)
         let start = CFAbsoluteTimeGetCurrent()
@@ -62,11 +69,15 @@ public enum HangDiagnostics {
             print(String(format: "[Hang] 🐢 %@ took %.0fms", name, ms))
         }
         return result
+        #else
+        return work()
+        #endif
     }
 
     /// Begin watching. Safe to call repeatedly; only the first call starts
     /// the timer.
     public static func start() {
+        #if DEBUG
         lock.lock()
         let alreadyRunning = started
         started = true
@@ -123,5 +134,6 @@ public enum HangDiagnostics {
             queue.asyncAfter(deadline: .now() + pollInterval) { check() }
         }
         queue.async { check() }
+        #endif
     }
 }
