@@ -148,9 +148,12 @@ public struct MessageListView: View {
     /// republished the preference, and the cycle never settled.
     @State private var showScrollToBottom = false
 
-    /// Master switch for the jump-to-bottom affordance. Flip to `false` to
-    /// remove the button and all of its geometry tracking without touching
-    /// the scroll-on-open / scroll-on-send behaviour, which are independent.
+    /// Master switch for the LEGACY (pre-iOS-18) geometry tracking only —
+    /// the GeometryReader/preference plumbing. Kept off: it caused layout
+    /// feedback during streaming, and on iOS 18+ the button is driven by
+    /// `ScrollAwayDetector` (`onScrollGeometryChange`) instead, which this
+    /// switch does not gate. Enable only if the pre-18 path ever needs the
+    /// button and someone has time to make the preference path safe.
     ///
     /// OFF for the current experiment: the send-path freeze wedges inside
     /// SwiftUI layout with no diagnostic marker firing, and this geometry
@@ -193,6 +196,15 @@ public struct MessageListView: View {
     /// only reliable carrier of post-change state.
     private var tailKey: String? {
         messages.last.map { "\($0.role.rawValue)|\($0.id)" }
+    }
+
+    /// `true` where `defaultScrollAnchor(.bottom)` exists (iOS 18 / macOS
+    /// 15). Selects the uniform-rows layout; older OSes keep the
+    /// reserved-space turn group, whose stability the lazy layout needs
+    /// when we have to drive scrolling by hand.
+    private var useNativeBottomAnchor: Bool {
+        if #available(iOS 18.0, macOS 15.0, *) { return true }
+        return false
     }
 
     public var body: some View {
@@ -376,7 +388,11 @@ public struct MessageListView: View {
     /// drifted away from the newest message.
     @ViewBuilder
     private func scrollToBottomButton(proxy: ScrollViewProxy) -> some View {
-        if Self.scrollToBottomButtonEnabled && showScrollToBottom && !messages.isEmpty {
+        // Visible whenever the detector says we're away from the bottom.
+        // On iOS 18+ `showScrollToBottom` is driven by ScrollAwayDetector;
+        // pre-18 nothing sets it (the legacy preference plumbing stays
+        // behind the kill switch), so the button simply never appears there.
+        if showScrollToBottom && !messages.isEmpty {
             Button {
                 withAnimation(.easeOut(duration: 0.25)) {
                     proxy.scrollTo(Self.bottomAnchorId, anchor: .bottom)
@@ -519,13 +535,20 @@ public struct MessageListView: View {
                     // debugger, zero app frames). The reserved space keeps
                     // every proposal stable while the reply grows into it.
                     //
-                    // Cost: a just-sent message parks at the TOP of the
-                    // viewport with blank space below, rather than settling
-                    // above the composer. That's the old UX, deliberately —
-                    // a bottom-anchored send needs a design that doesn't
-                    // fight the lazy layout, which is future work, done
-                    // with Chris rather than around him.
-                    if let turnStart = messages.lastIndex(where: { $0.role == .user }) {
+                    // On iOS 18+ the reservation is not needed: the
+                    // ScrollView itself owns bottom anchoring via
+                    // `defaultScrollAnchor(.bottom)` — no proxy.scrollTo
+                    // into unsettled lazy content, no manual geometry. Rows
+                    // render uniformly and a sent message settles directly
+                    // above the composer. Pre-18 keeps the reserved-space
+                    // design and its park-at-top UX.
+                    if useNativeBottomAnchor {
+                        ForEach(rows, id: \.element.id) { index, message in
+                            messageRow(index: index, message: message,
+                                       latestAssistantId: latestAssistantId)
+                        }
+                        statusIndicator
+                    } else if let turnStart = messages.lastIndex(where: { $0.role == .user }) {
                         ForEach(rows[..<turnStart], id: \.element.id) { index, message in
                             messageRow(index: index, message: message,
                                        latestAssistantId: latestAssistantId)
@@ -590,6 +613,19 @@ public struct MessageListView: View {
                 guard Self.scrollToBottomButtonEnabled else { return }
                 recordMetrics(metrics, viewportHeight: geo.size.height)
             }
+            // iOS 18+: the ScrollView owns bottom anchoring. Opens at the
+            // newest message, keeps the bottom pinned while content grows
+            // if the user is already there, and leaves them alone once
+            // they've scrolled up — the exact chat contract, implemented by
+            // the framework instead of scrollTo calls racing lazy layout.
+            .modifier(NativeBottomAnchorModifier())
+            // iOS 18+: jump-button visibility from the scroll view's own
+            // geometry callback. The transformed value is a Bool, so the
+            // action only fires when "away from bottom" actually flips —
+            // no per-frame state writes, no preference plumbing.
+            .modifier(ScrollAwayDetector(threshold: Self.nearBottomThresholdPt) { away in
+                showScrollToBottom = away
+            })
             #if os(iOS)
             // Interactive drag-to-dismiss only. Do NOT add a tap gesture here
             // to dismiss the keyboard: `simultaneousGesture` fires alongside
@@ -858,5 +894,43 @@ private struct ScrollMetricsPreferenceKey: PreferenceKey {
         let next = nextValue()
         guard next.height > 0 else { return }
         value = next
+    }
+}
+
+/// Applies `defaultScrollAnchor(.bottom)` where it exists; no-op earlier.
+private struct NativeBottomAnchorModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.defaultScrollAnchor(.bottom)
+        } else {
+            content
+        }
+    }
+}
+
+/// Reports when the user scrolls away from (or back to) the bottom, using
+/// the scroll view's own geometry callback (iOS 18 / macOS 15). The
+/// transform reduces geometry to a Bool, and SwiftUI only invokes the
+/// action when that Bool changes — so this cannot write state per frame,
+/// which is the failure mode that sank the preference-based version.
+/// No-op on older OSes (the pre-18 path has no jump button).
+private struct ScrollAwayDetector: ViewModifier {
+    let threshold: CGFloat
+    let onChange: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.onScrollGeometryChange(for: Bool.self) { g in
+                let distanceFromBottom = g.contentSize.height
+                    + g.contentInsets.bottom
+                    - g.containerSize.height
+                    - g.contentOffset.y
+                return distanceFromBottom > threshold
+            } action: { _, away in
+                onChange(away)
+            }
+        } else {
+            content
+        }
     }
 }
