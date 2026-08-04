@@ -295,34 +295,39 @@ struct MarkdownTextView: View {
                 .fontWeight(.bold)
                 .textSelection(.enabled)
 
+        // Lists render as ONE Text, not a VStack of glyph+Text HStack
+        // rows. The row-per-item structure was what tail-truncated long
+        // items: the lazy stack's height proposal for the bubble got
+        // split across the nested containers (rows VStack → bullet
+        // HStack), each row's Text obeyed its too-small slice, and any
+        // item needing more than its share ellipsised — while sibling
+        // paragraphs rendered fully. Joining the items with "\n" and
+        // going through `inlineMarkdownText` is the exact paragraph
+        // path, the one shape proven to wrap correctly under the
+        // rewritten list ( `.inlineOnlyPreservingWhitespace` keeps the
+        // newlines; the glyph/number prefixes are literal text to the
+        // inline parser). `fixedSize` on row Texts is NOT an
+        // alternative — see `inlineMarkdownText`; it hangs the lazy
+        // layout. Cost: wrapped lines start at the margin instead of
+        // hanging under the item text.
         case .bulletList(let items):
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text("•")
-                            .foregroundColor(foregroundColor)
-                        inlineMarkdownText(item)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
+            inlineMarkdownText(items.map { "•  \($0)" }
+                .joined(separator: "\n"))
+                .textSelection(.enabled)
 
         case .numberedList(let items, let start):
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text("\(start + idx).")
-                            .foregroundColor(foregroundColor)
-                            .monospacedDigit()
-                        inlineMarkdownText(item)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
+            inlineMarkdownText(items.enumerated()
+                .map { "\($0.offset + start). \($0.element)" }
+                .joined(separator: "\n"))
+                .textSelection(.enabled)
         }
     }
 
     /// Render inline markdown (bold, italic, code, links) using AttributedString
+    ///
+    /// Wrapping fix: these Texts sit inside the message list's lazy stack,
+    /// which proposes a height rather than letting the Text grow — without
+    /// intervention a long run of text clips to one line and ellipsises.
     ///
     /// Wrapping fix: these Texts sit inside the message list's lazy stack,
     /// which proposes a height rather than letting the Text grow — without
@@ -337,6 +342,14 @@ struct MarkdownTextView: View {
     /// captured in the debugger, no app code on the stack). Pinning the
     /// width instead gives the Text a definite proposal to wrap against
     /// and stays out of the lazy layout's size negotiation entirely.
+    ///
+    /// Re-tested 2026-08-04: fixedSize applied *after* an inner
+    /// `.frame(maxWidth: .infinity)` hangs identically during a streamed
+    /// reply (sampled: main thread 100% in
+    /// `LazySubviewPlacements.placeSubviews` → `LazyStack.place`). A
+    /// definite width does not rescue the height negotiation, so do not
+    /// reintroduce fixedSize here in any form. List-item truncation is
+    /// instead solved structurally in `listText(items:prefix:)`.
     @ViewBuilder
     private func inlineMarkdownText(_ text: String) -> some View {
         if let attributed = MarkdownRenderCache.attributed(for: text) {
