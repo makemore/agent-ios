@@ -1,30 +1,49 @@
 import SwiftUI
 import AgentClient
+import os
 #if canImport(UIKit)
 import UIKit
 #endif
 
-/// Message list view. Automated scrolling is limited to two moments:
+/// Message list view: a right-side-up transcript in a **plain, eagerly
+/// measured `VStack`** — deliberately not a `LazyVStack`.
 ///
-///   1. **Opening a conversation** — the list lands at the end, so the
-///      newest message is on screen rather than the top of the scrollback.
-///   2. **Sending a message** — the list scrolls to its end, settling the
-///      just-sent message directly above the composer.
+/// Every scroll defect in this file's history — overshooting
+/// scroll-to-bottom, jumping to blank space, streaming bounce, unstable
+/// jump-button visibility — traced back to one cause: lazy containers
+/// *estimate* the height of off-screen rows, and scroll targets computed
+/// from estimated geometry land wherever the estimate happens to be
+/// wrong. With every row measured for real, a `scrollTo` is exact, on
+/// every OS version. (Same architecture as fullmoon and Enchanted, the
+/// prevailing open-source iOS LLM chat apps.)
 ///
-/// Nothing scrolls during streaming. The agent's reply grows below the
-/// fold and the user stays where they are; a jump-to-bottom button appears
-/// once the content bottom sits more than `nearBottomThresholdPt` below
-/// the viewport, and tapping it returns to the newest message.
+/// Eager rendering is affordable because the product bounds conversation
+/// length (a cap with progressive "save to memories & start fresh"
+/// notices, motivated by token budgets as much as UI cost). Rendering a
+/// few hundred text rows up front is well within budget; profile with
+/// the debug seeder before raising the cap materially.
+///
+/// Scroll behaviour:
+///   * **Opening a conversation** lands on the newest message
+///     (`.initialOffset` anchor on iOS 18+, an exact `scrollTo` before).
+///   * **Sending a message** pins the list to the bottom, settling the
+///     just-sent message above the composer.
+///   * **Streaming** follows ChatGPT-style *derived* follow: on iOS 18+
+///     the `.sizeChanges` anchor keeps the bottom pinned while the user
+///     is at the bottom, and leaves them untouched once they scroll up;
+///     scrolling back down (or tapping the jump button) re-engages —
+///     the scroll position itself is the state, no one-way latch.
+///     Pre-18 has no size-change anchoring, so streaming follows
+///     unconditionally there (the Enchanted approach) — a documented
+///     compromise for the shrinking iOS 16/17 share.
+///   * A jump-to-bottom button appears (iOS 18+) once the user is more
+///     than `nearBottomThresholdPt` from the newest message.
 ///
 /// Pagination ("Load earlier") prepends older messages and restores the
-/// previously-first-visible message to the top, so reading position
-/// doesn't jump.
-///
-/// This matches the prevailing pattern in modern chat UIs (Claude,
-/// ChatGPT, iMessage, etc.): no surprise scroll-jacking on streaming, the
-/// user is always in control apart from the two moments above. Hosts that
-/// want different behaviour can layer their own `ScrollViewReader` +
-/// `proxy.scrollTo` on top of this view.
+/// previously-first-visible message to the top of the viewport. It is
+/// vestigial: once the data layer fetches whole conversations (safe
+/// under the message cap), `hasMoreMessages` is permanently false and
+/// the button never renders.
 public struct MessageListView: View {
     let messages: [Message]
     let isLoading: Bool
@@ -95,17 +114,14 @@ public struct MessageListView: View {
     @State private var editingIndex: Int?
     @State private var editText: String = ""
 
-    /// Anchor message id used by the "Load earlier" pagination
-    /// path. Set by the tap handler on the load-more button; consumed
-    /// by ``handleCountChange`` after the next render to scroll
-    /// the previously-first-visible message back to the top of the
-    /// viewport. No scroll tracking is performed outside this one
-    /// use case.
+    /// Anchor message id used by the "Load earlier" pagination path.
+    /// Set by the tap handler on the load-more button; consumed by
+    /// ``handleCountChange`` after the next render to scroll the
+    /// previously-first-visible message back to the top of the viewport.
     @State private var paginationAnchorId: String?
-    /// Message count snapshot used to detect that a pagination
-    /// commit actually grew the list (so we know the anchor should
-    /// be restored). A failed pagination doesn't change the count
-    /// and we leave the anchor in place for the next attempt.
+    /// Message count snapshot used to detect that a pagination commit
+    /// actually grew the list. A failed pagination doesn't change the
+    /// count and we leave the anchor in place for the next attempt.
     @State private var previousMessageCount: Int = 0
     /// Identity of the most recently seen tail message. The user-
     /// submit scroll path watches this instead of `messages.count`
@@ -115,77 +131,194 @@ public struct MessageListView: View {
     /// appends the assistant message before SwiftUI re-evaluates
     /// the view body, so the count-change handler would only ever
     /// see a delta of 2 and `messages.last` would be the assistant,
-    /// not the user). Watching the id handles both "user-only
-    /// append" and "user + first agent response in the same
-    /// frame". The id is `nil` for an empty conversation.
+    /// not the user). The id is `nil` for an empty conversation.
     @State private var lastSeenTailId: String?
+    /// Whether the user has scrolled far enough from the newest message
+    /// to warrant the jump-to-bottom affordance. Driven by
+    /// ``ScrollAwayDetector`` (iOS 18+); pre-18 nothing sets it and the
+    /// button never appears there.
+    @State private var showScrollToBottom = false
+    /// Streaming-follow engagement. The contract mirrors the jump
+    /// button: button gone (near bottom) → following; a finger-drag
+    /// (``StreamFollowGovernor``) → not following, until the user next
+    /// enters the near-bottom zone and the button hides again. Starts
+    /// `true` (a fresh conversation opens at the bottom). Rejected
+    /// alternatives, verified broken on device: the native
+    /// `.sizeChanges` anchor never re-engages after a manual scroll;
+    /// deriving disengagement from distance let transient growth bursts
+    /// self-cancel the follow; phase-based re-engagement missed
+    /// arrivals at the bottom. Pre-18 neither detector runs, so this
+    /// stays `true` and streaming follows unconditionally there — the
+    /// documented compromise.
+    @State private var followBottom = true
+
+    // ── TEMP DEBUG HUD ──────────────────────────────────────────────
+    // On-screen follow-state tracer: shows whether the stream-follow is
+    // engaged and the last few events that changed it (with the raw
+    // scroll phase that caused each). Flip to `false` (or delete the
+    // marked block) once the stickiness investigation is done. Runtime
+    // flag rather than #if DEBUG — custom build configurations strip
+    // DEBUG unreliably in this package (see HangDiagnostics).
+    private static let followDebugHUDEnabled = true
+    private struct FollowDebugEvent: Identifiable {
+        let id: Int
+        let text: String
+    }
+    @State private var followDebugEvents: [FollowDebugEvent] = []
+    @State private var followDebugCounter = 0
+    private static let debugTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.S"
+        return f
+    }()
+    private static let followLogger = Logger(subsystem: "agent-ios",
+                                             category: "ScrollFollow")
+    /// Console/unified-log only — for per-tick tracing that would flood
+    /// the six-line HUD and push out the interesting state flips.
+    private func logFollowConsole(_ text: String) {
+        guard Self.followDebugHUDEnabled else { return }
+        Self.followLogger.notice("[Follow] \(text, privacy: .public)")
+    }
+    private func logFollow(_ text: String) {
+        guard Self.followDebugHUDEnabled else { return }
+        // Mirror every HUD event to the unified log: shows live in the
+        // Xcode console when running attached, and in Console.app
+        // (filter subsystem "agent-ios") for un-attached device runs.
+        Self.followLogger.notice("[Follow] \(text, privacy: .public)")
+        followDebugCounter += 1
+        let ts = Self.debugTimeFormatter.string(from: Date())
+        followDebugEvents.insert(
+            FollowDebugEvent(id: followDebugCounter, text: "\(ts)  \(text)"),
+            at: 0
+        )
+        if followDebugEvents.count > 6 {
+            followDebugEvents.removeLast(followDebugEvents.count - 6)
+        }
+    }
+    // ── END TEMP DEBUG HUD ──────────────────────────────────────────
 
     /// Id of the invisible 1pt sentinel rendered after the last row.
-    /// The user-submit scroll targets this (anchor: .bottom) instead
-    /// of the message row itself — see ``handleTailChange``.
+    /// All bottom scrolls target this. With every row eagerly measured
+    /// its position is exact — no estimation, no overshoot.
     private static let bottomAnchorId = "message-list-bottom-anchor"
-    /// Named coordinate space the content stack reports its frame in.
-    private static let scrollSpace = "message-list-scroll"
     /// How far the content bottom must sit below the viewport before the
-    /// jump-to-bottom button appears. Roughly half a short message, so the
-    /// button doesn't flicker in and out during normal reading.
+    /// jump-to-bottom button appears. Roughly half a short message, so
+    /// the button doesn't flicker in and out during normal reading.
     private static let nearBottomThresholdPt: CGFloat = 80
-    /// Lower edge of the hysteresis band — once visible, the button stays
-    /// until the content bottom is within this distance of the viewport.
-    private static let hideBottomThresholdPt: CGFloat = 40
-    /// How long the scroll geometry must hold still before the button's
-    /// visibility is recomputed. Long enough to swallow the bogus
-    /// measurements published mid-rebuild during streaming.
-    private static let visibilityDebounce: TimeInterval = 0.15
 
-    /// Whether the user has scrolled far enough from the newest message
-    /// to warrant the jump-to-bottom affordance.
-    ///
-    /// This is the *only* piece of state driven by scroll geometry. An
-    /// earlier version also stored the raw offset and height, which
-    /// deadlocked the app: `onPreferenceChange` wrote `@State` on every
-    /// layout pass, each write invalidated the view, the re-layout
-    /// republished the preference, and the cycle never settled.
-    @State private var showScrollToBottom = false
-
-    /// Master switch for the LEGACY (pre-iOS-18) geometry tracking only —
-    /// the GeometryReader/preference plumbing. Kept off: it caused layout
-    /// feedback during streaming, and on iOS 18+ the button is driven by
-    /// `ScrollAwayDetector` (`onScrollGeometryChange`) instead, which this
-    /// switch does not gate. Enable only if the pre-18 path ever needs the
-    /// button and someone has time to make the preference path safe.
-    ///
-    /// OFF for the current experiment: the send-path freeze wedges inside
-    /// SwiftUI layout with no diagnostic marker firing, and this geometry
-    /// preference is the only code of ours that runs on every layout pass.
-    /// If the freeze survives with this off, the plumbing is exonerated and
-    /// the suspect becomes the bottom-anchor scroll ladder.
-    private static let scrollToBottomButtonEnabled = false
-
-    /// Non-observed coordination state.
-    ///
-    /// Deliberately a *class* held in `@State`: mutating its properties does
-    /// not invalidate the view, so bookkeeping here can't itself cause the
-    /// re-render storm we're trying to observe. `@State var someInt` would
-    /// be self-defeating.
-    final class ScrollCoordinator {
-        /// Most recent geometry, held here rather than in `@State` so
-        /// recording it can't trigger a render.
-        var latestMetrics = ScrollMetrics()
-        var latestViewport: CGFloat = 0
-        /// Debounce timer for the visibility evaluation.
-        var pendingEval: DispatchWorkItem?
-        // Diagnostics counters — ungated alongside the [ScrollDiag] prints
-        // that read them (see HangDiagnostics for why #if DEBUG is
-        // unreliable in this package).
-        var callbacks = 0
-        var stateWrites = 0
-        var bodyEvals = 0
-        var windowStart = CFAbsoluteTimeGetCurrent()
-        var lastMetricLog = 0.0
-        var watchdogInstalled = false
+    /// `true` where the scroll view can own bottom anchoring
+    /// (`defaultScrollAnchor`, iOS 18 / macOS 15). Older OSes fall back
+    /// to explicit scrolls.
+    private var useNativeBottomAnchor: Bool {
+        if #available(iOS 18.0, macOS 15.0, *) { return true }
+        return false
     }
-    @State private var coord = ScrollCoordinator()
+
+    public var body: some View {
+        let _ = HangDiagnostics.mark("MessageListView body (\(messages.count) messages)")
+        return ScrollViewReader { proxy in
+            scrollContent
+                .onAppear {
+                    HangDiagnostics.start()
+                    previousMessageCount = messages.count
+                    lastSeenTailId = messages.last?.id
+                    // Pre-18: land on the newest message ourselves — the
+                    // `.initialOffset` anchor does this on iOS 18+.
+                    if !useNativeBottomAnchor, !messages.isEmpty {
+                        scrollToBottom(proxy: proxy)
+                    }
+                }
+                .background(config.appearance.background)
+                .onChange(of: messages.count) { newCount in
+                    handleCountChange(newCount: newCount, proxy: proxy)
+                }
+                .onChange(of: tailKey) { newTailKey in
+                    handleTailChange(newTailKey: newTailKey, proxy: proxy)
+                }
+                .onChange(of: streamTick) { newTick in
+                    // Streaming follow, driven by our own derived state
+                    // (see `followBottom`). Runs on every OS version:
+                    // on iOS 18+ it overlaps the `.sizeChanges` anchor
+                    // in the never-scrolled case (idempotent — both
+                    // target the same place) and is the only thing that
+                    // re-engages after the user scrolls away and back.
+                    //
+                    // Everything the guard needs is decoded from the
+                    // observed value itself: inside this closure
+                    // `messages` and the other properties are from the
+                    // PRE-change render (see `tailKey`), and reading
+                    // them silently skips ticks.
+                    handleStreamTick(newTick, proxy: proxy)
+                }
+                // The animation belongs on the overlay, NOT on
+                // `scrollContent`. Applied to the list it animates every
+                // layout change in the subtree whenever the flag flips —
+                // i.e. all rows at once — which is both expensive and
+                // visibly wrong during a send.
+                .overlay(alignment: .bottom) {
+                    scrollToBottomButton(proxy: proxy)
+                        .animation(.easeInOut(duration: 0.2),
+                                   value: showScrollToBottom)
+                }
+                // TEMP DEBUG HUD — see the marked block near the top.
+                .overlay(alignment: .topTrailing) {
+                    if Self.followDebugHUDEnabled {
+                        followDebugHUD
+                    }
+                }
+        }
+    }
+
+    // TEMP DEBUG HUD — see the marked block near the top.
+    private var followDebugHUD: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(followBottom ? Color.green : Color.red)
+                    .frame(width: 9, height: 9)
+                Text(followBottom ? "STICKY" : "NOT STICKY")
+                    .font(.caption2.weight(.bold))
+            }
+            ForEach(followDebugEvents) { event in
+                Text(event.text)
+                    .font(.system(size: 9, design: .monospaced))
+                    .lineLimit(1)
+            }
+        }
+        .padding(8)
+        .background(Color.black.opacity(0.75))
+        .foregroundColor(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.trailing, 8)
+        .padding(.top, 4)
+        .allowsHitTesting(false)
+    }
+
+    /// Composite "role|content-length" key for the tail message —
+    /// changes on every streaming delta. The role rides inside the
+    /// observed value for the same staleness reason as ``tailKey``.
+    private var streamTick: String? {
+        messages.last.map { "\($0.role.rawValue)|\($0.content.count)" }
+    }
+
+    /// Pin-per-tick handler for the streaming follow. Deliberately has
+    /// NO `isLoading` guard: an assistant tail whose content length
+    /// changed *is* streaming, and `isLoading` read here would be the
+    /// stale pre-change value anyway.
+    private func handleStreamTick(_ tick: String?, proxy: ScrollViewProxy) {
+        guard let tick, let sep = tick.firstIndex(of: "|") else { return }
+        let role = String(tick[..<sep])
+        guard role == MessageRole.assistant.rawValue else {
+            logFollowConsole("tick skipped — tail role \(role)")
+            return
+        }
+        guard followBottom else {
+            logFollowConsole("tick skipped — follow off")
+            return
+        }
+        logFollowConsole("tick → pin (\(tick))")
+        scrollToBottom(proxy: proxy)
+    }
 
     /// Composite "role|id" key for the tail message. The role is
     /// baked into the *observed value* because `onChange` closures
@@ -198,68 +331,13 @@ public struct MessageListView: View {
         messages.last.map { "\($0.role.rawValue)|\($0.id)" }
     }
 
-    /// `true` where `defaultScrollAnchor(.bottom)` exists (iOS 18 / macOS
-    /// 15). Selects the uniform-rows layout; older OSes keep the
-    /// reserved-space turn group, whose stability the lazy layout needs
-    /// when we have to drive scrolling by hand.
-    private var useNativeBottomAnchor: Bool {
-        if #available(iOS 18.0, macOS 15.0, *) { return true }
-        return false
-    }
-
-    public var body: some View {
-        // Ungated with the rest of HangDiagnostics — see that file's note on
-        // custom build configurations silently stripping #if DEBUG in the
-        // package.
-        let _ = { coord.bodyEvals += 1 }()
-        let _ = HangDiagnostics.mark("MessageListView body (\(messages.count) messages)")
-        return ScrollViewReader { proxy in
-            scrollContent
-                .onAppear { installMainThreadWatchdog() }
-                .background(config.appearance.background)
-                .onChange(of: messages.count) { newCount in
-                    handleCountChange(newCount: newCount, proxy: proxy)
-                }
-                .onChange(of: tailKey) { newTailKey in
-                    handleTailChange(newTailKey: newTailKey, proxy: proxy)
-                }
-                .onAppear {
-                    previousMessageCount = messages.count
-                    lastSeenTailId = messages.last?.id
-                }
-                // The animation belongs on the overlay, NOT on
-                // `scrollContent`. Applied to the list it animates every
-                // layout change in the subtree whenever the flag flips —
-                // i.e. all rows at once — which is both expensive and
-                // visibly wrong during a send.
-                .overlay(alignment: .bottom) {
-                    scrollToBottomButton(proxy: proxy)
-                        .animation(.easeInOut(duration: 0.2),
-                                   value: showScrollToBottom)
-                }
-        }
-    }
-
-    /// Tail watcher callback. Fires whenever the tail message
-    /// changes (i.e. a new message was appended). If the new tail
-    /// is a user message, scrolls to the end of the list so the
-    /// just-sent message settles just above the composer.
-    ///
-    /// The observed value is a composite `"role|id"` key — role and
-    /// id are decoded from the closure parameter rather than read
-    /// from `messages`, which is stale inside the closure (see
-    /// ``tailKey``).
-    ///
-    /// On timing: the `scrollTo` is re-issued a few times over ~600ms
-    /// (see ``scrollToBottom(proxy:)``). Plain `asyncAfter` hops are used
-    /// instead of a `Task { await ... }` because they don't suspend: an
-    /// earlier `Task`-based version could resume after the
-    /// `ScrollViewReader`'s underlying reader was re-evaluated and crashed
-    /// with `EXC_BAD_ACCESS`.
+    /// Tail watcher callback. Fires whenever the tail message changes
+    /// (i.e. a new message was appended). If the new tail is a user
+    /// message, pins the list to the bottom so the just-sent bubble
+    /// settles above the composer.
     private func handleTailChange(newTailKey: String?, proxy: ScrollViewProxy) {
         let previousTailId = lastSeenTailId
-        // Decode "role|id" (id may itself contain "|"-free UUIDs,
-        // but split on the first separator to be safe).
+        // Decode "role|id" (split on the first separator to be safe).
         var newTailId: String?
         var newTailRole: String?
         if let newTailKey, let sep = newTailKey.firstIndex(of: "|") {
@@ -269,129 +347,196 @@ public struct MessageListView: View {
         lastSeenTailId = newTailId
         guard newTailId != nil, newTailId != previousTailId else { return }
         // Only user-message appends scroll. Assistant/system appends
-        // (streaming placeholders, errors) also change the tail, but they
-        // must not move the list — the reply grows below the fold and the
-        // user decides whether to follow it, via the jump-to-bottom button.
+        // (streaming placeholders, errors) also change the tail; on
+        // iOS 18+ following them is the size-change anchor's job, and
+        // scrolling here would also yank readers who scrolled away.
         guard newTailRole == MessageRole.user.rawValue else { return }
-        // Skip the transition out of an empty list (first message of
-        // a brand-new conversation, or a wholesale conversation
-        // load) — the content fits or was just restored, and there's
-        // nothing meaningful to scroll away from.
+        // Skip the transition out of an empty list — the initial-offset
+        // anchor (or the onAppear scroll) already lands there.
         guard previousTailId != nil else { return }
-        // The scroll target is the *static bottom anchor*, not the
-        // message row: `scrollTo(messageId, anchor: .top)` proved
-        // unreliable for rows nested inside the turn group (it
-        // executed but never moved the content), whereas scrolling
-        // a trailing sentinel to `.bottom` is the standard SwiftUI
-        // chat mechanism. Because the turn group's `minHeight` is
-        // the viewport height, bottom-of-content == the just-sent
-        // user message sitting at the top of the viewport — the
-        // same visual result.
-        //
-        // Retries: appending the turn group grows the content by a
-        // full viewport, and until the ScrollView commits the new
-        // content size, a scroll clamps to the old max offset.
-        // Re-issuing the same instant scroll over ~600ms is
-        // idempotent once it lands and survives that race (and the
-        // keyboard-dismiss viewport resize that overlaps a send).
         scrollToBottom(proxy: proxy)
     }
 
-    /// Pin the trailing sentinel to the bottom of the viewport.
+    /// Pin the sentinel to the bottom of the viewport, exactly.
     ///
-    /// Re-issued over ~600ms because both appending a turn group and
-    /// loading a conversation wholesale grow the content by more than a
-    /// viewport, and a scroll issued before the `ScrollView` commits the
-    /// new content size clamps to the old maximum offset. The call is
-    /// idempotent once it lands, so repeating it costs nothing and
-    /// survives the race (including the keyboard-dismiss viewport resize
-    /// that overlaps a send).
-    /// Recompute whether the jump-to-bottom button should be visible.
-    ///
-    /// `metrics.offsetY + metrics.height` is the content's bottom edge in
-    /// viewport coordinates. When that exceeds the viewport height by more
-    /// than the threshold, there's material content below the fold.
-    /// Record the latest geometry and schedule a debounced evaluation.
-    ///
-    /// Evaluating per frame is what wedged the app. A re-render — a
-    /// streaming delta, or `agentIsSpeaking` toggling — republishes this
-    /// preference *mid-rebuild*, when the `LazyVStack` reports a height
-    /// that is briefly wrong by more than a viewport. Acting on that
-    /// transient flipped the button, which forced another render, which
-    /// produced another transient. Waiting for the geometry to settle
-    /// discards those entirely; the delay is imperceptible for a button
-    /// that only says "you're not at the bottom".
-    private func recordMetrics(_ metrics: ScrollMetrics, viewportHeight: CGFloat) {
-        coord.latestMetrics = metrics
-        coord.latestViewport = viewportHeight
-
-        coord.pendingEval?.cancel()
-        let work = DispatchWorkItem {
-            updateScrollToBottomVisibility(metrics: coord.latestMetrics,
-                                           viewportHeight: coord.latestViewport)
+    /// Issued twice: immediately, and once on the next runloop turn.
+    /// The re-issue covers the one remaining race — a scroll issued in
+    /// the same transaction that grows the content (send, conversation
+    /// load) clamps to the not-yet-committed old content size. With
+    /// eager rows both calls compute *exact* offsets, so the second is
+    /// a no-op whenever the first already landed. This replaces the
+    /// four-shot 600ms retry ladder the lazy layout needed while its
+    /// estimates settled.
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        HangDiagnostics.mark("scrollTo bottom anchor")
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            proxy.scrollTo(Self.bottomAnchorId, anchor: .bottom)
         }
-        coord.pendingEval = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.visibilityDebounce,
-                                      execute: work)
+        DispatchQueue.main.async {
+            withTransaction(tx) {
+                proxy.scrollTo(Self.bottomAnchorId, anchor: .bottom)
+            }
+        }
     }
 
-    private func updateScrollToBottomVisibility(metrics: ScrollMetrics,
-                                                viewportHeight: CGFloat) {
-        coord.callbacks += 1
-        let now = CFAbsoluteTimeGetCurrent()
-        if now - coord.windowStart >= 1.0 {
-            let elapsed = now - coord.windowStart
-            print(String(format: "[ScrollDiag] %.0f cb/s, %.0f bodyEvals/s, %d writes | offsetY=%.1f height=%.1f viewport=%.1f",
-                         Double(coord.callbacks) / elapsed,
-                         Double(coord.bodyEvals) / elapsed,
-                         coord.stateWrites,
-                         metrics.offsetY, metrics.height, viewportHeight))
-            coord.callbacks = 0
-            coord.bodyEvals = 0
-            coord.stateWrites = 0
-            coord.windowStart = now
-        }
+    /// Count-change handler: initial conversation load (pre-18) and
+    /// pagination anchor restoration.
+    private func handleCountChange(newCount: Int, proxy: ScrollViewProxy) {
+        let countBeforeThisChange = previousMessageCount
+        previousMessageCount = newCount
+        guard newCount > countBeforeThisChange else { return }
 
-        guard viewportHeight > 0, metrics.height > 0 else {
-            if CFAbsoluteTimeGetCurrent() - coord.lastMetricLog > 1.0 {
-                coord.lastMetricLog = CFAbsoluteTimeGetCurrent()
-                print("[ScrollDiag] skipped — viewport=\(viewportHeight) height=\(metrics.height)")
+        // Initial load of an existing conversation (empty → populated):
+        // land on the newest message. iOS 18+ gets this from the
+        // `.initialOffset` anchor; pre-18 needs the explicit scroll.
+        if countBeforeThisChange == 0 {
+            if !useNativeBottomAnchor, newCount > 1 {
+                scrollToBottom(proxy: proxy)
             }
             return
         }
 
-        let distanceFromBottom = (metrics.offsetY + metrics.height) - viewportHeight
-
-        // Hysteresis: appear at 80pt, disappear at 40pt. With a single
-        // threshold, resting near the boundary flips the flag on every
-        // frame the geometry reports — and each flip re-renders the list.
-        let shouldShow: Bool
-        if showScrollToBottom {
-            shouldShow = distanceFromBottom > Self.hideBottomThresholdPt
-        } else {
-            shouldShow = distanceFromBottom > Self.nearBottomThresholdPt
+        // Pagination commit: restore the previously-first-visible
+        // message to the top of the viewport so the reading position
+        // doesn't jump. The anchor was set on the load-more button tap
+        // (one user gesture ago), so the prepended rows have already
+        // been fetched and measured by the time this runs.
+        if let anchorToRestore = paginationAnchorId {
+            paginationAnchorId = nil
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                proxy.scrollTo(anchorToRestore, anchor: .top)
+            }
         }
+    }
 
-        guard shouldShow != showScrollToBottom else { return }
+    @ViewBuilder
+    private var scrollContent: some View {
+        ScrollView {
+            // Plain VStack: every row measured, every scroll target
+            // exact. See the type-level comment for why this is the
+            // load-bearing decision of the whole file.
+            VStack(spacing: 12) {
+                if hasMoreMessages {
+                    Button {
+                        if let firstMsg = messages.first {
+                            paginationAnchorId = firstMsg.id
+                        }
+                        onLoadMore()
+                    } label: {
+                        if loadingMoreMessages {
+                            ProgressView().progressViewStyle(CircularProgressViewStyle())
+                        } else {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.up").font(.caption2)
+                                Text("Load earlier messages").font(.caption)
+                            }
+                            .foregroundColor(config.primaryColor)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .disabled(loadingMoreMessages)
+                    .id("load-more")
+                }
 
-        coord.stateWrites += 1
-        print(String(format: "[ScrollDiag] flip → %@ (distance=%.1f)",
-                     shouldShow ? "SHOW" : "HIDE", distanceFromBottom))
+                if messages.isEmpty && !isLoading {
+                    EmptyStateView(config: config)
+                }
 
-        // Safe to write directly: this runs from the debounce timer, a
-        // clean runloop turn, not inside the layout pass that produced
-        // the measurement.
-        showScrollToBottom = shouldShow
+                // Resolve once per render: the id of the most recent
+                // assistant text message so only its avatar gets the
+                // speaking-halo treatment. Skips tool/system/contentBlock
+                // rows so the glow always lands on a real reply.
+                let latestAssistantId: String? = messages.last(where: {
+                    $0.role == .assistant
+                        && $0.type != .toolCall
+                        && $0.type != .toolResult
+                        && $0.type != .subAgentStart
+                        && $0.type != .subAgentEnd
+                        && $0.type != .agentContext
+                        && $0.type != .contentBlocks
+                })?.id
+
+                ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                    messageRow(index: index, message: message,
+                               latestAssistantId: latestAssistantId)
+                }
+
+                statusIndicator
+
+                // Static scroll target after the last row — the exact
+                // "bottom of the conversation".
+                Color.clear
+                    .frame(height: 1)
+                    .id(Self.bottomAnchorId)
+            }
+            .padding()
+        }
+        // iOS 18+: the ScrollView owns bottom anchoring. Opens at the
+        // newest message (`.initialOffset`) and keeps the bottom pinned
+        // while content grows *if the user is at the bottom*
+        // (`.sizeChanges`) — scrolling up disengages, scrolling back
+        // re-engages, with no state of ours involved. Deliberately not
+        // the plain `defaultScrollAnchor(.bottom)`: that adds the
+        // `.alignment` role, which bottom-aligns an under-full
+        // conversation — short chats should start at the top.
+        .modifier(NativeBottomAnchorModifier())
+        // Jump-button visibility from the scroll view's own geometry
+        // callback (iOS 18+). The transformed value is a Bool, so the
+        // action only fires when "away from bottom" actually flips —
+        // no per-frame state writes.
+        .modifier(ScrollAwayDetector(threshold: Self.nearBottomThresholdPt) { away in
+            showScrollToBottom = away
+            // The stickiness contract is the one the user can SEE:
+            // jump button visible → not following; jump button gone →
+            // following. Re-engagement is therefore coupled directly to
+            // the button hiding — reach the near-bottom zone by any
+            // means (drag, fling, jump button, content settling) and
+            // the follow is back on. Engage-only in this direction:
+            // switching the follow OFF stays exclusively with the drag
+            // phases below, so a transient growth burst that briefly
+            // shows the button cannot also kill an active follow.
+            logFollow(away ? "button SHOWN (away > 80pt)"
+                           : "button hidden (near bottom)")
+            if !away {
+                if !followBottom { logFollow("STICKY ON — button hid") }
+                followBottom = true
+            }
+        })
+        // Follow disengagement is deliberately NOT derived from distance:
+        // during streaming a growth burst can put the bottom beyond the
+        // threshold for a frame before the follow scroll lands, and a
+        // distance-based rule reads that transient as "the user scrolled
+        // away" and kills the follow. Intent needs a finger.
+        .modifier(StreamFollowGovernor { phaseName, isDragPhase in
+            logFollow("phase → \(phaseName)")
+            if isDragPhase {
+                if followBottom { logFollow("STICKY OFF — drag (\(phaseName))") }
+                followBottom = false
+            }
+        })
+        #if os(iOS)
+        // Interactive drag-to-dismiss only. Do NOT add a tap gesture here
+        // to dismiss the keyboard: `simultaneousGesture` fires alongside
+        // the child gestures it runs beside, so the tap that begins a
+        // text selection on a bubble also resigns first responder. The
+        // keyboard drops, the list re-lays-out mid-gesture, and the
+        // selection drag is lost — which breaks long-press-and-drag
+        // selection on every message.
+        .scrollDismissesKeyboard(.interactively)
+        #endif
     }
 
     /// Circular jump-to-bottom button. Only rendered when the user has
-    /// drifted away from the newest message.
+    /// scrolled away from the newest message (iOS 18+, where the
+    /// detector runs). A single animated `scrollTo` suffices: with
+    /// eager rows the target offset is exact, so there is nothing to
+    /// overshoot and nothing to correct.
     @ViewBuilder
     private func scrollToBottomButton(proxy: ScrollViewProxy) -> some View {
-        // Visible whenever the detector says we're away from the bottom.
-        // On iOS 18+ `showScrollToBottom` is driven by ScrollAwayDetector;
-        // pre-18 nothing sets it (the legacy preference plumbing stays
-        // behind the kill switch), so the button simply never appears there.
         if showScrollToBottom && !messages.isEmpty {
             Button {
                 withAnimation(.easeOut(duration: 0.25)) {
@@ -413,248 +558,7 @@ public struct MessageListView: View {
         }
     }
 
-    /// Start hang detection. See ``HangDiagnostics`` — it reports the
-    /// stall *and* the last thing the main thread began, which the bare
-    /// watchdog this replaced could not.
-    private func installMainThreadWatchdog() {
-        HangDiagnostics.start()
-    }
-
-    private func scrollToBottom(proxy: ScrollViewProxy) {
-        print("[ScrollDiag] scrollToBottom requested (messages=\(messages.count))")
-        for delay in [0.0, 0.1, 0.3, 0.6] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                HangDiagnostics.mark("scrollTo bottom anchor")
-                var tx = Transaction()
-                tx.disablesAnimations = true
-                withTransaction(tx) {
-                    proxy.scrollTo(Self.bottomAnchorId, anchor: .bottom)
-                }
-            }
-        }
-    }
-
-    /// Pagination anchor restoration only. The user-submit scroll
-    /// has been moved to ``handleTailChange`` (watching
-    /// `messages.last?.id`). The `scrollTo` call is synchronous
-    /// (no `Task` wrapper) — see the rationale in
-    /// ``handleTailChange``.
-    private func handleCountChange(newCount: Int, proxy: ScrollViewProxy) {
-        let countBeforeThisChange = previousMessageCount
-        previousMessageCount = newCount
-
-        // Content SHRANK — a message was removed. The hosts do this
-        // deliberately: scripted flows (check-in, debrief) send a
-        // structured trigger as a real user message and strip it from the
-        // transcript one runloop tick later. The row's height leaves a
-        // ghost gap at the scroll offset where it used to be, and the
-        // reply then streams in floating mid-viewport below the gap.
-        // Re-pin the bottom — unless the user has scrolled away, in which
-        // case yanking them is worse than the gap.
-        if newCount < countBeforeThisChange, !showScrollToBottom {
-            scrollToBottom(proxy: proxy)
-            return
-        }
-
-        guard newCount > countBeforeThisChange else { return }
-
-        // Initial load of an existing conversation: land on the newest
-        // message instead of the top of the scrollback. This is the
-        // empty → populated transition, which ``handleTailChange``
-        // deliberately ignores (it only reacts to a *user* tail, and skips
-        // the first message of a list). Requiring more than one message
-        // keeps a brand-new conversation's opening line alone — that
-        // content fits, and there's nothing to scroll away from.
-        if countBeforeThisChange == 0 && newCount > 1 {
-            scrollToBottom(proxy: proxy)
-            return
-        }
-
-        // Pagination commit: restore the anchor to the top of the
-        // viewport. A two-tick wait isn't used here because the
-        // pagination anchor is set on the load-more button tap
-        // (one user gesture ago), so the prepended rows have
-        // already been fetched and will be measured by the time
-        // the count-change handler runs.
-        if countBeforeThisChange > 0, let anchorToRestore = paginationAnchorId {
-            paginationAnchorId = nil
-            var tx = Transaction()
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                proxy.scrollTo(anchorToRestore, anchor: .top)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var scrollContent: some View {
-        // GeometryReader supplies the viewport height, which is the
-        // denominator for "how far from the bottom are we" — see
-        // ``updateScrollToBottomVisibility``.
-        GeometryReader { geo in
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    // Load more button at top
-                    if hasMoreMessages {
-                        Button {
-                            if let firstMsg = messages.first {
-                                paginationAnchorId = firstMsg.id
-                            }
-                            onLoadMore()
-                        } label: {
-                            if loadingMoreMessages {
-                                ProgressView().progressViewStyle(CircularProgressViewStyle())
-                            } else {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.up").font(.caption2)
-                                    Text("Load earlier messages").font(.caption)
-                                }
-                                .foregroundColor(config.primaryColor)
-                            }
-                        }
-                        .padding(.vertical, 8)
-                        .disabled(loadingMoreMessages)
-                        .id("load-more")
-                    }
-
-                    // Empty state
-                    if messages.isEmpty && !isLoading {
-                        EmptyStateView(config: config)
-                    }
-
-                    // Messages
-                    // Resolve once per render: the id of the most recent
-                    // assistant text message so only its avatar gets the
-                    // speaking-halo treatment. Skips tool/system/contentBlock
-                    // rows so the glow always lands on a real reply.
-                    let latestAssistantId: String? = messages.last(where: {
-                        $0.role == .assistant
-                            && $0.type != .toolCall
-                            && $0.type != .toolResult
-                            && $0.type != .subAgentStart
-                            && $0.type != .subAgentEnd
-                            && $0.type != .agentContext
-                            && $0.type != .contentBlocks
-                    })?.id
-                    let rows = Array(messages.enumerated())
-                    // RESTORED after a hard lesson: the current turn
-                    // renders as one group whose `minHeight` is the viewport
-                    // height. This reservation is load-bearing for layout
-                    // stability, not just scroll positioning — with uniform
-                    // rows, text streaming into the LazyVStack changes row
-                    // heights every typewriter tick and the lazy layout's
-                    // size negotiation never converges. The main thread
-                    // spins inside LazyVStackLayout / AG::Graph::update
-                    // indefinitely (2-minute hangs, stacks captured in the
-                    // debugger, zero app frames). The reserved space keeps
-                    // every proposal stable while the reply grows into it.
-                    //
-                    // On iOS 18+ the reservation is not needed: the
-                    // ScrollView itself owns bottom anchoring via
-                    // `defaultScrollAnchor(.bottom)` — no proxy.scrollTo
-                    // into unsettled lazy content, no manual geometry. Rows
-                    // render uniformly and a sent message settles directly
-                    // above the composer. Pre-18 keeps the reserved-space
-                    // design and its park-at-top UX.
-                    if useNativeBottomAnchor {
-                        ForEach(rows, id: \.element.id) { index, message in
-                            messageRow(index: index, message: message,
-                                       latestAssistantId: latestAssistantId)
-                        }
-                        statusIndicator
-                    } else if let turnStart = messages.lastIndex(where: { $0.role == .user }) {
-                        ForEach(rows[..<turnStart], id: \.element.id) { index, message in
-                            messageRow(index: index, message: message,
-                                       latestAssistantId: latestAssistantId)
-                        }
-                        VStack(spacing: 12) {
-                            ForEach(rows[turnStart...], id: \.element.id) { index, message in
-                                messageRow(index: index, message: message,
-                                           latestAssistantId: latestAssistantId)
-                            }
-                            statusIndicator
-                        }
-                        .frame(minHeight: max(0, geo.size.height - 32),
-                               alignment: .top)
-                    } else {
-                        ForEach(rows, id: \.element.id) { index, message in
-                            messageRow(index: index, message: message,
-                                       latestAssistantId: latestAssistantId)
-                        }
-                        statusIndicator
-                    }
-
-                    // Static scroll target. Scrolling it to `.bottom` pins
-                    // the whole current turn (whose minHeight fills the
-                    // viewport) on screen — the just-sent user message
-                    // lands at the top.
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.bottomAnchorId)
-                }
-                .padding()
-                // Publish the content stack's position and height on every
-                // frame of a scroll. `minY` is negative once scrolled, so
-                // `minY + height` is the content's bottom edge expressed in
-                // viewport coordinates — that's what tells us whether the
-                // user has drifted up away from the newest message.
-                .background(
-                    // Publisher gated with the kill switch, not just the
-                    // handler — a GeometryReader in the background still
-                    // participates in every layout pass even when its
-                    // preference is ignored, which would contaminate the
-                    // "is the geometry tracking the problem" experiment.
-                    Group {
-                        if Self.scrollToBottomButtonEnabled {
-                            GeometryReader { contentGeo in
-                                let frame = contentGeo.frame(in: .named(Self.scrollSpace))
-                                Color.clear.preference(
-                                    key: ScrollMetricsPreferenceKey.self,
-                                    value: ScrollMetrics(offsetY: frame.minY,
-                                                         height: frame.height)
-                                )
-                            }
-                        }
-                    }
-                )
-            }
-            .coordinateSpace(name: Self.scrollSpace)
-            // One Equatable preference, not two. SwiftUI only delivers this
-            // when the value actually changes, and the handler writes state
-            // only on a threshold crossing — so a scroll can't drive an
-            // endless invalidate/re-layout cycle.
-            .onPreferenceChange(ScrollMetricsPreferenceKey.self) { metrics in
-                guard Self.scrollToBottomButtonEnabled else { return }
-                recordMetrics(metrics, viewportHeight: geo.size.height)
-            }
-            // iOS 18+: the ScrollView owns bottom anchoring. Opens at the
-            // newest message, keeps the bottom pinned while content grows
-            // if the user is already there, and leaves them alone once
-            // they've scrolled up — the exact chat contract, implemented by
-            // the framework instead of scrollTo calls racing lazy layout.
-            .modifier(NativeBottomAnchorModifier())
-            // iOS 18+: jump-button visibility from the scroll view's own
-            // geometry callback. The transformed value is a Bool, so the
-            // action only fires when "away from bottom" actually flips —
-            // no per-frame state writes, no preference plumbing.
-            .modifier(ScrollAwayDetector(threshold: Self.nearBottomThresholdPt) { away in
-                showScrollToBottom = away
-            })
-            #if os(iOS)
-            // Interactive drag-to-dismiss only. Do NOT add a tap gesture here
-            // to dismiss the keyboard: `simultaneousGesture` fires alongside
-            // the child gestures it runs beside, so the tap that begins a
-            // text selection on a bubble also resigns first responder. The
-            // keyboard drops, the list re-lays-out mid-gesture, and the
-            // selection drag is lost — which breaks long-press-and-drag
-            // selection on every message.
-            .scrollDismissesKeyboard(.interactively)
-            #endif
-        }
-    }
-
-    /// Single message row. Extracted so the head of the list and the
-    /// current-turn group render identically.
+    /// Single message row.
     @ViewBuilder
     private func messageRow(index: Int, message: Message,
                             latestAssistantId: String?) -> some View {
@@ -727,7 +631,7 @@ public struct MessageListView: View {
             )
             .padding(.horizontal, 4)
             .padding(.vertical, 6)
-        } else if isLoading {
+        } else if isLoading && !isStreamingReplyVisible {
             HStack {
                 ProgressView().progressViewStyle(CircularProgressViewStyle())
                 Text("Thinking...")
@@ -736,6 +640,22 @@ public struct MessageListView: View {
             }
             .padding()
         }
+    }
+
+    /// `true` once the assistant's reply is visibly streaming — the tail
+    /// is an assistant text bubble with content. `isLoading` stays true
+    /// for the whole turn, but the "Thinking..." spinner should only
+    /// cover the gap before the first token: alongside a growing reply
+    /// it's redundant noise.
+    private var isStreamingReplyVisible: Bool {
+        guard let last = messages.last else { return false }
+        return last.role == .assistant
+            && last.type != .toolCall
+            && last.type != .toolResult
+            && last.type != .subAgentStart
+            && last.type != .subAgentEnd
+            && last.type != .agentContext
+            && !last.content.isEmpty
     }
 }
 
@@ -751,7 +671,7 @@ struct EmptyStateView: View {
     var body: some View {
         if config.greeting.enabled {
             GreetingView(config: config)
-                // Center vertically inside the LazyVStack — the list
+                // Center vertically inside the scroll content — the list
                 // pads its content with 16pt and the parent ScrollView
                 // is full-height, so a generous min-height lifts the
                 // greeting roughly to the middle of the viewport.
@@ -806,16 +726,100 @@ struct EditMessageView: View {
     }
 }
 
+/// Bottom anchoring with iMessage semantics; no-op before iOS 18.
+///
+/// Deliberately NOT the plain `defaultScrollAnchor(.bottom)`: that also
+/// sets the `.alignment` role, which bottom-aligns content that doesn't
+/// fill the viewport — an empty chat's thinking spinner ends up alone at
+/// the foot of a blank page. Setting only the offset roles gives:
+///
+///   * short conversations start at the TOP and grow downward,
+///   * opening a long conversation lands at the newest message
+///     (`.initialOffset`),
+///   * streaming keeps the bottom pinned while the user is at the
+///     bottom, and leaves them alone once they've scrolled up
+///     (`.sizeChanges`) — the derived follow behaviour.
+private struct NativeBottomAnchorModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        } else {
+            content
+        }
+    }
+}
+
+/// Reports the start of a finger-drag on the scroll view (iOS 18 /
+/// macOS 15); no-op earlier. Phases distinguish what geometry cannot:
+/// a drag reports `.tracking`/`.interacting`, while content growth and
+/// programmatic scrolls do not — so only a deliberate user gesture
+/// switches the streaming follow off. Re-engagement is the
+/// ``ScrollAwayDetector``'s job (the follow returns when the jump
+/// button hides).
+private struct StreamFollowGovernor: ViewModifier {
+    /// Fired on every scroll-phase transition with the phase's name and
+    /// whether it is a finger-drag phase (the follow's only off-switch).
+    /// Reporting all phases (not just drags) feeds the debug HUD, so a
+    /// spurious drag report — e.g. a phase change our own programmatic
+    /// scrolls provoke — is visible rather than inferred.
+    let onPhase: (String, Bool) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.onScrollPhaseChange { _, newPhase, _ in
+                switch newPhase {
+                case .tracking, .interacting:
+                    onPhase(String(describing: newPhase), true)
+                default:
+                    onPhase(String(describing: newPhase), false)
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// Reports when the user scrolls away from (or back to) the bottom,
+/// using the scroll view's own geometry callback (iOS 18 / macOS 15).
+/// The transform reduces geometry to a Bool, and SwiftUI only invokes
+/// the action when that Bool changes — so this cannot write state per
+/// frame. With eager rows the geometry it reads is exact, not
+/// estimated. No-op on older OSes (the pre-18 path has no jump button).
+private struct ScrollAwayDetector: ViewModifier {
+    let threshold: CGFloat
+    let onChange: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: Bool.self) { g in
+                    let distanceFromBottom = g.contentSize.height
+                        + g.contentInsets.bottom
+                        - g.containerSize.height
+                        - g.contentOffset.y
+                    return distanceFromBottom > threshold
+                } action: { _, away in
+                    onChange(away)
+                }
+        } else {
+            content
+        }
+    }
+}
+
 #if DEBUG
-/// Scripted harness that exercises the pagination anchor-restore
-/// path without a network or running ChatViewModel. The list no
-/// longer auto-scrolls, so this harness now only verifies the
-/// "Load earlier" gesture preserves the user's reading position.
+/// Scripted harness: verifies the "Load earlier" anchor restore and
+/// that a simulated send pins to the bottom — no network or running
+/// ChatViewModel required.
 struct MessageListScrollHarness: View {
     @State private var messages: [Message] = MessageListScrollHarness.seed()
     @State private var isLoading: Bool = false
     @State private var hasMoreMessages: Bool = true
     @State private var loadingMoreMessages: Bool = false
+    @State private var olderBatches: Int = 0
 
     static func seed() -> [Message] {
         (1...15).map { i in
@@ -840,12 +844,18 @@ struct MessageListScrollHarness: View {
                 onEdit: { _, _ in }
             )
             HStack {
-                Button("Simulate 'Load earlier'") { simulateLoadMore() }
-                    .disabled(loadingMoreMessages)
+                Button("Send") {
+                    messages.append(Message(
+                        id: "sent-\(messages.count)",
+                        role: .user,
+                        content: "Simulated send \(messages.count)."
+                    ))
+                }
                 Button("Reset") {
                     messages = Self.seed()
                     isLoading = false
                     hasMoreMessages = true
+                    olderBatches = 0
                 }
             }
             .padding()
@@ -856,18 +866,17 @@ struct MessageListScrollHarness: View {
         loadingMoreMessages = true
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 600_000_000)
-            // Prepend three older messages. The view should
-            // restore the previously-first-visible message to the
-            // top so the user's reading position doesn't jump.
-            let older = (1...3).map { i in
+            let batch = olderBatches
+            let older = (1...5).map { i in
                 Message(
-                    id: "older-\(i)-\(Date().timeIntervalSince1970)",
+                    id: "older-\(batch)-\(i)",
                     role: .user,
-                    content: "Older message \(i) — prepended by pagination."
+                    content: "Older message (batch \(batch), \(i)) — prepended by pagination."
                 )
             }
             messages.insert(contentsOf: older, at: 0)
-            hasMoreMessages = false
+            olderBatches += 1
+            hasMoreMessages = olderBatches < 4
             loadingMoreMessages = false
         }
     }
@@ -876,91 +885,7 @@ struct MessageListScrollHarness: View {
 struct MessageListView_Previews: PreviewProvider {
     static var previews: some View {
         MessageListScrollHarness()
-            .previewDisplayName("Scroll harness — pagination anchor")
+            .previewDisplayName("Eager VStack — pagination + send")
     }
 }
 #endif
-
-/// Scroll geometry for the message list's content stack, published as a
-/// single `Equatable` value.
-///
-/// Deliberately one preference rather than two: `onPreferenceChange` only
-/// fires when the value genuinely changes, so bundling offset and height
-/// together avoids two independent callbacks each re-triggering layout.
-struct ScrollMetrics: Equatable {
-    /// Content stack's top edge in scroll coordinates — negative once scrolled.
-    var offsetY: CGFloat = 0
-    /// Content stack's total height.
-    var height: CGFloat = 0
-}
-
-private struct ScrollMetricsPreferenceKey: PreferenceKey {
-    static let defaultValue = ScrollMetrics()
-
-    /// Ignore empty contributions rather than letting the last one win.
-    ///
-    /// Every view in the subtree contributes `defaultValue` unless it sets
-    /// the key, so an unconditional `value = nextValue()` can end up
-    /// delivering a zeroed measurement — which the visibility check then
-    /// discards via its `height > 0` guard, leaving the button permanently
-    /// hidden. Only a real measurement (non-zero height) should win.
-    static func reduce(value: inout ScrollMetrics, nextValue: () -> ScrollMetrics) {
-        let next = nextValue()
-        guard next.height > 0 else { return }
-        value = next
-    }
-}
-
-/// Bottom anchoring with iMessage semantics; no-op before iOS 18.
-///
-/// Deliberately NOT the plain `defaultScrollAnchor(.bottom)`: that also
-/// sets the `.alignment` role, which bottom-aligns content that doesn't
-/// fill the viewport — an empty chat's thinking spinner ends up alone at
-/// the foot of a blank page (geometry probe confirmed the content was
-/// pixel-flush with the container bottom the whole time; the "bug" was
-/// the alignment policy itself). Setting only the offset roles gives:
-///
-///   * short conversations start at the TOP and grow downward,
-///   * opening a long conversation lands at the newest message
-///     (`.initialOffset`),
-///   * streaming keeps the bottom pinned once content overflows, while
-///     the user is at the bottom (`.sizeChanges`).
-private struct NativeBottomAnchorModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, macOS 15.0, *) {
-            content
-                .defaultScrollAnchor(.bottom, for: .initialOffset)
-                .defaultScrollAnchor(.bottom, for: .sizeChanges)
-        } else {
-            content
-        }
-    }
-}
-
-/// Reports when the user scrolls away from (or back to) the bottom, using
-/// the scroll view's own geometry callback (iOS 18 / macOS 15). The
-/// transform reduces geometry to a Bool, and SwiftUI only invokes the
-/// action when that Bool changes — so this cannot write state per frame,
-/// which is the failure mode that sank the preference-based version.
-/// No-op on older OSes (the pre-18 path has no jump button).
-private struct ScrollAwayDetector: ViewModifier {
-    let threshold: CGFloat
-    let onChange: (Bool) -> Void
-
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, macOS 15.0, *) {
-            content
-                .onScrollGeometryChange(for: Bool.self) { g in
-                    let distanceFromBottom = g.contentSize.height
-                        + g.contentInsets.bottom
-                        - g.containerSize.height
-                        - g.contentOffset.y
-                    return distanceFromBottom > threshold
-                } action: { _, away in
-                    onChange(away)
-                }
-        } else {
-            content
-        }
-    }
-}

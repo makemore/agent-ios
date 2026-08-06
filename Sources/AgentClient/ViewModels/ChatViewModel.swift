@@ -1117,7 +1117,14 @@ public class ChatViewModel: ObservableObject {
         selectedModelId = modelId
     }
 
-    /// Load a specific conversation
+    /// Load a specific conversation, in full.
+    ///
+    /// Fetches the entire message history in one request (no `limit`) —
+    /// safe because conversations are capped, and required by the
+    /// transcript: a plain (non-lazy) `VStack` can only place scroll
+    /// targets exactly if every message is present. Paging in tens left
+    /// the list guessing at the height of rows it hadn't fetched, which
+    /// is what every jump-scroll bug ultimately traced back to.
     public func loadConversation(_ convId: String) async {
         // Ephemeral mode: conversation is local-only, nothing to fetch.
         if config.ephemeral {
@@ -1138,7 +1145,15 @@ public class ChatViewModel: ObservableObject {
                 messages = apiMessages.flatMap { mapApiMessage($0) }
             }
 
-            hasMoreMessages = conversation.hasMore ?? false
+            // Whole-thread fetch: nothing is left to page in, so the
+            // "Load earlier messages" button never renders. The server
+            // answers `has_more: false` for an unpaginated request; we
+            // don't trust it into `true` here, since a stale/proxied
+            // response saying otherwise would put a button on screen
+            // that can only re-fetch what we already hold.
+            hasMoreMessages = false
+            // Server-side count (API messages, not the mapped rows —
+            // one API message can expand into several).
             messagesOffset = conversation.messages?.count ?? 0
 
             // Suppress the first-assistant lifecycle hook for restored
@@ -1173,7 +1188,14 @@ public class ChatViewModel: ObservableObject {
         isLoading = false
     }
     
-    /// Load more messages (pagination)
+    /// Load more messages (pagination).
+    ///
+    /// Vestigial since `loadConversation` started fetching whole
+    /// threads: `hasMoreMessages` is now permanently false, so the guard
+    /// below returns immediately and the "Load earlier messages" button
+    /// that calls this never renders. Kept working (rather than deleted)
+    /// because it is public API, and because a host that wants windowed
+    /// loading back only has to set `hasMoreMessages` itself.
     public func loadMoreMessages() async {
         guard let convId = conversationId, !loadingMoreMessages, hasMoreMessages else { return }
         

@@ -78,6 +78,15 @@ public struct InputView: View {
         case filePicker
         var id: Int { hashValue }
     }
+    /// Bumped on every send and applied as the text field's `.id()`.
+    /// A vertical-axis `TextField` does not recompute its height when the
+    /// binding is cleared programmatically during an active editing
+    /// session — the field keeps the multi-line height it had at send
+    /// time. Changing identity tears the field down and rebuilds it at
+    /// its one-line intrinsic size. Costs nothing otherwise: the field is
+    /// empty at that moment, and the text path has already resigned first
+    /// responder.
+    @State private var composerGeneration: Int = 0
     @State private var isRecording: Bool = false
     @State private var speechRecognizer = SFSpeechRecognizer()
     @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -246,6 +255,15 @@ public struct InputView: View {
         // can't repopulate the input.
         inputText = ""
         attachedFiles = []
+        // The dictation prepend must die with the send: it's only ever
+        // captured at mic-start, so after a send it still holds the text
+        // that was just submitted, and the next utterance in the same
+        // mic session would resurrect it (or leave a bare separator
+        // space in the field — invisible content that suppresses the
+        // placeholder).
+        preRecordingText = ""
+        // Collapse the field back to one line — see `composerGeneration`.
+        composerGeneration += 1
 
         if isRecording {
             // Continuous voice mode: keep the engine running, just
@@ -386,7 +404,14 @@ public struct InputView: View {
                     guard self.recordingSession == session else { return }
                     let transcribed = result.bestTranscription.formattedString
                     let separator = self.preRecordingText.isEmpty ? "" : " "
-                    let newText = self.preRecordingText + separator + transcribed
+                    var newText = self.preRecordingText + separator + transcribed
+                    // Whitespace-only compositions (e.g. an empty partial
+                    // against a bare separator) render as an empty field
+                    // that still suppresses the placeholder — normalise
+                    // them to genuinely empty.
+                    if newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        newText = ""
+                    }
                     let changed = newText != self.inputText
                     self.inputText = newText
                     // Reset the silence countdown only once we actually
@@ -754,6 +779,7 @@ public struct InputView: View {
                 }
 
                 TextField(config.placeholder, text: $inputText, axis: .vertical)
+                    .id(composerGeneration)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
                     .padding(10)
@@ -785,6 +811,7 @@ public struct InputView: View {
                     text: $inputText,
                     axis: .vertical
                 )
+                    .id(composerGeneration)
                     .textFieldStyle(.plain)
                     .lineLimit(1...6)
                     .font(.body)
