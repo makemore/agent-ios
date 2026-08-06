@@ -159,7 +159,7 @@ public struct MessageListView: View {
     // marked block) once the stickiness investigation is done. Runtime
     // flag rather than #if DEBUG — custom build configurations strip
     // DEBUG unreliably in this package (see HangDiagnostics).
-    private static let followDebugHUDEnabled = true
+    private static let followDebugHUDEnabled = false
     private struct FollowDebugEvent: Identifiable {
         let id: Int
         let text: String
