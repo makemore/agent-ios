@@ -276,7 +276,7 @@ public struct ChatWidgetView: View {
             // Input form
             if let editIndex = editingMessageIndex {
                 EditMessageCard(
-                    appearance: effectiveConfig.appearance,
+                    config: effectiveConfig,
                     text: $editingText,
                     onSend: {
                         let content = editingText

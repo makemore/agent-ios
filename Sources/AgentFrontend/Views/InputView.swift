@@ -87,36 +87,13 @@ public struct InputView: View {
     /// empty at that moment, and the text path has already resigned first
     /// responder.
     @State private var composerGeneration: Int = 0
-    @State private var isRecording: Bool = false
-    @State private var speechRecognizer = SFSpeechRecognizer()
-    @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    @State private var recognitionTask: SFSpeechRecognitionTask?
-    @State private var audioEngine = AVAudioEngine()
-    /// Monotonic token so late callbacks from a cancelled/superseded
-    /// recognition task cannot repopulate `inputText` after a send/stop.
-    /// `SFSpeechRecognitionTask`'s result block can deliver a final
-    /// transcription on the main queue *after* `cancel()` returns, which
-    /// is the race that caused the input field to refill after submit.
-    @State private var recordingSession: Int = 0
-    /// Text that was already in the input field when recording started.
-    /// Prepended to each transcription result so dictation appends
-    /// rather than replacing existing text.
-    @State private var preRecordingText: String = ""
+    /// Shared dictation state machine (audio session, recognizer
+    /// lifecycle, failure caps, level metering). The same engine type
+    /// backs the edit-message card, so mic behaviour cannot drift
+    /// between the two surfaces.
+    @StateObject private var dictation = DictationEngine()
 
-    /// Normalised (0...1) mic level, refreshed from the recognition tap
-    /// and handed to ``RecordingWaveformView``. The tap is already
-    /// installed for speech recognition, so this costs one RMS pass over
-    /// a buffer we're receiving anyway — a second tap on the input node
-    /// would throw.
-    @State private var audioLevel: CGFloat = 0
-    /// Consecutive recognizer failures in the current mic session. The
-    /// error path recycles the request rather than tearing the mic down,
-    /// which is right for a transient hiccup but spins forever when the
-    /// failure is permanent (an unavailable recognizer, or an input node
-    /// reporting an invalid format). Give up after
-    /// ``maxConsecutiveRecognitionFailures``.
-    @State private var recognitionFailures: Int = 0
-    private let maxConsecutiveRecognitionFailures: Int = 3
+    private var isRecording: Bool { dictation.isRecording }
     /// Whether the composer is in its expanded two-row layout: text field
     /// full-width on top, controls on their own row underneath (the
     /// ChatGPT arrangement). Entered when the text wraps past one line;
@@ -236,7 +213,7 @@ public struct InputView: View {
             }
         }
         .onDisappear {
-            if isRecording { stopRecording() }
+            dictation.stop()
         }
     }
     
@@ -257,38 +234,7 @@ public struct InputView: View {
     /// instead of staying a theory.
     private var speechInputAvailable: Bool {
         HangDiagnostics.measure("speechInputAvailable") {
-            #if targetEnvironment(simulator)
-            // The simulator's SFSpeechRecognizer reports available=true and
-            // then fails every recognition task it is asked to start, so the
-            // mic button only ever led to a waveform that stopped itself a
-            // second later. No pre-check catches this — every health signal
-            // the API exposes says yes — so dictation is simulator-off
-            // wholesale. Test it on hardware.
-            return false
-            #else
-            guard config.enableVoice else { return false }
-            // A mic the user has switched off in Settings is a mic that
-            // does not exist for this app: showing the button would only
-            // lead to a dead tap. `.undetermined` still shows it — the
-            // permission prompt fires on first use and that is how the
-            // user grants it in the first place.
-            #if os(iOS)
-            if #available(iOS 17.0, *) {
-                guard AVAudioApplication.shared.recordPermission != .denied else { return false }
-            } else {
-                guard AVAudioSession.sharedInstance().recordPermission != .denied else { return false }
-            }
-            let speechAuth = SFSpeechRecognizer.authorizationStatus()
-            guard speechAuth != .denied, speechAuth != .restricted else { return false }
-            #endif
-            switch effectiveSpeechInputPolicy {
-            case .disabled: return false
-            case .localOnly:
-                return speechRecognizer?.supportsOnDeviceRecognition == true
-            case .automatic, .remote:
-                return speechRecognizer?.isAvailable == true
-            }
-            #endif
+            dictation.isAvailable(config: config)
         }
     }
 
@@ -312,26 +258,18 @@ public struct InputView: View {
 
         let textToSend = inputText
         let filesToSend = attachedFiles
-        // Clear the field *before* recycling the recognition request so
-        // late callbacks from the previous request (filtered by the
-        // session token bumped inside ``startNewRecognitionRequest``)
+        // Clear the field *before* stopping the engine so a late
+        // transcript callback (filtered by the engine's session token)
         // can't repopulate the input.
         inputText = ""
         attachedFiles = []
-        // The dictation prepend must die with the send: it's only ever
-        // captured at mic-start, so after a send it still holds the text
-        // that was just submitted, and the next utterance in the same
-        // mic session would resurrect it (or leave a bare separator
-        // space in the field — invisible content that suppresses the
-        // placeholder).
-        preRecordingText = ""
         // Collapse the field back to one line — see `composerGeneration`.
         composerGeneration += 1
 
         // Dictation is a one-shot: sending always ends the mic session.
         // There is no hands-free loop to hand the mic back to.
-        if isRecording {
-            stopRecording()
+        if dictation.isRecording {
+            dictation.stop()
         } else {
             #if canImport(UIKit)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -349,256 +287,36 @@ public struct InputView: View {
     /// to review and edit the transcript, so dismissing it here would just
     /// mean tapping the field again.
     private func stopDictation() {
-        stopRecording()
+        dictation.stop()
     }
-    
+
     private func toggleRecording() {
-        if isRecording {
-            stopRecording()
+        if dictation.isRecording {
+            dictation.stop()
         } else {
-            startRecording()
+            // If a message is being read aloud, dictating supersedes it —
+            // and the two want incompatible audio-session categories.
+            voiceController?.stop()
+            // Snapshot existing text so dictation appends to it. Captured
+            // into the closure rather than held as view state, so a send
+            // can't resurrect a stale prefix.
+            let prefix = inputText
+            dictation.onTranscript = { transcribed in
+                let separator = prefix.isEmpty ? "" : " "
+                var newText = prefix + separator + transcribed
+                // Whitespace-only compositions (e.g. an empty partial
+                // against a bare separator) render as an empty field that
+                // still suppresses the placeholder — normalise them to
+                // genuinely empty.
+                if newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    newText = ""
+                }
+                inputText = newText
+            }
+            dictation.start(policy: effectiveSpeechInputPolicy)
         }
     }
     
-    /// Starts the always-on mic session. The audio engine stays running
-    /// across submits and through agent playback; only the recognition
-    /// request itself is cycled (paused while agent speaks, refreshed
-    /// after each submit). Tap once on the mic to enable; tap again to
-    /// fully tear down.
-    private func startRecording() {
-        guard speechInputAvailable else { return }
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else { return }
-
-        // If a message is being read aloud, dictating supersedes it —
-        // and the two want incompatible audio-session categories.
-        voiceController?.stop()
-        recognitionFailures = 0
-
-        SFSpeechRecognizer.requestAuthorization { status in
-            guard status == .authorized else { return }
-
-            DispatchQueue.main.async {
-                do {
-                    #if os(iOS)
-                    // Must match the category/mode used by the recycle path
-                    // in ``startNewRecognitionRequest`` — reconfiguring the
-                    // session on every recycle makes the simulator's audio
-                    // device tear down mid-cycle and hands back an invalid
-                    // input format.
-                    let audioSession = AVAudioSession.sharedInstance()
-                    try audioSession.setCategory(.playAndRecord,
-                                                 mode: .default,
-                                                 options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-                    try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-                    #endif
-
-                    // Install the recognition request + tap *before*
-                    // starting the engine. AVAudioEngine asserts that
-                    // at least one node connection exists at start time,
-                    // and merely accessing ``inputNode`` isn't enough on
-                    // some iOS versions / the simulator.
-                    if !installRecognitionRequest() {
-                        stopRecording()
-                        return
-                    }
-
-                    // Snapshot existing text so dictation appends to it
-                    preRecordingText = inputText
-
-                    audioEngine.prepare()
-                    try audioEngine.start()
-                    isRecording = true
-                } catch {
-                    #if DEBUG
-                    AgentLog.error("[InputView] startRecording failed: \(error)")
-                    #endif
-                    stopRecording()
-                }
-            }
-        }
-    }
-
-    /// Installs a fresh recognition request, tap, and recognition task.
-    /// Returns ``false`` if the recognizer is unavailable so callers can
-    /// abort cleanly. Does *not* start the audio engine — that's the
-    /// caller's responsibility (``startRecording`` does it once).
-    @discardableResult
-    private func installRecognitionRequest() -> Bool {
-        guard let recognizer = speechRecognizer else {
-            AgentLog.error("[InputView] installRecognitionRequest: no recognizer")
-            return false
-        }
-        guard recognizer.isAvailable else {
-            AgentLog.error("[InputView] installRecognitionRequest: recognizer unavailable")
-            return false
-        }
-        AgentLog.debug(.input, "[InputView] installRecognitionRequest: installing (engineRunning=\(audioEngine.isRunning))")
-        // Clear any previous request/tap so we don't double-install.
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
-        recognitionTask = nil
-
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.addsPunctuation = true
-        if effectiveSpeechInputPolicy == .localOnly {
-            guard recognizer.supportsOnDeviceRecognition else {
-                AgentLog.error("[InputView] installRecognitionRequest: on-device recognition unavailable")
-                return false
-            }
-            request.requiresOnDeviceRecognition = true
-        }
-        recognitionRequest = request
-        // "Failed to initialize recognizer" has several distinct causes that
-        // are indistinguishable from the error alone: a forced on-device
-        // request with no local model, an unsupported locale, or the
-        // simulator's speech stack simply not working. Log what we asked for.
-        AgentLog.debug(.input, "[InputView] recognizer: policy=\(effectiveSpeechInputPolicy) onDeviceRequired=\(request.requiresOnDeviceRecognition) onDeviceSupported=\(recognizer.supportsOnDeviceRecognition) locale=\(recognizer.locale.identifier) available=\(recognizer.isAvailable)")
-
-        let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        // A mid-reconfiguration input node reports a 0 Hz / 0-channel
-        // format. Installing a tap with it throws, and the recognizer then
-        // fails to initialize — reject it here so the caller aborts rather
-        // than recycling into a request that cannot possibly work.
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            AgentLog.error("[InputView] installRecognitionRequest: invalid input format (sampleRate=\(format.sampleRate) channels=\(format.channelCount))")
-            recognitionRequest = nil
-            return false
-        }
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
-            // Same buffer, one extra pass — drives the waveform. Must hop
-            // to main: this closure runs on a realtime audio thread.
-            let level = InputView.normalisedLevel(from: buffer)
-            DispatchQueue.main.async {
-                self.audioLevel = level
-            }
-        }
-
-        recordingSession &+= 1
-        let session = recordingSession
-        recognitionTask = recognizer.recognitionTask(with: request) { result, error in
-            if let result = result {
-                DispatchQueue.main.async {
-                    guard self.recordingSession == session else { return }
-                    let transcribed = result.bestTranscription.formattedString
-                    let separator = self.preRecordingText.isEmpty ? "" : " "
-                    var newText = self.preRecordingText + separator + transcribed
-                    // Whitespace-only compositions (e.g. an empty partial
-                    // against a bare separator) render as an empty field
-                    // that still suppresses the placeholder — normalise
-                    // them to genuinely empty.
-                    if newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        newText = ""
-                    }
-                    self.inputText = newText
-                    // A result means the pipeline is healthy again.
-                    self.recognitionFailures = 0
-                }
-            }
-            if let error = error {
-                DispatchQueue.main.async {
-                    guard self.recordingSession == session else { return }
-                    guard self.isRecording else { return }
-                    self.recognitionFailures += 1
-                    // Don't tear the whole mic down on a transient
-                    // recognizer error — recycle and keep going. But a
-                    // failure that repeats immediately is permanent, and
-                    // recycling into it is an unbounded spin.
-                    if self.recognitionFailures >= self.maxConsecutiveRecognitionFailures {
-                        AgentLog.error("[InputView] recognition error: \(error.localizedDescription) — giving up after \(self.recognitionFailures) attempts")
-                        self.stopRecording()
-                    } else {
-                        AgentLog.debug(.input, "[InputView] recognition error: \(error.localizedDescription) — recycling request (\(self.recognitionFailures)/\(self.maxConsecutiveRecognitionFailures))")
-                        self.startNewRecognitionRequest()
-                    }
-                }
-            }
-        }
-        return true
-    }
-
-    /// Cycles to a fresh recognition request. Restarts the engine if it
-    /// got stopped by an audio session interruption (e.g. TTS playback
-    /// taking the route or a phone call). Used after every submit and
-    /// when the agent finishes speaking.
-    private func startNewRecognitionRequest() {
-        guard isRecording else {
-            AgentLog.debug(.input, "[InputView] startNewRecognitionRequest: not recording, skipping")
-            return
-        }
-        if !audioEngine.isRunning {
-            AgentLog.debug(.input, "[InputView] startNewRecognitionRequest: engine stopped, restarting")
-            #if os(iOS)
-            do {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord,
-                                        mode: .default,
-                                        options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-                try session.setActive(true, options: [])
-            } catch {
-                AgentLog.error("[InputView] startNewRecognitionRequest: session reactivate failed: \(error)")
-            }
-            #endif
-            // Install request first so the engine has a tap before start().
-            if !installRecognitionRequest() {
-                AgentLog.error("[InputView] startNewRecognitionRequest: install failed before engine start")
-                return
-            }
-            do {
-                audioEngine.prepare()
-                try audioEngine.start()
-                AgentLog.debug(.input, "[InputView] startNewRecognitionRequest: engine restarted ok")
-            } catch {
-                AgentLog.error("[InputView] startNewRecognitionRequest: engine start failed: \(error)")
-            }
-            return
-        }
-        installRecognitionRequest()
-    }
-
-    private func stopRecording() {
-        // Bump first so any callback that fires between cancel() and the
-        // next runloop tick is filtered out by the `session` guard.
-        recordingSession &+= 1
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
-        recognitionTask = nil
-        isRecording = false
-        audioLevel = 0
-    }
-
-    // MARK: - Level metering
-
-    /// RMS of `buffer`, mapped through a dB curve into 0...1 for the
-    /// waveform. Raw RMS is uselessly small for speech at conversational
-    /// volume, so the linear value is converted to dBFS and the quietest
-    /// `floorDB` of range is discarded.
-    static func normalisedLevel(from buffer: AVAudioPCMBuffer) -> CGFloat {
-        guard let channel = buffer.floatChannelData?[0] else { return 0 }
-        let count = Int(buffer.frameLength)
-        guard count > 0 else { return 0 }
-
-        var sumOfSquares: Float = 0
-        for i in 0..<count {
-            let sample = channel[i]
-            sumOfSquares += sample * sample
-        }
-        let rms = sqrt(sumOfSquares / Float(count))
-        guard rms > 0 else { return 0 }
-
-        let floorDB: Float = -50
-        let db = 20 * log10(rms)
-        guard db > floorDB else { return 0 }
-        return CGFloat(min(1, (db - floorDB) / -floorDB))
-    }
-
     // MARK: - Composer layouts
     //
     // Two flavours selected by `config.appearance.composerStyle`. Both are
@@ -640,7 +358,7 @@ public struct InputView: View {
                         .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
 
                     if isRecording {
-                        RecordingWaveformView(level: audioLevel, color: config.primaryColor)
+                        RecordingWaveformView(level: dictation.audioLevel, color: config.primaryColor)
                     }
                 }
                 .padding(10)
@@ -730,7 +448,7 @@ public struct InputView: View {
                             .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
 
                         if isRecording {
-                            RecordingWaveformView(level: audioLevel,
+                            RecordingWaveformView(level: dictation.audioLevel,
                                                   color: config.appearance.accent)
                         }
                     }
