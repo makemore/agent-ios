@@ -117,6 +117,64 @@ public struct InputView: View {
     /// ``maxConsecutiveRecognitionFailures``.
     @State private var recognitionFailures: Int = 0
     private let maxConsecutiveRecognitionFailures: Int = 3
+    /// Whether the composer is in its expanded two-row layout: text field
+    /// full-width on top, controls on their own row underneath (the
+    /// ChatGPT arrangement). Entered when the text wraps past one line;
+    /// left when the text would fit a single row again.
+    ///
+    /// The decision to leave is deliberately NOT based on the field's
+    /// current rendered height: in two-row mode the field is wider, so
+    /// text that overflowed the narrow single-row width can render as one
+    /// line at full width — height-based reversion would bounce the
+    /// layout between modes on every keystroke at the boundary. Instead
+    /// the single-row field width is captured at the moment of expansion
+    /// and reversion asks "would the text fit THAT width?".
+    @State private var isMultiline = false
+    /// Field width captured while still in single-row layout — the width
+    /// reversion is judged against. See ``isMultiline``.
+    @State private var narrowFieldWidth: CGFloat = 0
+
+    /// Height above which a single-row field has visibly wrapped.
+    private var multilineHeightThreshold: CGFloat {
+        #if canImport(UIKit)
+        return UIFont.preferredFont(forTextStyle: .body).lineHeight * 1.5
+        #else
+        return 33
+        #endif
+    }
+
+    /// Width the text would occupy laid out on one line, for the
+    /// reversion check.
+    private func singleLineTextWidth(_ text: String) -> CGFloat {
+        #if canImport(UIKit)
+        return (text as NSString).size(
+            withAttributes: [.font: UIFont.preferredFont(forTextStyle: .body)]
+        ).width
+        #else
+        // No cheap text measurement available: stay expanded until the
+        // field empties rather than guessing.
+        return .greatestFiniteMagnitude
+        #endif
+    }
+
+    private func handleFieldGeometryChange(height: CGFloat, width: CGFloat) {
+        guard !isRecording, !isMultiline else { return }
+        if height > multilineHeightThreshold {
+            narrowFieldWidth = width
+            isMultiline = true
+        }
+    }
+
+    private func handleInputTextChangeForLayout(_ text: String) {
+        guard isMultiline, !isRecording else { return }
+        if text.isEmpty {
+            isMultiline = false
+        } else if !text.contains("\n"),
+                  singleLineTextWidth(text) < narrowFieldWidth - 4 {
+            isMultiline = false
+        }
+    }
+
     /// Binding used by the composer's text field. Writes are dropped
     /// while dictating: the transcript owns the field for the duration,
     /// so the keyboard stays on screen but typing into it does nothing.
@@ -595,77 +653,127 @@ public struct InputView: View {
         .background(PlatformColors.systemBackground)
     }
 
-    /// Single-row composer card. Attach, text field, mic and the
-    /// right-hand action all sit on one line inside a rounded surface
-    /// inset from the screen edges.
+    /// Adaptive composer card. One row while the text fits one line —
+    /// attach, field, mic, send. Once the text wraps, the field takes the
+    /// full card width and the controls drop to their own row underneath
+    /// (the ChatGPT arrangement), collapsing back when the text shortens.
+    ///
+    /// Structured so the text field NEVER changes structural identity
+    /// across the transition — it stays the same child of the same HStack
+    /// and only its siblings come and go. Moving it between containers
+    /// would unmount it mid-edit, which resigns first responder and
+    /// collapses the keyboard.
     @ViewBuilder
     private var anthropicComposer: some View {
+        // Recording always presents as a single row: the field is hidden
+        // behind the waveform, so there is no wrapped text to make room for.
+        let twoRow = isMultiline && !isRecording
         VStack(spacing: 8) {
             if !attachedFiles.isEmpty {
                 attachedFilesView
             }
-            HStack(alignment: .center, spacing: 8) {
-                if !isRecording, config.enableFiles {
-                    circularIconButton(systemName: "plus") {
-                        activeSheet = .addToChat
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    if !twoRow, !isRecording, config.enableFiles {
+                        circularIconButton(systemName: "plus") {
+                            activeSheet = .addToChat
+                        }
+                        .accessibilityLabel("Add to chat")
                     }
-                    .accessibilityLabel("Add to chat")
-                }
-                // Override (dynamic selection from the model picker) wins
-                // over the static appearance label so the pill always
-                // reflects the model the next turn will actually use. Gated
-                // on `showModelSelector` (off by default) — the pill is the
-                // only entry point to `ModelOptionsSheet`, so hiding it fully
-                // suppresses the model selector for hosts that don't opt in.
-                if !isRecording,
-                   config.showModelSelector,
-                   let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
-                   !label.isEmpty {
-                    modelPill(label: label)
-                }
+                    // Override (dynamic selection from the model picker) wins
+                    // over the static appearance label so the pill always
+                    // reflects the model the next turn will actually use. Gated
+                    // on `showModelSelector` (off by default) — the pill is the
+                    // only entry point to `ModelOptionsSheet`, so hiding it fully
+                    // suppresses the model selector for hosts that don't opt in.
+                    if !twoRow, !isRecording,
+                       config.showModelSelector,
+                       let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
+                       !label.isEmpty {
+                        modelPill(label: label)
+                    }
 
-                ZStack(alignment: .leading) {
-                    TextField(
-                        config.placeholder,
-                        text: composerTextBinding,
-                        axis: .vertical
-                    )
-                        .id(composerGeneration)
-                        .textFieldStyle(.plain)
-                        .lineLimit(1...6)
-                        .font(.body)
-                        .foregroundColor(config.appearance.textPrimary)
-                        .tint(config.appearance.accent)
-                        .opacity(isRecording ? 0 : 1)
-                        .allowsHitTesting(!isRecording)
-                        // Zero opacity still occupies layout, and a
-                        // vertical-axis field grows with its content — so a
-                        // long transcript would push the composer taller
-                        // behind the waveform. Clamp it while hidden.
-                        .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
+                    ZStack(alignment: .leading) {
+                        TextField(
+                            config.placeholder,
+                            text: composerTextBinding,
+                            axis: .vertical
+                        )
+                            .id(composerGeneration)
+                            .textFieldStyle(.plain)
+                            .lineLimit(1...6)
+                            .font(.body)
+                            .foregroundColor(config.appearance.textPrimary)
+                            .tint(config.appearance.accent)
+                            .opacity(isRecording ? 0 : 1)
+                            .allowsHitTesting(!isRecording)
+                            // Zero opacity still occupies layout, and a
+                            // vertical-axis field grows with its content — so a
+                            // long transcript would push the composer taller
+                            // behind the waveform. Clamp it while hidden.
+                            .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
+
+                        if isRecording {
+                            RecordingWaveformView(level: audioLevel,
+                                                  color: config.appearance.accent)
+                        }
+                    }
+                    .padding(.leading, 6)
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear {
+                                handleFieldGeometryChange(height: g.size.height,
+                                                          width: g.size.width)
+                            }
+                            .onChange(of: g.size.height) { newHeight in
+                                handleFieldGeometryChange(height: newHeight,
+                                                          width: g.size.width)
+                            }
+                    })
 
                     if isRecording {
-                        RecordingWaveformView(level: audioLevel,
-                                              color: config.appearance.accent)
+                        dictationTrailingControls(accent: config.appearance.accent,
+                                                  secondary: config.appearance.textSecondary)
+                    } else if !twoRow {
+                        if speechInputAvailable {
+                            Button(action: { toggleRecording() }) {
+                                Image(systemName: "mic")
+                                    .font(.title3)
+                                    .foregroundColor(config.appearance.textSecondary)
+                                    .frame(width: 36, height: 36)
+                            }
+                            .accessibilityLabel("Dictate")
+                        }
+
+                        rightActionButton
                     }
                 }
-                .padding(.leading, 6)
 
-                if isRecording {
-                    dictationTrailingControls(accent: config.appearance.accent,
-                                              secondary: config.appearance.textSecondary)
-                } else {
-                    if speechInputAvailable {
-                        Button(action: { toggleRecording() }) {
-                            Image(systemName: "mic")
-                                .font(.title3)
-                                .foregroundColor(config.appearance.textSecondary)
-                                .frame(width: 36, height: 36)
+                if twoRow {
+                    HStack(alignment: .center, spacing: 8) {
+                        if config.enableFiles {
+                            circularIconButton(systemName: "plus") {
+                                activeSheet = .addToChat
+                            }
+                            .accessibilityLabel("Add to chat")
                         }
-                        .accessibilityLabel("Dictate")
+                        if config.showModelSelector,
+                           let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
+                           !label.isEmpty {
+                            modelPill(label: label)
+                        }
+                        Spacer(minLength: 0)
+                        if speechInputAvailable {
+                            Button(action: { toggleRecording() }) {
+                                Image(systemName: "mic")
+                                    .font(.title3)
+                                    .foregroundColor(config.appearance.textSecondary)
+                                    .frame(width: 36, height: 36)
+                            }
+                            .accessibilityLabel("Dictate")
+                        }
+                        rightActionButton
                     }
-
-                    rightActionButton
                 }
             }
             .padding(.horizontal, 10)
@@ -676,6 +784,9 @@ public struct InputView: View {
             )
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+        }
+        .onChange(of: inputText) { newText in
+            handleInputTextChangeForLayout(newText)
         }
         .background(config.appearance.background)
     }
