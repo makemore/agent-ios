@@ -154,25 +154,27 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
     }
 
     /// Switch the shared audio session into a category that actually
-    /// emits sound. The default ``.soloAmbient`` is silenced by the
-    /// ring switch, and the mic path puts the session into ``.record``
-    /// which forbids playback entirely. ``.playAndRecord`` with
-    /// ``.defaultToSpeaker`` is the right fit for a chat-style app
-    /// that mixes TTS playback and microphone capture.
+    /// emits sound at full loudness.
     ///
-    /// Preserves ``.voiceChat`` mode when set by the input layer for
-    /// barge-in (acoustic echo cancellation); otherwise uses
-    /// ``.spokenAudio`` for higher-fidelity playback.
+    /// Playback and dictation are mutually exclusive now, so this no
+    /// longer needs ``.playAndRecord`` — and dropping it is the loudness
+    /// fix: ``.playAndRecord`` runs the call-volume gain structure and
+    /// routes Bluetooth over HFP, both of which made TTS noticeably
+    /// quieter than media at the same volume setting. ``.playback`` +
+    /// ``.spokenAudio`` gets media-level loudness and A2DP on Bluetooth,
+    /// and plays through the ring switch — right for audio the user
+    /// explicitly asked for by tapping the speaker button.
+    ///
+    /// Also repairs the route after dictation, whose ``.playAndRecord``
+    /// session would otherwise linger and quieten the next playback.
     private func configurePlaybackSession() {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         do {
-            let needsCategoryChange = session.category != .playAndRecord
-            let preserveVoiceChat = session.mode == .voiceChat
-            if needsCategoryChange || (!preserveVoiceChat && session.mode != .spokenAudio) {
-                try session.setCategory(.playAndRecord,
-                                        mode: preserveVoiceChat ? .voiceChat : .spokenAudio,
-                                        options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+            if session.category != .playback || session.mode != .spokenAudio {
+                try session.setCategory(.playback,
+                                        mode: .spokenAudio,
+                                        options: [.duckOthers])
             }
             try session.setActive(true, options: [])
         } catch {
