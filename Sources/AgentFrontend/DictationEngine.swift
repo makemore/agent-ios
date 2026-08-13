@@ -211,7 +211,15 @@ final class DictationEngine: ObservableObject {
                     guard let self = self, self.sessionToken == token else { return }
                     // A result means the pipeline is healthy again.
                     self.failures = 0
-                    self.onTranscript?(result.bestTranscription.formattedString)
+                    let transcribed = result.bestTranscription.formattedString
+                    // The recognizer fires an empty first partial the
+                    // moment recognition starts. Delivering it makes
+                    // callers join their prefix to nothing — which is how
+                    // a stray trailing space appeared in the field before
+                    // the user had said a word. An empty transcript
+                    // carries no information; don't deliver it.
+                    guard !transcribed.isEmpty else { return }
+                    self.onTranscript?(transcribed)
                 }
             }
             if let error = error {
