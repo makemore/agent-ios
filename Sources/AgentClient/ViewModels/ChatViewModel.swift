@@ -1450,9 +1450,6 @@ public class ChatViewModel: ObservableObject {
         // event (tool/video/sub-agent), which resets `turnFinalized`.
         if turnFinalized { return }
 
-        // Per-delta emotion overrides the turn-level value when present.
-        let emotion = Emotion.from(payload["emotion"])
-
         // Sub-agent echo suppression. After a sub-agent finishes streaming
         // its final answer, the parent typically re-streams the exact same
         // text as its own deltas (it's echoing the tool result). Buffer the
@@ -1486,7 +1483,6 @@ public class ChatViewModel: ObservableObject {
             assistantContent = ""
             resetStreamBuffer()
             streamBuffer.append(replay)
-            voiceController?.pushDelta(replay, emotion: emotion)
             startDrainTimerIfNeeded()
             return
         }
@@ -1515,8 +1511,11 @@ public class ChatViewModel: ObservableObject {
         }
 
         // Enqueue into buffer; drain timer reveals chars at a steady rate.
+        // Deltas are *not* pushed to the voice controller: replies are never
+        // spoken automatically. Playback happens only when the user taps the
+        // speaker button on a message, which drives the controller directly
+        // from `ChatWidgetView`.
         streamBuffer.append(delta)
-        voiceController?.pushDelta(delta, emotion: emotion)
         startDrainTimerIfNeeded()
     }
 
@@ -1546,18 +1545,6 @@ public class ChatViewModel: ObservableObject {
         // via a sub-agent tool result) must be dropped to avoid a second
         // typewriter bubble below the one we're about to finalise.
         turnFinalized = true
-
-        // Voice: if the run streamed deltas the chunker has been fed
-        // throughout — `finishTurn(finalText: nil)` flushes the trailing
-        // fragment. If it didn't (non-streaming run, or an SSE that only
-        // emits the authoritative message), pass `content` so the user
-        // still hears the reply.
-        let voiceEmotion = Emotion.from(payload["emotion"])
-        let needsFallbackText = streamBuffer.isEmpty && drainTimer == nil
-        voiceController?.finishTurn(
-            finalText: needsFallbackText ? content : nil,
-            emotion: voiceEmotion
-        )
 
         // Sub-agent echo resolution. If we were still comparing the parent's
         // stream against a sub-agent snapshot when the final message lands,
@@ -2103,13 +2090,11 @@ public class ChatViewModel: ObservableObject {
             // resolved by another event and would only leak into the next
             // turn if not cleared.
             clearPendingEcho()
+            // A cancelled/timed-out run stops any playback still in flight
+            // from a speaker-button tap. There is nothing to flush on
+            // success: replies are never spoken automatically.
             if type == "run.cancelled" || type == "run.timed_out" {
                 voiceController?.stop()
-            } else {
-                // Success: flush any trailing text the chunker still holds
-                // so the final fragment gets spoken. No-op when
-                // assistant.message already flushed.
-                voiceController?.finishTurn()
             }
         }
 
