@@ -10,10 +10,10 @@ import UIKit
 public struct InputView: View {
     let config: ChatWidgetConfig
     let isLoading: Bool
-    /// Live mirror of ``VoiceController.isSpeaking`` from the parent's
-    /// ``@StateObject``. Passed in (rather than observed locally) so SwiftUI
-    /// re-evaluates this view when the TTS state flips, which drives the
-    /// hands-free loop and barge-in monitor.
+    /// Live mirror of ``VoiceController.isSpeaking``. No longer drives any
+    /// composer behaviour — playback control lives on the message rows and
+    /// the composer stays fully usable while a message plays. Retained so
+    /// existing call sites keep compiling.
     let isAgentSpeaking: Bool
     /// Reference used only to call ``stop()`` on barge-in. Optional because
     /// some callers don't wire a controller (text-only mode).
@@ -574,14 +574,6 @@ public struct InputView: View {
         audioLevel = 0
     }
 
-    // MARK: - Playback control
-
-    /// Stops per-message playback. Surfaced as the right-hand button
-    /// while a message is being read aloud.
-    private func userStopAgent() {
-        voiceController?.stop()
-    }
-
     // MARK: - Level metering
 
     /// RMS of `buffer`, mapped through a dB curve into 0...1 for the
@@ -896,16 +888,6 @@ public struct InputView: View {
                     .clipShape(Circle())
             }
             .accessibilityLabel("Cancel run")
-        } else if isAgentSpeaking {
-            Button(action: userStopAgent) {
-                Image(systemName: "stop.fill")
-                    .font(.title3)
-                    .foregroundColor(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Color(hex: "#a85d5d"))
-                    .clipShape(Circle())
-            }
-            .accessibilityLabel("Stop speaking")
         } else {
             // Always present, greyed out and inert when there is nothing to
             // send. State is shown by colour, not by appearing/disappearing —

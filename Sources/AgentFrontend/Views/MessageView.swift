@@ -18,6 +18,11 @@ public struct MessageView: View {
     /// the Play affordances entirely. Defaulted so preview/harness call
     /// sites keep compiling.
     var onSpeak: (() -> Void)? = nil
+    /// Whether THIS message is the one currently being read aloud. Flips
+    /// the speaker affordance into a stop button; ``onSpeak`` then stops
+    /// rather than replays. Defaulted so preview/harness call sites keep
+    /// compiling.
+    var isSpeaking: Bool = false
     /// Fired *after* this message's text has been put on the pasteboard,
     /// by either the actions-row button or the context menu. Purely a
     /// notification so the host can confirm the copy — the copy itself
@@ -156,7 +161,8 @@ public struct MessageView: View {
                             Button {
                                 onSpeak()
                             } label: {
-                                Label("Play", systemImage: "speaker.wave.2")
+                                Label(isSpeaking ? "Stop" : "Play",
+                                      systemImage: isSpeaking ? "stop.fill" : "speaker.wave.2")
                             }
                         }
                     }
@@ -307,7 +313,7 @@ public struct MessageView: View {
                     copyMessage()
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.caption)
+                        .font(.subheadline)
                         .actionIconHitTarget()
                 }
                 .buttonStyle(.plain)
@@ -317,19 +323,19 @@ public struct MessageView: View {
 
             if let onSpeak = onSpeak {
                 Button(action: onSpeak) {
-                    Image(systemName: "speaker.wave.2")
-                        .font(.caption)
+                    Image(systemName: isSpeaking ? "stop.fill" : "speaker.wave.2")
+                        .font(.subheadline)
                         .actionIconHitTarget()
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.secondary)
-                .accessibilityLabel("Play message")
+                .accessibilityLabel(isSpeaking ? "Stop playback" : "Play message")
             }
 
             if let onRetry = onRetry {
                 Button(action: onRetry) {
                     Image(systemName: "arrow.clockwise")
-                        .font(.caption)
+                        .font(.subheadline)
                         .actionIconHitTarget()
                 }
                 .buttonStyle(.plain)
@@ -340,7 +346,7 @@ public struct MessageView: View {
             if let onEdit = onEdit {
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
-                        .font(.caption)
+                        .font(.subheadline)
                         .actionIconHitTarget()
                 }
                 .buttonStyle(.plain)
@@ -351,9 +357,9 @@ public struct MessageView: View {
             Text(message.timestamp, style: .time)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-                // The icons' hit frames end 6pt past the last glyph, so
-                // add the other 6 to keep the original 12pt gap here too.
-                .padding(.leading, 6)
+                // The icons' hit frames end ~11pt past the last glyph, so
+                // this tops the timestamp gap up to match the icon spread.
+                .padding(.leading, 11)
         }
     }
     
@@ -398,12 +404,12 @@ private extension View {
     /// makes the padded frame hit-testable rather than just the drawn
     /// pixels.
     ///
-    /// Width is deliberately tighter than height. 22pt around a ~10pt
-    /// glyph leaves 6pt each side, so two adjacent icons sit 12pt apart —
-    /// the row's original spacing — while height can be generous because
-    /// nothing crowds the row vertically.
+    /// 36pt around a ~13pt subheadline glyph leaves ~11pt each side, so
+    /// two adjacent icons sit ~22pt apart — the deliberate spread of the
+    /// row — while height stays generous because nothing crowds the row
+    /// vertically.
     func actionIconHitTarget() -> some View {
-        self.frame(minWidth: 22, minHeight: 30)
+        self.frame(minWidth: 36, minHeight: 36)
             .contentShape(Rectangle())
     }
 }

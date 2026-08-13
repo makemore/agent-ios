@@ -53,11 +53,15 @@ public struct MessageListView: View {
     let onLoadMore: () -> Void
     let onRetry: (Int) -> Void
     let onEdit: (Int, String) -> Void
-    /// Speak a message aloud. Receives the message's text so the host
-    /// owns the TTS plumbing; the list only decides *which* rows get a
-    /// Play affordance (assistant text, never user or tool rows).
-    /// `nil` when the host has TTS disabled, which hides Play entirely.
-    let onSpeak: ((String) -> Void)?
+    /// Speak a message aloud, or stop it if it is already playing.
+    /// Receives the whole message so the host can track *which* row is
+    /// speaking; the list only decides which rows get the affordance
+    /// (assistant text, never user or tool rows). `nil` when the host
+    /// has TTS disabled, which hides it entirely.
+    let onSpeak: ((Message) -> Void)?
+    /// Id of the message currently being read aloud, or `nil`. Drives the
+    /// per-row speaker/stop toggle.
+    let speakingMessageId: String?
     /// Fired after a message's text is copied to the pasteboard, from
     /// either the actions row or the context menu. The list doesn't act
     /// on it — it exists so the host can show a confirmation.
@@ -90,7 +94,8 @@ public struct MessageListView: View {
         onLoadMore: @escaping () -> Void,
         onRetry: @escaping (Int) -> Void,
         onEdit: @escaping (Int, String) -> Void,
-        onSpeak: ((String) -> Void)? = nil,
+        onSpeak: ((Message) -> Void)? = nil,
+        speakingMessageId: String? = nil,
         onCopy: (() -> Void)? = nil,
         activity: SubAgentActivityState = SubAgentActivityState(),
         agentIsSpeaking: Bool = false,
@@ -105,6 +110,7 @@ public struct MessageListView: View {
         self.onRetry = onRetry
         self.onEdit = onEdit
         self.onSpeak = onSpeak
+        self.speakingMessageId = speakingMessageId
         self.onCopy = onCopy
         self.activity = activity
         self.agentIsSpeaking = agentIsSpeaking
@@ -591,6 +597,7 @@ public struct MessageListView: View {
                     editingIndex = index
                 } : nil,
                 onSpeak: speakAction(for: message),
+                isSpeaking: message.id == speakingMessageId,
                 onCopy: onCopy,
                 showAgentAvatar: config.showPresenceOrb,
                 agentAvatarSpeaking: agentIsSpeaking
@@ -613,7 +620,7 @@ public struct MessageListView: View {
               message.type != .toolCall,
               message.type != .toolResult,
               message.type != .contentBlocks else { return nil }
-        return { onSpeak(message.content) }
+        return { onSpeak(message) }
     }
 
     /// Loading indicator. Pill mode + active sub-agent → render the

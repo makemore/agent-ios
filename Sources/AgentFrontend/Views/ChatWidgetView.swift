@@ -43,6 +43,11 @@ public struct ChatWidgetView: View {
     /// previewed without a backend. Bound to the viewModel so SSE events
     /// flow into voice playback.
     @StateObject private var voiceController: VoiceController
+    /// Id of the message whose text was last handed to the voice
+    /// controller by the per-message speaker button. Only meaningful
+    /// while ``voiceController.isSpeaking``; cleared when playback ends
+    /// so the row's stop button reverts to a speaker on its own.
+    @State private var speakingMessageId: String? = nil
     /// Optional host hook fired when the user taps a ``BlockAction``
     /// inside a rendered ``ContentBlock``. The widget supplies a
     /// default handler that auto-sends `type == "message"` actions
@@ -184,13 +189,23 @@ public struct ChatWidgetView: View {
                 onEdit: { index, content in
                     Task { await viewModel.editMessage(at: index, newContent: content) }
                 },
-                // `stop()` both cancels in-flight playback and clears the
-                // turn-failed latch, so replaying a message still works
-                // after the provider errored earlier in the same turn.
-                onSpeak: effectiveConfig.enableTTS ? { text in
-                    voiceController.stop()
-                    voiceController.finishTurn(finalText: text)
+                // Toggle: tapping the speaker on the playing message stops
+                // it; tapping any other message switches playback to that
+                // one. `stop()` also clears the turn-failed latch, so
+                // replaying still works after a provider error earlier in
+                // the same turn. Playback never touches the composer — the
+                // user keeps typing and sending while a message plays.
+                onSpeak: effectiveConfig.enableTTS ? { message in
+                    if speakingMessageId == message.id, voiceController.isSpeaking {
+                        voiceController.stop()
+                        speakingMessageId = nil
+                    } else {
+                        voiceController.stop()
+                        speakingMessageId = message.id
+                        voiceController.finishTurn(finalText: message.content)
+                    }
                 } : nil,
+                speakingMessageId: voiceController.isSpeaking ? speakingMessageId : nil,
                 onCopy: { showCopyConfirmation() },
                 activity: viewModel.subAgentActivity,
                 agentIsSpeaking: voiceController.isSpeaking,
@@ -198,6 +213,9 @@ public struct ChatWidgetView: View {
                     handleBlockAction(action)
                 }
             )
+            .onChange(of: voiceController.isSpeaking) { speaking in
+                if !speaking { speakingMessageId = nil }
+            }
 
             // Error display
             if let error = viewModel.error {
