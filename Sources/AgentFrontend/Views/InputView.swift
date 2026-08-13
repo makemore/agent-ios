@@ -117,11 +117,6 @@ public struct InputView: View {
     /// ``maxConsecutiveRecognitionFailures``.
     @State private var recognitionFailures: Int = 0
     private let maxConsecutiveRecognitionFailures: Int = 3
-    /// Focus on the composer's text field. Held explicitly so the field
-    /// can stay first responder across the dictation transition — the
-    /// keyboard must not collapse when the mic starts.
-    @FocusState private var isInputFocused: Bool
-
     /// Binding used by the composer's text field. Writes are dropped
     /// while dictating: the transcript owns the field for the duration,
     /// so the keyboard stays on screen but typing into it does nothing.
@@ -139,7 +134,11 @@ public struct InputView: View {
 
 
     public var body: some View {
-        Group {
+        // The composer and the keyboard-presentation path had no breadcrumb,
+        // so any stall here was attributed to whatever ran last — usually
+        // `MessageListView body`, which is misleading.
+        let _ = HangDiagnostics.mark("InputView body (recording=\(isRecording))")
+        return Group {
             switch config.appearance.composerStyle {
             case .classic:    classicComposer
             case .anthropic:  anthropicComposer
@@ -558,7 +557,6 @@ public struct InputView: View {
                         .id(composerGeneration)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
-                        .focused($isInputFocused)
                         .opacity(isRecording ? 0 : 1)
                         .allowsHitTesting(!isRecording)
                         // Zero opacity still occupies layout, and a
@@ -638,7 +636,6 @@ public struct InputView: View {
                         .font(.body)
                         .foregroundColor(config.appearance.textPrimary)
                         .tint(config.appearance.accent)
-                        .focused($isInputFocused)
                         .opacity(isRecording ? 0 : 1)
                         .allowsHitTesting(!isRecording)
                         // Zero opacity still occupies layout, and a
