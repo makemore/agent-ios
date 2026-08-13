@@ -552,6 +552,11 @@ public struct InputView: View {
                         .focused($isInputFocused)
                         .opacity(isRecording ? 0 : 1)
                         .allowsHitTesting(!isRecording)
+                        // Zero opacity still occupies layout, and a
+                        // vertical-axis field grows with its content — so a
+                        // long transcript would push the composer taller
+                        // behind the waveform. Clamp it while hidden.
+                        .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
 
                     if isRecording {
                         RecordingWaveformView(level: audioLevel, color: config.primaryColor)
@@ -627,6 +632,11 @@ public struct InputView: View {
                         .focused($isInputFocused)
                         .opacity(isRecording ? 0 : 1)
                         .allowsHitTesting(!isRecording)
+                        // Zero opacity still occupies layout, and a
+                        // vertical-axis field grows with its content — so a
+                        // long transcript would push the composer taller
+                        // behind the waveform. Clamp it while hidden.
+                        .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
 
                     if isRecording {
                         RecordingWaveformView(level: audioLevel,

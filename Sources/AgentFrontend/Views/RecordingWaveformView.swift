@@ -18,13 +18,19 @@ struct RecordingWaveformView: View {
     let level: CGFloat
     let color: Color
 
+    /// Height of the waveform row. Also used by the composer to clamp the
+    /// hidden text field while dictating, so the two agree by
+    /// construction — a field left free to grow would push the composer
+    /// taller as the transcript arrives, even at zero opacity.
+    static let preferredHeight: CGFloat = 24
+
     /// Number of bars drawn. Sized so the row still looks like a
     /// waveform rather than a bar chart on a narrow phone.
     private let barCount: Int = 28
     private let barWidth: CGFloat = 3
     private let barSpacing: CGFloat = 3
     private let minBarHeight: CGFloat = 3
-    private let maxBarHeight: CGFloat = 24
+    private var maxBarHeight: CGFloat { Self.preferredHeight }
 
     @State private var history: [CGFloat] = []
 
