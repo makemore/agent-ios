@@ -979,3 +979,54 @@ struct FilePickerView: View {
     }
 }
 
+
+#if DEBUG
+struct InputView_Previews: PreviewProvider {
+    static var configAnthropic: ChatWidgetConfig {
+        var c = ChatWidgetConfig()
+        c.enableVoice = true
+        c.enableFiles = true
+        return c
+    }
+    static var configClassic: ChatWidgetConfig {
+        var c = configAnthropic
+        c.appearance = ChatAppearance.classic
+        return c
+    }
+
+    static var previews: some View {
+        // Live canvas: type into the field to watch send enable, the
+        // two-row expansion trigger on wrap, and the layout collapse as
+        // text shortens. Dictation is simulator-off, so the mic button
+        // will not render here — its slot behaviour needs a device.
+        VStack {
+            Spacer()
+            InputView(config: configAnthropic,
+                      isLoading: false,
+                      onSend: { _, _ in },
+                      onCancel: {})
+        }
+        .background(Color(white: 0.95))
+        .previewDisplayName("Anthropic composer")
+
+        VStack {
+            Spacer()
+            InputView(config: configClassic,
+                      isLoading: false,
+                      onSend: { _, _ in },
+                      onCancel: {})
+        }
+        .previewDisplayName("Classic composer")
+
+        VStack {
+            Spacer()
+            InputView(config: configAnthropic,
+                      isLoading: true,
+                      onSend: { _, _ in },
+                      onCancel: {})
+        }
+        .background(Color(white: 0.95))
+        .previewDisplayName("Run in flight — cancel button")
+    }
+}
+#endif

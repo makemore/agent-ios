@@ -413,3 +413,54 @@ private extension View {
             .contentShape(Rectangle())
     }
 }
+
+#if DEBUG
+/// Canvas playground for the assistant action row. Live-interactive:
+/// tapping the speaker toggles the play/stop icon in place, so spacing
+/// and sizing tweaks in `actionIconHitTarget()` show immediately.
+private struct MessageActionRowHarness: View {
+    @State private var speaking = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            MessageView(
+                message: Message(
+                    id: "preview-1",
+                    role: .assistant,
+                    content: "Here's a reply long enough to wrap a couple of lines, so the bubble and the action row underneath both look like the real thing."
+                ),
+                config: ChatWidgetConfig(),
+                showDebug: false,
+                onRetry: {},
+                onEdit: nil,
+                onSpeak: { speaking.toggle() },
+                isSpeaking: speaking,
+                onCopy: {},
+                showAgentAvatar: true,
+                agentAvatarSpeaking: speaking
+            )
+            MessageView(
+                message: Message(
+                    id: "preview-2",
+                    role: .user,
+                    content: "A user message for contrast."
+                ),
+                config: ChatWidgetConfig(),
+                showDebug: false,
+                onRetry: {},
+                onEdit: {},
+                showAgentAvatar: false,
+                agentAvatarSpeaking: false
+            )
+        }
+        .padding()
+    }
+}
+
+struct MessageView_Previews: PreviewProvider {
+    static var previews: some View {
+        MessageActionRowHarness()
+            .previewDisplayName("Action row — tap speaker to toggle")
+    }
+}
+#endif
