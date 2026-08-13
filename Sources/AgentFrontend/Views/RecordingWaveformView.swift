@@ -8,6 +8,10 @@ import SwiftUI
 /// rolling history and shift the older samples left, which reads as the
 /// waveform scrolling as the user speaks.
 ///
+/// Fills whatever width it is given: the bar count is derived from the
+/// available width, so the waveform spans the whole field slot rather
+/// than occupying a fixed strip at the leading edge.
+///
 /// Deliberately dumb: no audio work happens here. The composer already
 /// taps the input node for speech recognition, so it computes RMS from
 /// the buffer it is receiving anyway and hands the result over. That
@@ -24,26 +28,32 @@ struct RecordingWaveformView: View {
     /// taller as the transcript arrives, even at zero opacity.
     static let preferredHeight: CGFloat = 24
 
-    /// Number of bars drawn. Sized so the row still looks like a
-    /// waveform rather than a bar chart on a narrow phone.
-    private let barCount: Int = 28
     private let barWidth: CGFloat = 3
     private let barSpacing: CGFloat = 3
     private let minBarHeight: CGFloat = 3
     private var maxBarHeight: CGFloat { Self.preferredHeight }
 
+    /// Upper bound on retained samples. Generously above any plausible
+    /// on-screen bar count (an iPad-width composer is ~150 bars); the
+    /// visible window is always the suffix sized to the current width.
+    private let historyCap: Int = 400
+
     @State private var history: [CGFloat] = []
 
     var body: some View {
-        HStack(alignment: .center, spacing: barSpacing) {
-            ForEach(Array(padded.enumerated()), id: \.offset) { _, sample in
-                Capsule()
-                    .fill(color)
-                    .frame(width: barWidth, height: height(for: sample))
+        GeometryReader { geo in
+            let barCount = max(1, Int((geo.size.width + barSpacing) / (barWidth + barSpacing)))
+            HStack(alignment: .center, spacing: barSpacing) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule()
+                        .fill(color)
+                        .frame(width: barWidth, height: height(for: sample(at: index, of: barCount)))
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
         }
-        .frame(height: maxBarHeight, alignment: .center)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: maxBarHeight)
+        .frame(maxWidth: .infinity)
         .animation(.linear(duration: 0.08), value: history)
         .onChange(of: level) { newLevel in
             append(newLevel)
@@ -51,17 +61,20 @@ struct RecordingWaveformView: View {
         .accessibilityLabel("Recording")
     }
 
-    /// History padded at the front so the bars fill from the right on
-    /// the first few samples rather than stretching across the row.
-    private var padded: [CGFloat] {
-        if history.count >= barCount { return Array(history.suffix(barCount)) }
-        return Array(repeating: 0, count: barCount - history.count) + history
+    /// Sample for bar `index` in a window of `count` bars: the most
+    /// recent samples fill from the right, zero-padded at the front until
+    /// enough history has accumulated.
+    private func sample(at index: Int, of count: Int) -> CGFloat {
+        let padding = max(0, count - history.count)
+        guard index >= padding else { return 0 }
+        let historyIndex = max(0, history.count - count) + (index - padding)
+        return history[historyIndex]
     }
 
     private func append(_ sample: CGFloat) {
         history.append(max(0, min(1, sample)))
-        if history.count > barCount {
-            history.removeFirst(history.count - barCount)
+        if history.count > historyCap {
+            history.removeFirst(history.count - historyCap)
         }
     }
 

@@ -258,6 +258,20 @@ public struct InputView: View {
     private var speechInputAvailable: Bool {
         HangDiagnostics.measure("speechInputAvailable") {
             guard config.enableVoice else { return false }
+            // A mic the user has switched off in Settings is a mic that
+            // does not exist for this app: showing the button would only
+            // lead to a dead tap. `.undetermined` still shows it — the
+            // permission prompt fires on first use and that is how the
+            // user grants it in the first place.
+            #if os(iOS)
+            if #available(iOS 17.0, *) {
+                guard AVAudioApplication.shared.recordPermission != .denied else { return false }
+            } else {
+                guard AVAudioSession.sharedInstance().recordPermission != .denied else { return false }
+            }
+            let speechAuth = SFSpeechRecognizer.authorizationStatus()
+            guard speechAuth != .denied, speechAuth != .restricted else { return false }
+            #endif
             switch effectiveSpeechInputPolicy {
             case .disabled: return false
             case .localOnly:
