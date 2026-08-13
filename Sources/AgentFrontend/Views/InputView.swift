@@ -109,6 +109,14 @@ public struct InputView: View {
     /// a buffer we're receiving anyway — a second tap on the input node
     /// would throw.
     @State private var audioLevel: CGFloat = 0
+    /// Consecutive recognizer failures in the current mic session. The
+    /// error path recycles the request rather than tearing the mic down,
+    /// which is right for a transient hiccup but spins forever when the
+    /// failure is permanent (an unavailable recognizer, or an input node
+    /// reporting an invalid format). Give up after
+    /// ``maxConsecutiveRecognitionFailures``.
+    @State private var recognitionFailures: Int = 0
+    private let maxConsecutiveRecognitionFailures: Int = 3
 
 
     public var body: some View {
@@ -254,6 +262,7 @@ public struct InputView: View {
         // If a message is being read aloud, dictating supersedes it —
         // and the two want incompatible audio-session categories.
         voiceController?.stop()
+        recognitionFailures = 0
 
         SFSpeechRecognizer.requestAuthorization { status in
             guard status == .authorized else { return }
@@ -261,17 +270,15 @@ public struct InputView: View {
             DispatchQueue.main.async {
                 do {
                     #if os(iOS)
-                    // Dictation and playback are now mutually exclusive
-                    // in time, so the session no longer has to serve both.
-                    // ``.record`` + ``.measurement`` is Apple's reference
-                    // configuration for speech recognition: it disables the
-                    // system's voice-processing chain, which is tuned for
-                    // call intelligibility and measurably hurts transcription
-                    // accuracy.
+                    // Must match the category/mode used by the recycle path
+                    // in ``startNewRecognitionRequest`` — reconfiguring the
+                    // session on every recycle makes the simulator's audio
+                    // device tear down mid-cycle and hands back an invalid
+                    // input format.
                     let audioSession = AVAudioSession.sharedInstance()
-                    try audioSession.setCategory(.record,
-                                                 mode: .measurement,
-                                                 options: [.duckOthers])
+                    try audioSession.setCategory(.playAndRecord,
+                                                 mode: .voiceChat,
+                                                 options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
                     try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
                     #endif
 
@@ -337,6 +344,15 @@ public struct InputView: View {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        // A mid-reconfiguration input node reports a 0 Hz / 0-channel
+        // format. Installing a tap with it throws, and the recognizer then
+        // fails to initialize — reject it here so the caller aborts rather
+        // than recycling into a request that cannot possibly work.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            print("[InputView] installRecognitionRequest: invalid input format (sampleRate=\(format.sampleRate) channels=\(format.channelCount))")
+            recognitionRequest = nil
+            return false
+        }
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
             // Same buffer, one extra pass — drives the waveform. Must hop
@@ -364,18 +380,26 @@ public struct InputView: View {
                         newText = ""
                     }
                     self.inputText = newText
+                    // A result means the pipeline is healthy again.
+                    self.recognitionFailures = 0
                 }
             }
             if let error = error {
-                #if DEBUG
-                print("[InputView] recognition error: \(error.localizedDescription) — recycling request")
-                #endif
                 DispatchQueue.main.async {
                     guard self.recordingSession == session else { return }
+                    guard self.isRecording else { return }
+                    self.recognitionFailures += 1
                     // Don't tear the whole mic down on a transient
-                    // recognizer error; recycle the request and keep
-                    // the always-on mic alive.
-                    if self.isRecording { self.startNewRecognitionRequest() }
+                    // recognizer error — recycle and keep going. But a
+                    // failure that repeats immediately is permanent, and
+                    // recycling into it is an unbounded spin.
+                    if self.recognitionFailures >= self.maxConsecutiveRecognitionFailures {
+                        print("[InputView] recognition error: \(error.localizedDescription) — giving up after \(self.recognitionFailures) attempts")
+                        self.stopRecording()
+                    } else {
+                        print("[InputView] recognition error: \(error.localizedDescription) — recycling request (\(self.recognitionFailures)/\(self.maxConsecutiveRecognitionFailures))")
+                        self.startNewRecognitionRequest()
+                    }
                 }
             }
         }
@@ -433,11 +457,6 @@ public struct InputView: View {
         recognitionTask = nil
         isRecording = false
         audioLevel = 0
-        #if os(iOS)
-        // Hand the audio session back so per-message playback can take
-        // the route without fighting a still-active `.record` session.
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
     }
 
     // MARK: - Playback control
