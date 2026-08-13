@@ -52,7 +52,11 @@ public struct MessageListView: View {
     let config: ChatWidgetConfig
     let onLoadMore: () -> Void
     let onRetry: (Int) -> Void
-    let onEdit: (Int, String) -> Void
+    /// Begin editing a sent user message: `(index, currentContent)`.
+    /// The list no longer hosts the edit UI — the host presents its edit
+    /// card (see ``EditMessageCard``) in place of the composer and owns
+    /// the commit. `nil` hides the Edit affordance entirely.
+    let onBeginEdit: ((Int, String) -> Void)?
     /// Speak a message aloud, or stop it if it is already playing.
     /// Receives the whole message so the host can track *which* row is
     /// speaking; the list only decides which rows get the affordance
@@ -93,7 +97,7 @@ public struct MessageListView: View {
         config: ChatWidgetConfig,
         onLoadMore: @escaping () -> Void,
         onRetry: @escaping (Int) -> Void,
-        onEdit: @escaping (Int, String) -> Void,
+        onBeginEdit: ((Int, String) -> Void)? = nil,
         onSpeak: ((Message) -> Void)? = nil,
         speakingMessageId: String? = nil,
         onCopy: (() -> Void)? = nil,
@@ -108,7 +112,7 @@ public struct MessageListView: View {
         self.config = config
         self.onLoadMore = onLoadMore
         self.onRetry = onRetry
-        self.onEdit = onEdit
+        self.onBeginEdit = onBeginEdit
         self.onSpeak = onSpeak
         self.speakingMessageId = speakingMessageId
         self.onCopy = onCopy
@@ -117,8 +121,6 @@ public struct MessageListView: View {
         self.onBlockAction = onBlockAction
     }
 
-    @State private var editingIndex: Int?
-    @State private var editText: String = ""
 
     /// Anchor message id used by the "Load earlier" pagination path.
     /// Set by the tap handler on the load-more button; consumed by
@@ -575,15 +577,6 @@ public struct MessageListView: View {
             || message.type == .agentContext
         if isToolMsg && !config.showToolMessages {
             EmptyView()
-        } else if editingIndex == index {
-            EditMessageView(
-                text: $editText,
-                onSave: {
-                    onEdit(index, editText)
-                    editingIndex = nil
-                },
-                onCancel: { editingIndex = nil }
-            )
         } else {
             MessageView(
                 message: message,
@@ -592,9 +585,8 @@ public struct MessageListView: View {
                 onRetry: message.role == .user || message.role == .assistant ? {
                     onRetry(index)
                 } : nil,
-                onEdit: message.role == .user ? {
-                    editText = message.content
-                    editingIndex = index
+                onEdit: message.role == .user && onBeginEdit != nil ? {
+                    onBeginEdit?(index, message.content)
                 } : nil,
                 onSpeak: speakAction(for: message),
                 isSpeaking: message.id == speakingMessageId,
@@ -704,35 +696,6 @@ struct EmptyStateView: View {
 }
 
 /// Edit message view
-struct EditMessageView: View {
-    @Binding var text: String
-    let onSave: () -> Void
-    let onCancel: () -> Void
-
-    var body: some View {
-        VStack(spacing: 8) {
-            TextEditor(text: $text)
-                .frame(minHeight: 60)
-                .padding(8)
-                .background(PlatformColors.systemGray6)
-                .cornerRadius(8)
-
-            HStack {
-                Button("Cancel", action: onCancel)
-                    .foregroundColor(.secondary)
-                Spacer()
-                Button("Save & Resend", action: onSave)
-                    .fontWeight(.semibold)
-            }
-            .font(.caption)
-        }
-        .padding()
-        .background(PlatformColors.systemBackground)
-        .cornerRadius(12)
-        .shadow(radius: 2)
-    }
-}
-
 /// Bottom anchoring with iMessage semantics; no-op before iOS 18.
 ///
 /// Deliberately NOT the plain `defaultScrollAnchor(.bottom)`: that also
@@ -847,8 +810,7 @@ struct MessageListScrollHarness: View {
                 loadingMoreMessages: loadingMoreMessages,
                 config: ChatWidgetConfig(),
                 onLoadMore: { simulateLoadMore() },
-                onRetry: { _ in },
-                onEdit: { _, _ in }
+                onRetry: { _ in }
             )
             HStack {
                 Button("Send") {

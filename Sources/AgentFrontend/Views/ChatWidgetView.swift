@@ -48,6 +48,13 @@ public struct ChatWidgetView: View {
     /// while ``voiceController.isSpeaking``; cleared when playback ends
     /// so the row's stop button reverts to a speaker on its own.
     @State private var speakingMessageId: String? = nil
+    /// Index and working text of the user message being edited, or `nil`.
+    /// While set, ``EditMessageCard`` replaces the composer; sending
+    /// commits via ``ChatViewModel.editMessage(at:newContent:)``, which
+    /// truncates the transcript and restarts the conversation from that
+    /// point.
+    @State private var editingMessageIndex: Int? = nil
+    @State private var editingText: String = ""
     /// Optional host hook fired when the user taps a ``BlockAction``
     /// inside a rendered ``ContentBlock``. The widget supplies a
     /// default handler that auto-sends `type == "message"` actions
@@ -186,8 +193,9 @@ public struct ChatWidgetView: View {
                 onRetry: { index in
                     Task { await viewModel.retryMessage(at: index) }
                 },
-                onEdit: { index, content in
-                    Task { await viewModel.editMessage(at: index, newContent: content) }
+                onBeginEdit: { index, content in
+                    editingText = content
+                    editingMessageIndex = index
                 },
                 // Toggle: tapping the speaker on the playing message stops
                 // it; tapping any other message switches playback to that
@@ -266,6 +274,22 @@ public struct ChatWidgetView: View {
             }
 
             // Input form
+            if let editIndex = editingMessageIndex {
+                EditMessageCard(
+                    appearance: effectiveConfig.appearance,
+                    text: $editingText,
+                    onSend: {
+                        let content = editingText
+                        editingMessageIndex = nil
+                        editingText = ""
+                        Task { await viewModel.editMessage(at: editIndex, newContent: content) }
+                    },
+                    onCancel: {
+                        editingMessageIndex = nil
+                        editingText = ""
+                    }
+                )
+            } else {
             InputView(
                 config: config,
                 isLoading: viewModel.isLoading,
@@ -302,6 +326,7 @@ public struct ChatWidgetView: View {
                     )
                 }
             )
+            }
         }
         .overlay(alignment: .top) {
             if copyConfirmationVisible {
