@@ -183,6 +183,15 @@ public struct InputView: View {
         }
     }
     
+    /// The mic occupies the trailing slot only while there is nothing to
+    /// send — typing or dictating swaps it for the send button, the
+    /// ChatGPT/Gemini pattern. Suppressed while a run is in flight or a
+    /// message is being read aloud, where that slot belongs to cancel and
+    /// stop-speaking respectively, so exactly one control is ever there.
+    private var showsMicButton: Bool {
+        speechInputAvailable && !canSend && !isLoading && !isAgentSpeaking
+    }
+
     private var canSend: Bool {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
     }
@@ -570,7 +579,7 @@ public struct InputView: View {
                     dictationTrailingControls(accent: config.primaryColor,
                                               secondary: .secondary)
                 } else {
-                    if speechInputAvailable {
+                    if showsMicButton {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
                                 .font(.title3)
@@ -649,7 +658,7 @@ public struct InputView: View {
                     dictationTrailingControls(accent: config.appearance.accent,
                                               secondary: config.appearance.textSecondary)
                 } else {
-                    if speechInputAvailable {
+                    if showsMicButton {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
                                 .font(.title3)
