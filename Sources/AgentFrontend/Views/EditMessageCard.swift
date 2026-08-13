@@ -71,7 +71,24 @@ struct EditMessageCard: View {
                 .accessibilityLabel("Cancel editing")
             }
 
-            ZStack(alignment: .leading) {
+            HStack(alignment: .center, spacing: 8) {
+                if dictation.isRecording {
+                    Button(action: {
+                        dictation.stop()
+                        text = dictationPrefix
+                    }) {
+                        Image(systemName: "xmark")
+                            .font(.title3)
+                            .foregroundColor(appearance.textSecondary)
+                            .frame(width: 36, height: 36)
+                            .background(appearance.surfaceElevated)
+                            .clipShape(Circle())
+                    }
+                    .accessibilityLabel("Cancel dictation")
+                    .accessibilityHint("Discards the recording and restores the previous text.")
+                }
+
+                ZStack(alignment: .leading) {
                 TextField("", text: editTextBinding, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...10)
@@ -90,23 +107,10 @@ struct EditMessageCard: View {
                     RecordingWaveformView(level: dictation.audioLevel,
                                           color: appearance.accent)
                 }
+                }
             }
 
             HStack(spacing: 8) {
-                if dictation.isRecording {
-                    Button(action: {
-                        dictation.stop()
-                        text = dictationPrefix
-                    }) {
-                        Image(systemName: "xmark")
-                            .font(.title3)
-                            .foregroundColor(appearance.textSecondary)
-                            .frame(width: 36, height: 36)
-                    }
-                    .accessibilityLabel("Cancel dictation")
-                    .accessibilityHint("Discards the recording and restores the previous text.")
-                }
-
                 Spacer(minLength: 0)
 
                 if dictation.isRecording {
@@ -115,6 +119,8 @@ struct EditMessageCard: View {
                             .font(.title3)
                             .foregroundColor(appearance.textSecondary)
                             .frame(width: 36, height: 36)
+                            .background(appearance.surfaceElevated)
+                            .clipShape(Circle())
                     }
                     .accessibilityLabel("Stop dictation")
                     .accessibilityHint("Ends recording and keeps the transcribed text for editing.")

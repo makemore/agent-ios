@@ -304,14 +304,16 @@ public struct InputView: View {
         inputText = dictationPrefix
     }
 
-    /// Leading ✕ shown while dictating.
+    /// Leading ✕ shown while dictating, immediately left of the waveform.
     @ViewBuilder
-    private func dictationCancelButton(secondary: Color) -> some View {
+    private func dictationCancelButton(secondary: Color, fill: Color) -> some View {
         Button(action: cancelDictation) {
             Image(systemName: "xmark")
                 .font(.title3)
                 .foregroundColor(secondary)
                 .frame(width: 36, height: 36)
+                .background(fill)
+                .clipShape(Circle())
         }
         .accessibilityLabel("Cancel dictation")
         .accessibilityHint("Discards the recording and restores the previous text.")
@@ -365,7 +367,8 @@ public struct InputView: View {
 
             HStack(alignment: .center, spacing: 8) {
                 if isRecording {
-                    dictationCancelButton(secondary: .secondary)
+                    dictationCancelButton(secondary: .secondary,
+                                          fill: PlatformColors.systemGray6)
                 }
                 if !isRecording, config.enableFiles {
                     Button(action: { activeSheet = .addToChat }) {
@@ -398,7 +401,8 @@ public struct InputView: View {
 
                 if isRecording {
                     dictationTrailingControls(accent: config.primaryColor,
-                                              secondary: .secondary)
+                                              secondary: .secondary,
+                                              fill: PlatformColors.systemGray6)
                 } else {
                     if speechInputAvailable {
                         Button(action: { toggleRecording() }) {
@@ -440,7 +444,8 @@ public struct InputView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
                     if isRecording {
-                        dictationCancelButton(secondary: config.appearance.textSecondary)
+                        dictationCancelButton(secondary: config.appearance.textSecondary,
+                                              fill: config.appearance.surfaceElevated)
                     }
                     if !twoRow, !isRecording, config.enableFiles {
                         circularIconButton(systemName: "plus") {
@@ -501,7 +506,8 @@ public struct InputView: View {
 
                     if isRecording {
                         dictationTrailingControls(accent: config.appearance.accent,
-                                                  secondary: config.appearance.textSecondary)
+                                                  secondary: config.appearance.textSecondary,
+                                                  fill: config.appearance.surfaceElevated)
                     } else if !twoRow {
                         if speechInputAvailable {
                             Button(action: { toggleRecording() }) {
@@ -565,12 +571,14 @@ public struct InputView: View {
     /// text field can stay mounted underneath it. Shared by both composer
     /// styles, which differ only in their colour sources.
     @ViewBuilder
-    private func dictationTrailingControls(accent: Color, secondary: Color) -> some View {
+    private func dictationTrailingControls(accent: Color, secondary: Color, fill: Color) -> some View {
         Button(action: stopDictation) {
             Image(systemName: "stop.fill")
                 .font(.title3)
                 .foregroundColor(secondary)
                 .frame(width: 36, height: 36)
+                .background(fill)
+                .clipShape(Circle())
         }
         .accessibilityLabel("Stop dictation")
         .accessibilityHint("Ends recording and keeps the transcribed text for editing.")
