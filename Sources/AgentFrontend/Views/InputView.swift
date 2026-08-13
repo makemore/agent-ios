@@ -199,14 +199,23 @@ public struct InputView: View {
         config.effectiveSpeechInputPolicy
     }
 
+    /// Evaluated on every body pass by design: `isAvailable` is false for
+    /// a beat after launch while the recognizer connects to the speech
+    /// service, and re-checking is what makes the mic appear once it
+    /// comes up. (A one-shot cache in onAppear froze that early false and
+    /// the mic never showed.) Timed so that if this lookup is ever the
+    /// thing making the composer slow, it reports itself as a number
+    /// instead of staying a theory.
     private var speechInputAvailable: Bool {
-        guard config.enableVoice else { return false }
-        switch effectiveSpeechInputPolicy {
-        case .disabled: return false
-        case .localOnly:
-            return speechRecognizer?.supportsOnDeviceRecognition == true
-        case .automatic, .remote:
-            return speechRecognizer?.isAvailable == true
+        HangDiagnostics.measure("speechInputAvailable") {
+            guard config.enableVoice else { return false }
+            switch effectiveSpeechInputPolicy {
+            case .disabled: return false
+            case .localOnly:
+                return speechRecognizer?.supportsOnDeviceRecognition == true
+            case .automatic, .remote:
+                return speechRecognizer?.isAvailable == true
+            }
         }
     }
 
