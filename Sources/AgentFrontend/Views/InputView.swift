@@ -277,7 +277,7 @@ public struct InputView: View {
                     // input format.
                     let audioSession = AVAudioSession.sharedInstance()
                     try audioSession.setCategory(.playAndRecord,
-                                                 mode: .voiceChat,
+                                                 mode: .default,
                                                  options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
                     try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
                     #endif
@@ -341,6 +341,11 @@ public struct InputView: View {
             request.requiresOnDeviceRecognition = true
         }
         recognitionRequest = request
+        // "Failed to initialize recognizer" has several distinct causes that
+        // are indistinguishable from the error alone: a forced on-device
+        // request with no local model, an unsupported locale, or the
+        // simulator's speech stack simply not working. Log what we asked for.
+        print("[InputView] recognizer: policy=\(effectiveSpeechInputPolicy) onDeviceRequired=\(request.requiresOnDeviceRecognition) onDeviceSupported=\(recognizer.supportsOnDeviceRecognition) locale=\(recognizer.locale.identifier) available=\(recognizer.isAvailable)")
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -421,7 +426,7 @@ public struct InputView: View {
             do {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playAndRecord,
-                                        mode: .voiceChat,
+                                        mode: .default,
                                         options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
                 try session.setActive(true, options: [])
             } catch {
