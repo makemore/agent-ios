@@ -23,6 +23,10 @@ struct EditMessageCard: View {
 
     @StateObject private var dictation = DictationEngine()
 
+    /// Edit text as it stood when the mic started, so ✕ can discard the
+    /// dictated portion and restore it.
+    @State private var dictationPrefix: String = ""
+
     /// Focus is requested on appear so the keyboard comes up with the
     /// card and the caret is ready in the pre-filled text.
     @FocusState private var focused: Bool
@@ -89,6 +93,20 @@ struct EditMessageCard: View {
             }
 
             HStack(spacing: 8) {
+                if dictation.isRecording {
+                    Button(action: {
+                        dictation.stop()
+                        text = dictationPrefix
+                    }) {
+                        Image(systemName: "xmark")
+                            .font(.title3)
+                            .foregroundColor(appearance.textSecondary)
+                            .frame(width: 36, height: 36)
+                    }
+                    .accessibilityLabel("Cancel dictation")
+                    .accessibilityHint("Discards the recording and restores the previous text.")
+                }
+
                 Spacer(minLength: 0)
 
                 if dictation.isRecording {
@@ -142,6 +160,7 @@ struct EditMessageCard: View {
         // Snapshot so dictation appends to the existing edit rather than
         // replacing it — captured into the closure, not held as state.
         let prefix = text
+        dictationPrefix = prefix
         dictation.onTranscript = { transcribed in
             let separator = prefix.isEmpty ? "" : " "
             var newText = prefix + separator + transcribed

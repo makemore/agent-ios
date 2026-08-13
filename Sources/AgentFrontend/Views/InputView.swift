@@ -93,6 +93,12 @@ public struct InputView: View {
     /// between the two surfaces.
     @StateObject private var dictation = DictationEngine()
 
+    /// What the field held when the mic started. The transcript closure
+    /// captures its own copy for appending; this one exists so the ✕
+    /// cancel affordance can throw the dictated text away and put the
+    /// field back exactly as it was.
+    @State private var dictationPrefix: String = ""
+
     private var isRecording: Bool { dictation.isRecording }
     /// Whether the composer is in its expanded two-row layout: text field
     /// full-width on top, controls on their own row underneath (the
@@ -290,6 +296,27 @@ public struct InputView: View {
         dictation.stop()
     }
 
+    /// Discards the recording: stops the mic and restores the field to
+    /// what it held before dictation started, throwing the transcript
+    /// away. The counterpart to ``stopDictation``, which keeps it.
+    private func cancelDictation() {
+        dictation.stop()
+        inputText = dictationPrefix
+    }
+
+    /// Leading ✕ shown while dictating.
+    @ViewBuilder
+    private func dictationCancelButton(secondary: Color) -> some View {
+        Button(action: cancelDictation) {
+            Image(systemName: "xmark")
+                .font(.title3)
+                .foregroundColor(secondary)
+                .frame(width: 36, height: 36)
+        }
+        .accessibilityLabel("Cancel dictation")
+        .accessibilityHint("Discards the recording and restores the previous text.")
+    }
+
     private func toggleRecording() {
         if dictation.isRecording {
             dictation.stop()
@@ -301,6 +328,7 @@ public struct InputView: View {
             // into the closure rather than held as view state, so a send
             // can't resurrect a stale prefix.
             let prefix = inputText
+            dictationPrefix = prefix
             dictation.onTranscript = { transcribed in
                 let separator = prefix.isEmpty ? "" : " "
                 var newText = prefix + separator + transcribed
@@ -336,6 +364,9 @@ public struct InputView: View {
             }
 
             HStack(alignment: .center, spacing: 8) {
+                if isRecording {
+                    dictationCancelButton(secondary: .secondary)
+                }
                 if !isRecording, config.enableFiles {
                     Button(action: { activeSheet = .addToChat }) {
                         Image(systemName: "paperclip")
@@ -408,6 +439,9 @@ public struct InputView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
+                    if isRecording {
+                        dictationCancelButton(secondary: config.appearance.textSecondary)
+                    }
                     if !twoRow, !isRecording, config.enableFiles {
                         circularIconButton(systemName: "plus") {
                             activeSheet = .addToChat
