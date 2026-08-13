@@ -182,15 +182,6 @@ public struct InputView: View {
         }
     }
     
-    /// The mic occupies the trailing slot only while there is nothing to
-    /// send — typing or dictating swaps it for the send button, the
-    /// ChatGPT/Gemini pattern. Suppressed while a run is in flight or a
-    /// message is being read aloud, where that slot belongs to cancel and
-    /// stop-speaking respectively, so exactly one control is ever there.
-    private var showsMicButton: Bool {
-        speechInputAvailable && !canSend && !isLoading && !isAgentSpeaking
-    }
-
     private var canSend: Bool {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
     }
@@ -586,7 +577,7 @@ public struct InputView: View {
                     dictationTrailingControls(accent: config.primaryColor,
                                               secondary: .secondary)
                 } else {
-                    if showsMicButton {
+                    if speechInputAvailable {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
                                 .font(.title3)
@@ -664,7 +655,7 @@ public struct InputView: View {
                     dictationTrailingControls(accent: config.appearance.accent,
                                               secondary: config.appearance.textSecondary)
                 } else {
-                    if showsMicButton {
+                    if speechInputAvailable {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
                                 .font(.title3)
@@ -705,19 +696,19 @@ public struct InputView: View {
         .accessibilityLabel("Stop dictation")
         .accessibilityHint("Ends recording and keeps the transcribed text for editing.")
 
-        // Appears as soon as the transcript has something in it, and not
-        // before — `stop` is the only trailing control until then.
-        if canSend {
-            Button(action: sendMessage) {
-                Image(systemName: "arrow.up")
-                    .font(.title3)
-                    .foregroundColor(config.appearance.textOnAccent)
-                    .frame(width: 36, height: 36)
-                    .background(accent)
-                    .clipShape(Circle())
-            }
-            .accessibilityLabel("Send")
+        // Same stationary-controls rule as the idle composer: send is
+        // always in its slot, grey until the transcript gives it something
+        // to do.
+        Button(action: sendMessage) {
+            Image(systemName: "arrow.up")
+                .font(.title3)
+                .foregroundColor(canSend ? config.appearance.textOnAccent : .white)
+                .frame(width: 36, height: 36)
+                .background(canSend ? accent : Color.gray)
+                .clipShape(Circle())
         }
+        .disabled(!canSend)
+        .accessibilityLabel("Send")
     }
 
 
@@ -780,18 +771,20 @@ public struct InputView: View {
                     .clipShape(Circle())
             }
             .accessibilityLabel("Stop speaking")
-        } else if canSend {
-            // Absent rather than greyed out when there is nothing to send.
-            // Cancel and stop-speaking above are unconditional — they act on
-            // an in-flight run, not on the composer's contents.
+        } else {
+            // Always present, greyed out and inert when there is nothing to
+            // send. State is shown by colour, not by appearing/disappearing —
+            // controls that move around are harder to hit than controls that
+            // change colour.
             Button(action: sendMessage) {
                 Image(systemName: "arrow.up")
                     .font(.title3)
-                    .foregroundColor(config.appearance.textOnAccent)
+                    .foregroundColor(canSend ? config.appearance.textOnAccent : .white)
                     .frame(width: 36, height: 36)
-                    .background(config.appearance.accent)
+                    .background(canSend ? config.appearance.accent : Color.gray)
                     .clipShape(Circle())
             }
+            .disabled(!canSend)
             .accessibilityLabel("Send")
         }
     }
