@@ -690,16 +690,19 @@ public struct InputView: View {
         .accessibilityLabel("Stop dictation")
         .accessibilityHint("Ends recording and keeps the transcribed text for editing.")
 
-        Button(action: sendMessage) {
-            Image(systemName: "arrow.up")
-                .font(.title3)
-                .foregroundColor(canSend ? config.appearance.textOnAccent : .white)
-                .frame(width: 36, height: 36)
-                .background(canSend ? accent : Color.gray)
-                .clipShape(Circle())
+        // Appears as soon as the transcript has something in it, and not
+        // before — `stop` is the only trailing control until then.
+        if canSend {
+            Button(action: sendMessage) {
+                Image(systemName: "arrow.up")
+                    .font(.title3)
+                    .foregroundColor(config.appearance.textOnAccent)
+                    .frame(width: 36, height: 36)
+                    .background(accent)
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Send")
         }
-        .disabled(!canSend)
-        .accessibilityLabel("Send")
     }
 
 
@@ -762,16 +765,19 @@ public struct InputView: View {
                     .clipShape(Circle())
             }
             .accessibilityLabel("Stop speaking")
-        } else {
+        } else if canSend {
+            // Absent rather than greyed out when there is nothing to send.
+            // Cancel and stop-speaking above are unconditional — they act on
+            // an in-flight run, not on the composer's contents.
             Button(action: sendMessage) {
                 Image(systemName: "arrow.up")
                     .font(.title3)
-                    .foregroundColor(canSend ? config.appearance.textOnAccent : .white)
+                    .foregroundColor(config.appearance.textOnAccent)
                     .frame(width: 36, height: 36)
-                    .background(canSend ? config.appearance.accent : Color.gray)
+                    .background(config.appearance.accent)
                     .clipShape(Circle())
             }
-            .disabled(!canSend)
+            .accessibilityLabel("Send")
         }
     }
 
