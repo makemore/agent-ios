@@ -177,7 +177,7 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
             try session.setActive(true, options: [])
         } catch {
             #if DEBUG
-            print("[ElevenLabsTTSProvider] AVAudioSession setup failed: \(error)")
+            AgentLog.error("[ElevenLabsTTSProvider] AVAudioSession setup failed: \(error)")
             #endif
         }
         #endif

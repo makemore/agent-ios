@@ -318,9 +318,9 @@ public struct ChatWidgetView: View {
             config.onVoiceControllerReady?(viewModel)
 
 
-            print("[📜 ChatWidgetView] .task fired — calling restoreConversationIfNeeded()")
+            AgentLog.debug(.lifecycle, "[ChatWidgetView] .task fired — restoreConversationIfNeeded()")
             await viewModel.restoreConversationIfNeeded()
-            print("[📜 ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
+            AgentLog.debug(.lifecycle, "[ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
 
             // Load systems if picker is enabled
             if config.showSystemPicker {

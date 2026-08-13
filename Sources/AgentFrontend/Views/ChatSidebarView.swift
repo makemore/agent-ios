@@ -233,7 +233,7 @@ public struct ChatSidebarView: View {
             // start a new chat. The host's error banner handles
             // the broader failure surface.
             #if DEBUG
-            print("[ChatSidebarView] loadConversations failed: \(error)")
+            AgentLog.error("[ChatSidebarView] loadConversations failed: \(error)")
             #endif
             conversations = []
         }

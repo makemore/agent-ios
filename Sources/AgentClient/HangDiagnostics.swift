@@ -84,7 +84,7 @@ public enum HangDiagnostics {
         lock.unlock()
         guard !alreadyRunning else { return }
 
-        print("[Hang] watchdog installed (v2 — reports DURING the stall)")
+        AgentLog.debug(.lifecycle, "[Hang] watchdog installed")
 
         let queue = DispatchQueue(label: "hang-diagnostics", qos: .utility)
 

@@ -329,7 +329,7 @@ public struct InputView: View {
                     isRecording = true
                 } catch {
                     #if DEBUG
-                    print("[InputView] startRecording failed: \(error)")
+                    AgentLog.error("[InputView] startRecording failed: \(error)")
                     #endif
                     stopRecording()
                 }
@@ -344,14 +344,14 @@ public struct InputView: View {
     @discardableResult
     private func installRecognitionRequest() -> Bool {
         guard let recognizer = speechRecognizer else {
-            print("[InputView] installRecognitionRequest: no recognizer")
+            AgentLog.error("[InputView] installRecognitionRequest: no recognizer")
             return false
         }
         guard recognizer.isAvailable else {
-            print("[InputView] installRecognitionRequest: recognizer unavailable")
+            AgentLog.error("[InputView] installRecognitionRequest: recognizer unavailable")
             return false
         }
-        print("[InputView] installRecognitionRequest: installing (engineRunning=\(audioEngine.isRunning))")
+        AgentLog.debug(.input, "[InputView] installRecognitionRequest: installing (engineRunning=\(audioEngine.isRunning))")
         // Clear any previous request/tap so we don't double-install.
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
@@ -364,7 +364,7 @@ public struct InputView: View {
         request.addsPunctuation = true
         if effectiveSpeechInputPolicy == .localOnly {
             guard recognizer.supportsOnDeviceRecognition else {
-                print("[InputView] installRecognitionRequest: on-device recognition unavailable")
+                AgentLog.error("[InputView] installRecognitionRequest: on-device recognition unavailable")
                 return false
             }
             request.requiresOnDeviceRecognition = true
@@ -374,7 +374,7 @@ public struct InputView: View {
         // are indistinguishable from the error alone: a forced on-device
         // request with no local model, an unsupported locale, or the
         // simulator's speech stack simply not working. Log what we asked for.
-        print("[InputView] recognizer: policy=\(effectiveSpeechInputPolicy) onDeviceRequired=\(request.requiresOnDeviceRecognition) onDeviceSupported=\(recognizer.supportsOnDeviceRecognition) locale=\(recognizer.locale.identifier) available=\(recognizer.isAvailable)")
+        AgentLog.debug(.input, "[InputView] recognizer: policy=\(effectiveSpeechInputPolicy) onDeviceRequired=\(request.requiresOnDeviceRecognition) onDeviceSupported=\(recognizer.supportsOnDeviceRecognition) locale=\(recognizer.locale.identifier) available=\(recognizer.isAvailable)")
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -383,7 +383,7 @@ public struct InputView: View {
         // fails to initialize — reject it here so the caller aborts rather
         // than recycling into a request that cannot possibly work.
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            print("[InputView] installRecognitionRequest: invalid input format (sampleRate=\(format.sampleRate) channels=\(format.channelCount))")
+            AgentLog.error("[InputView] installRecognitionRequest: invalid input format (sampleRate=\(format.sampleRate) channels=\(format.channelCount))")
             recognitionRequest = nil
             return false
         }
@@ -428,10 +428,10 @@ public struct InputView: View {
                     // failure that repeats immediately is permanent, and
                     // recycling into it is an unbounded spin.
                     if self.recognitionFailures >= self.maxConsecutiveRecognitionFailures {
-                        print("[InputView] recognition error: \(error.localizedDescription) — giving up after \(self.recognitionFailures) attempts")
+                        AgentLog.error("[InputView] recognition error: \(error.localizedDescription) — giving up after \(self.recognitionFailures) attempts")
                         self.stopRecording()
                     } else {
-                        print("[InputView] recognition error: \(error.localizedDescription) — recycling request (\(self.recognitionFailures)/\(self.maxConsecutiveRecognitionFailures))")
+                        AgentLog.debug(.input, "[InputView] recognition error: \(error.localizedDescription) — recycling request (\(self.recognitionFailures)/\(self.maxConsecutiveRecognitionFailures))")
                         self.startNewRecognitionRequest()
                     }
                 }
@@ -446,11 +446,11 @@ public struct InputView: View {
     /// when the agent finishes speaking.
     private func startNewRecognitionRequest() {
         guard isRecording else {
-            print("[InputView] startNewRecognitionRequest: not recording, skipping")
+            AgentLog.debug(.input, "[InputView] startNewRecognitionRequest: not recording, skipping")
             return
         }
         if !audioEngine.isRunning {
-            print("[InputView] startNewRecognitionRequest: engine stopped, restarting")
+            AgentLog.debug(.input, "[InputView] startNewRecognitionRequest: engine stopped, restarting")
             #if os(iOS)
             do {
                 let session = AVAudioSession.sharedInstance()
@@ -459,20 +459,20 @@ public struct InputView: View {
                                         options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
                 try session.setActive(true, options: [])
             } catch {
-                print("[InputView] startNewRecognitionRequest: session reactivate failed: \(error)")
+                AgentLog.error("[InputView] startNewRecognitionRequest: session reactivate failed: \(error)")
             }
             #endif
             // Install request first so the engine has a tap before start().
             if !installRecognitionRequest() {
-                print("[InputView] startNewRecognitionRequest: install failed before engine start")
+                AgentLog.error("[InputView] startNewRecognitionRequest: install failed before engine start")
                 return
             }
             do {
                 audioEngine.prepare()
                 try audioEngine.start()
-                print("[InputView] startNewRecognitionRequest: engine restarted ok")
+                AgentLog.debug(.input, "[InputView] startNewRecognitionRequest: engine restarted ok")
             } catch {
-                print("[InputView] startNewRecognitionRequest: engine start failed: \(error)")
+                AgentLog.error("[InputView] startNewRecognitionRequest: engine start failed: \(error)")
             }
             return
         }

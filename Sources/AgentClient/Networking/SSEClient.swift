@@ -94,7 +94,7 @@ public class SSEClient {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        print("[AgentClient][SSE] connect url=\(redactURLForLogging(url))")
+        AgentLog.debug(.sse, "[SSE] connect url=\(redactURLForLogging(url))")
 
         // Reset on every connect — a previous run may have set the flag
         // during teardown.
@@ -225,7 +225,7 @@ public class SSEClient {
         } else {
             preview = eventData
         }
-        print("[AgentClient][SSE] event type=\(ev.type) bytes=\(eventData.count) data=\(preview)")
+        AgentLog.debug(.sse, "[SSE] event type=\(ev.type) bytes=\(eventData.count) data=\(preview)")
         return ev
     }
 }
@@ -267,7 +267,7 @@ private class SSEStreamDelegate: NSObject, URLSessionDataDelegate {
         if firstByteAt == nil {
             firstByteAt = Date()
             let ms = Int(firstByteAt!.timeIntervalSince(connectStartedAt) * 1000)
-            print("[AgentClient][SSE] first bytes received: \(data.count)B after \(ms)ms")
+            AgentLog.debug(.sse, "[SSE] first bytes received: \(data.count)B after \(ms)ms")
         }
         totalBytes += data.count
         onData(data)
@@ -276,7 +276,7 @@ private class SSEStreamDelegate: NSObject, URLSessionDataDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let durationMs = Int(Date().timeIntervalSince(connectStartedAt) * 1000)
         let errDesc = error?.localizedDescription ?? "nil"
-        print("[AgentClient][SSE] complete error=\(errDesc) totalBytes=\(totalBytes) totalEvents=\(totalEvents) duration=\(durationMs)ms")
+        AgentLog.debug(.sse, "[SSE] complete error=\(errDesc) totalBytes=\(totalBytes) totalEvents=\(totalEvents) duration=\(durationMs)ms")
         if let error = error {
             onError(error)
         } else {

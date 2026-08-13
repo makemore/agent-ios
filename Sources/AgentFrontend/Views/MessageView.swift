@@ -95,7 +95,7 @@ public struct MessageView: View {
         if isContentBlocks, let blocks = message.metadata?.contentBlocks, !blocks.isEmpty {
             let _: Void = {
                 #if DEBUG
-                print("[AgentFrontend][MessageView] rendering ContentBlockRenderer with \(blocks.count) block(s)")
+                AgentLog.debug(.chat, "[MessageView] rendering ContentBlockRenderer with \(blocks.count) block(s)")
                 #endif
             }()
             ContentBlockRenderer(blocks: blocks, config: config, onAction: onBlockAction)

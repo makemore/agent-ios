@@ -182,7 +182,7 @@ public final class VoiceController: ObservableObject {
                 // orb and layout to jitter. The flag is cleared by reset()
                 // at the start of the next assistant turn.
                 #if DEBUG
-                print("[VoiceController] speak failed: \(error)")
+                AgentLog.error("[VoiceController] speak failed: \(error)")
                 #endif
                 turnFailed = true
                 // Latch for the whole process, not just this instance —
