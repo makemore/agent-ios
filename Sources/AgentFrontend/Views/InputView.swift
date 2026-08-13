@@ -257,6 +257,15 @@ public struct InputView: View {
     /// instead of staying a theory.
     private var speechInputAvailable: Bool {
         HangDiagnostics.measure("speechInputAvailable") {
+            #if targetEnvironment(simulator)
+            // The simulator's SFSpeechRecognizer reports available=true and
+            // then fails every recognition task it is asked to start, so the
+            // mic button only ever led to a waveform that stopped itself a
+            // second later. No pre-check catches this — every health signal
+            // the API exposes says yes — so dictation is simulator-off
+            // wholesale. Test it on hardware.
+            return false
+            #else
             guard config.enableVoice else { return false }
             // A mic the user has switched off in Settings is a mic that
             // does not exist for this app: showing the button would only
@@ -279,6 +288,7 @@ public struct InputView: View {
             case .automatic, .remote:
                 return speechRecognizer?.isAvailable == true
             }
+            #endif
         }
     }
 
