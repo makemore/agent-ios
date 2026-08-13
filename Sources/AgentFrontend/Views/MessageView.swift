@@ -409,7 +409,7 @@ private extension View {
     /// row but tighter than the 22pt it briefly had — while height stays
     /// generous because nothing crowds the row vertically.
     func actionIconHitTarget() -> some View {
-        self.frame(minWidth: 30, minHeight: 36)
+        self.frame(minWidth: 25, minHeight: 36)
             .contentShape(Rectangle())
     }
 }

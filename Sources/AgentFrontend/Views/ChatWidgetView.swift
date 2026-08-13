@@ -112,7 +112,7 @@ public struct ChatWidgetView: View {
         .background(config.appearance.background.ignoresSafeArea())
     }
 
-    /// Flash the "Text has been copied" confirmation over the transcript.
+    /// Flash the "Message copied" confirmation over the transcript.
     ///
     /// The token guard means copying a second message while the first
     /// toast is still on screen restarts the dwell rather than letting
@@ -504,7 +504,7 @@ private struct CopyConfirmationToast: View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.caption)
-            Text("Text has been copied")
+            Text("Message copied")
                 .font(.caption)
         }
         .foregroundColor(appearance.textPrimary)
@@ -519,6 +519,6 @@ private struct CopyConfirmationToast: View {
                 .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Text has been copied")
+        .accessibilityLabel("Message copied")
     }
 }
