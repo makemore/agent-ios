@@ -117,6 +117,25 @@ public struct InputView: View {
     /// ``maxConsecutiveRecognitionFailures``.
     @State private var recognitionFailures: Int = 0
     private let maxConsecutiveRecognitionFailures: Int = 3
+    /// Focus on the composer's text field. Held explicitly so the field
+    /// can stay first responder across the dictation transition — the
+    /// keyboard must not collapse when the mic starts.
+    @FocusState private var isInputFocused: Bool
+
+    /// Binding used by the composer's text field. Writes are dropped
+    /// while dictating: the transcript owns the field for the duration,
+    /// so the keyboard stays on screen but typing into it does nothing.
+    /// Dictation itself assigns ``inputText`` directly and so is
+    /// unaffected.
+    private var composerTextBinding: Binding<String> {
+        Binding(
+            get: { inputText },
+            set: { newValue in
+                guard !isRecording else { return }
+                inputText = newValue
+            }
+        )
+    }
 
 
     public var body: some View {
@@ -235,11 +254,12 @@ public struct InputView: View {
     /// Ends dictation and keeps whatever has been transcribed in the
     /// composer so the user can edit it before sending. The counterpart
     /// to ``sendMessage`` while recording.
+    ///
+    /// Deliberately leaves the keyboard up: the whole point of `stop` is
+    /// to review and edit the transcript, so dismissing it here would just
+    /// mean tapping the field again.
     private func stopDictation() {
         stopRecording()
-        #if canImport(UIKit)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        #endif
     }
     
     private func toggleRecording() {
@@ -516,26 +536,35 @@ public struct InputView: View {
             }
 
             HStack(alignment: .center, spacing: 8) {
-                if isRecording {
-                    dictationControls(accent: config.primaryColor,
-                                      secondary: .secondary)
-                } else {
-                    if config.enableFiles {
-                        Button(action: { activeSheet = .addToChat }) {
-                            Image(systemName: "paperclip")
-                                .font(.title3)
-                                .foregroundColor(.secondary)
-                        }
+                if !isRecording, config.enableFiles {
+                    Button(action: { activeSheet = .addToChat }) {
+                        Image(systemName: "paperclip")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
                     }
+                }
 
-                    TextField(config.placeholder, text: $inputText, axis: .vertical)
+                ZStack(alignment: .leading) {
+                    TextField(config.placeholder, text: composerTextBinding, axis: .vertical)
                         .id(composerGeneration)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
-                        .padding(10)
-                        .background(PlatformColors.systemGray6)
-                        .cornerRadius(20)
+                        .focused($isInputFocused)
+                        .opacity(isRecording ? 0 : 1)
+                        .allowsHitTesting(!isRecording)
 
+                    if isRecording {
+                        RecordingWaveformView(level: audioLevel, color: config.primaryColor)
+                    }
+                }
+                .padding(10)
+                .background(PlatformColors.systemGray6)
+                .cornerRadius(20)
+
+                if isRecording {
+                    dictationTrailingControls(accent: config.primaryColor,
+                                              secondary: .secondary)
+                } else {
                     if speechInputAvailable {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
@@ -564,31 +593,29 @@ public struct InputView: View {
                 attachedFilesView
             }
             HStack(alignment: .center, spacing: 8) {
-                if isRecording {
-                    dictationControls(accent: config.appearance.accent,
-                                      secondary: config.appearance.textSecondary)
-                } else {
-                    if config.enableFiles {
-                        circularIconButton(systemName: "plus") {
-                            activeSheet = .addToChat
-                        }
-                        .accessibilityLabel("Add to chat")
+                if !isRecording, config.enableFiles {
+                    circularIconButton(systemName: "plus") {
+                        activeSheet = .addToChat
                     }
-                    // Override (dynamic selection from the model picker) wins
-                    // over the static appearance label so the pill always
-                    // reflects the model the next turn will actually use. Gated
-                    // on `showModelSelector` (off by default) — the pill is the
-                    // only entry point to `ModelOptionsSheet`, so hiding it fully
-                    // suppresses the model selector for hosts that don't opt in.
-                    if config.showModelSelector,
-                       let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
-                       !label.isEmpty {
-                        modelPill(label: label)
-                    }
+                    .accessibilityLabel("Add to chat")
+                }
+                // Override (dynamic selection from the model picker) wins
+                // over the static appearance label so the pill always
+                // reflects the model the next turn will actually use. Gated
+                // on `showModelSelector` (off by default) — the pill is the
+                // only entry point to `ModelOptionsSheet`, so hiding it fully
+                // suppresses the model selector for hosts that don't opt in.
+                if !isRecording,
+                   config.showModelSelector,
+                   let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
+                   !label.isEmpty {
+                    modelPill(label: label)
+                }
 
+                ZStack(alignment: .leading) {
                     TextField(
                         config.placeholder,
-                        text: $inputText,
+                        text: composerTextBinding,
                         axis: .vertical
                     )
                         .id(composerGeneration)
@@ -597,8 +624,21 @@ public struct InputView: View {
                         .font(.body)
                         .foregroundColor(config.appearance.textPrimary)
                         .tint(config.appearance.accent)
-                        .padding(.leading, 6)
+                        .focused($isInputFocused)
+                        .opacity(isRecording ? 0 : 1)
+                        .allowsHitTesting(!isRecording)
 
+                    if isRecording {
+                        RecordingWaveformView(level: audioLevel,
+                                              color: config.appearance.accent)
+                    }
+                }
+                .padding(.leading, 6)
+
+                if isRecording {
+                    dictationTrailingControls(accent: config.appearance.accent,
+                                              secondary: config.appearance.textSecondary)
+                } else {
                     if speechInputAvailable {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
@@ -624,15 +664,13 @@ public struct InputView: View {
         .background(config.appearance.background)
     }
 
-    /// Composer contents while dictating: live waveform, then stop and
-    /// send. `stop` ends the mic and leaves the transcript in the field;
-    /// `send` submits it. Shared by both composer styles, which differ
-    /// only in their colour sources.
+    /// Trailing controls while dictating: stop, then send. `stop` ends the
+    /// mic and leaves the transcript in the field for editing; `send`
+    /// submits it. The waveform itself sits inside the field's slot so the
+    /// text field can stay mounted underneath it. Shared by both composer
+    /// styles, which differ only in their colour sources.
     @ViewBuilder
-    private func dictationControls(accent: Color, secondary: Color) -> some View {
-        RecordingWaveformView(level: audioLevel, color: accent)
-            .padding(.leading, 8)
-
+    private func dictationTrailingControls(accent: Color, secondary: Color) -> some View {
         Button(action: stopDictation) {
             Image(systemName: "stop.fill")
                 .font(.title3)
