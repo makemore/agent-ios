@@ -95,6 +95,10 @@ public struct ChatWidgetConfig {
     public var enableMarkdown: Bool
 
     /// Show TTS toggle button
+    /// No longer rendered: the global TTS mute made sense when replies
+    /// spoke automatically; with playback only ever started from a
+    /// message's speaker button there is nothing to mute. Retained so
+    /// existing host configs keep compiling.
     public var showTTSButton: Bool
 
     /// Enable text-to-speech

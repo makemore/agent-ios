@@ -201,6 +201,12 @@ public struct ChatWidgetView: View {
                         speakingMessageId = nil
                     } else {
                         voiceController.stop()
+                        // With the global mute toggle gone, an explicit
+                        // play tap is the "try again" affordance: it
+                        // clears the session-wide unavailable latch a
+                        // provider failure may have set, so playback can
+                        // recover without an app restart.
+                        voiceController.setEnabled(true)
                         speakingMessageId = message.id
                         voiceController.finishTurn(finalText: message.content)
                     }
@@ -224,8 +230,8 @@ public struct ChatWidgetView: View {
                 }
             }
 
-            // System picker / TTS toggle row — bottom-right, above input
-            if config.showSystemPicker || config.showTTSButton {
+            // System picker row — bottom-right, above input
+            if config.showSystemPicker {
                 HStack {
                     // Show current system name if selected
                     if config.showSystemPicker,
@@ -243,22 +249,6 @@ public struct ChatWidgetView: View {
                     }
 
                     Spacer()
-
-                    // TTS toggle: shows speaker icon, fills/animates while
-                    // playback is active. Tapping toggles ``enableTTS`` on
-                    // the controller — disabling cuts off any in-flight
-                    // audio so the user isn't trapped listening to the rest.
-                    if config.showTTSButton {
-                        Button(action: { voiceController.setEnabled(!voiceController.isEnabled) }) {
-                            Image(systemName: ttsIconName)
-                                .font(.body)
-                                .foregroundColor(voiceController.isEnabled ? config.primaryColor : .secondary)
-                                .padding(8)
-                                .background(PlatformColors.systemGray6)
-                                .clipShape(Circle())
-                        }
-                        .accessibilityLabel(voiceController.isEnabled ? "Disable voice output" : "Enable voice output")
-                    }
 
                     if config.showSystemPicker {
                         Button(action: { showSystemPicker = true }) {
@@ -367,13 +357,6 @@ public struct ChatWidgetView: View {
         .sheet(isPresented: $showModelOptions) {
             ModelOptionsSheet(config: config, viewModel: viewModel)
         }
-    }
-
-    /// Speaker icon: filled when speech is enabled, ``.3`` waves while
-    /// playback is in flight, slashed when muted.
-    private var ttsIconName: String {
-        if !voiceController.isEnabled { return "speaker.slash.fill" }
-        return voiceController.isSpeaking ? "speaker.wave.3.fill" : "speaker.wave.2.fill"
     }
 
     /// Top bar shown when `config.showInternalTopBar` is `true`. Left
