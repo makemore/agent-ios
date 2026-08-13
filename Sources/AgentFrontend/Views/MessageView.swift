@@ -357,9 +357,9 @@ public struct MessageView: View {
             Text(message.timestamp, style: .time)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-                // The icons' hit frames end ~11pt past the last glyph, so
+                // The icons' hit frames end ~8pt past the last glyph, so
                 // this tops the timestamp gap up to match the icon spread.
-                .padding(.leading, 11)
+                .padding(.leading, 9)
         }
     }
     
@@ -404,12 +404,12 @@ private extension View {
     /// makes the padded frame hit-testable rather than just the drawn
     /// pixels.
     ///
-    /// 36pt around a ~13pt subheadline glyph leaves ~11pt each side, so
-    /// two adjacent icons sit ~22pt apart — the deliberate spread of the
-    /// row — while height stays generous because nothing crowds the row
-    /// vertically.
+    /// 30pt around a ~13pt subheadline glyph leaves ~8pt each side, so
+    /// two adjacent icons sit ~17pt apart — wider than the original 12pt
+    /// row but tighter than the 22pt it briefly had — while height stays
+    /// generous because nothing crowds the row vertically.
     func actionIconHitTarget() -> some View {
-        self.frame(minWidth: 36, minHeight: 36)
+        self.frame(minWidth: 30, minHeight: 36)
             .contentShape(Rectangle())
     }
 }
