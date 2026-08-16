@@ -464,7 +464,9 @@ public class ChatViewModel: ObservableObject {
         files: [FileAttachment] = [],
         model: String? = nil,
         thinking: Bool = false,
-        supersedeFromMessageIndex: Int? = nil
+        supersedeFromMessageIndex: Int? = nil,
+        supersedeOriginalContent: String? = nil,
+        supersedeUserMessageOrdinal: Int? = nil
     ) async {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
 
@@ -518,6 +520,8 @@ public class ChatViewModel: ObservableObject {
                 model: resolvedModel,
                 thinking: thinking,
                 supersedeFromMessageIndex: supersedeFromMessageIndex,
+                supersedeOriginalContent: supersedeOriginalContent,
+                supersedeUserMessageOrdinal: supersedeUserMessageOrdinal,
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
                 systemVersionId: selectedSystemVersionId,
                 ephemeral: config.ephemeral,
@@ -1187,11 +1191,24 @@ public class ChatViewModel: ObservableObject {
         let messageToEdit = messages[index]
         guard messageToEdit.role == .user else { return }
 
+        // Captured before truncation: the original text and the message's
+        // ordinal among user-role rows let the backend find the exact run
+        // to supersede from, independent of display-row drift.
+        let originalContent = messageToEdit.content
+        let userOrdinal = messages.prefix(index).filter { $0.role == .user }.count
+
         // Truncate messages to just before this message
         messages = Array(messages.prefix(index))
 
         // Send the edited message with supersede flag
-        await sendMessage(newContent, model: model, thinking: thinking, supersedeFromMessageIndex: index)
+        await sendMessage(
+            newContent,
+            model: model,
+            thinking: thinking,
+            supersedeFromMessageIndex: index,
+            supersedeOriginalContent: originalContent,
+            supersedeUserMessageOrdinal: userOrdinal
+        )
     }
 
     /// Retry from a specific message
@@ -1216,11 +1233,20 @@ public class ChatViewModel: ObservableObject {
             return
         }
 
+        let userOrdinal = messages.prefix(userMessageIndex).filter { $0.role == .user }.count
+
         // Truncate messages to just before the user message
         messages = Array(messages.prefix(userMessageIndex))
 
         // Resend the same message with supersede flag
-        await sendMessage(userMessage.content, model: model, thinking: thinking, supersedeFromMessageIndex: userMessageIndex)
+        await sendMessage(
+            userMessage.content,
+            model: model,
+            thinking: thinking,
+            supersedeFromMessageIndex: userMessageIndex,
+            supersedeOriginalContent: userMessage.content,
+            supersedeUserMessageOrdinal: userOrdinal
+        )
     }
 
     // MARK: - Private Methods

@@ -72,6 +72,8 @@ extension APIClient {
         model: String? = nil,
         thinking: Bool = false,
         supersedeFromMessageIndex: Int? = nil,
+        supersedeOriginalContent: String? = nil,
+        supersedeUserMessageOrdinal: Int? = nil,
         agentKeyOverride: String? = nil,
         systemVersionId: String? = nil,
         ephemeral: Bool = false,
@@ -101,6 +103,17 @@ extension APIClient {
 
         if let index = supersedeFromMessageIndex {
             body["supersedeFromMessageIndex"] = index
+        }
+
+        // Robust edit/retry hints: the edited user message's original text
+        // and its ordinal among user-role messages. The backend prefers
+        // these over the display-row index above, which can drift from the
+        // server's transcript (tool rows, hidden trigger messages).
+        if let original = supersedeOriginalContent {
+            body["supersedeOriginalContent"] = original
+        }
+        if let ordinal = supersedeUserMessageOrdinal {
+            body["supersedeUserMessageOrdinal"] = ordinal
         }
 
         if let systemVersionId = systemVersionId {
