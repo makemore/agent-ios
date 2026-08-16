@@ -19,7 +19,12 @@ let package = Package(
             targets: ["AgentFrontend"]
         ),
     ],
-    dependencies: [],
+    dependencies: [
+        // On-device Whisper transcription for the `.whisper` dictation
+        // backend. Model weights are fetched from Hugging Face on first
+        // use, not bundled.
+        .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
+    ],
     targets: [
         .target(
             name: "AgentClient",
@@ -28,7 +33,10 @@ let package = Package(
         ),
         .target(
             name: "AgentFrontend",
-            dependencies: ["AgentClient"],
+            dependencies: [
+                "AgentClient",
+                .product(name: "WhisperKit", package: "WhisperKit"),
+            ],
             path: "Sources/AgentFrontend"
         ),
         .testTarget(

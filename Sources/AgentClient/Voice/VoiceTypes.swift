@@ -25,6 +25,23 @@ public enum SpeechInputPolicy: Equatable {
     case disabled
 }
 
+/// Which engine turns mic audio into text for dictation.
+public enum DictationBackend: Equatable {
+    /// Apple's system recognizer (`SFSpeechRecognizer`) — the same engine
+    /// behind the keyboard mic button. Subject to `SpeechInputPolicy` for
+    /// on-device vs Apple-server recognition.
+    case system
+    /// On-device OpenAI Whisper via WhisperKit. Nothing leaves the device;
+    /// `SpeechInputPolicy.localOnly` is inherently satisfied. `model` is a
+    /// WhisperKit model name from the `argmaxinc/whisperkit-coreml` repo,
+    /// e.g. "openai_whisper-base.en" or "openai_whisper-small.en".
+    /// Weights are downloaded on first use and cached on device.
+    case whisper(model: String)
+
+    /// Reasonable accuracy/size default for phone-class hardware.
+    public static let defaultWhisperModel = "openai_whisper-base.en"
+}
+
 /// Host-visible voice output status.
 public enum VoiceMode: Equatable {
     case remote

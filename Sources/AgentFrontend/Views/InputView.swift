@@ -117,7 +117,8 @@ public struct InputView: View {
     /// reversion is judged against. See ``isMultiline``.
     @State private var narrowFieldWidth: CGFloat = 0
 
-    /// Height above which a single-row field has visibly wrapped.
+    /// Height above which the field has visibly wrapped to two lines —
+    /// the observed-wrap fallback in the field's geometry reader.
     private var multilineHeightThreshold: CGFloat {
         #if canImport(UIKit)
         return UIFont.preferredFont(forTextStyle: .body).lineHeight * 1.5
@@ -126,36 +127,139 @@ public struct InputView: View {
         #endif
     }
 
-    /// Width the text would occupy laid out on one line, for the
-    /// reversion check.
+    /// Width the text would occupy laid out on one line.
     private func singleLineTextWidth(_ text: String) -> CGFloat {
         #if canImport(UIKit)
         return (text as NSString).size(
             withAttributes: [.font: UIFont.preferredFont(forTextStyle: .body)]
         ).width
         #else
-        // No cheap text measurement available: stay expanded until the
-        // field empties rather than guessing.
-        return .greatestFiniteMagnitude
+        return 0
         #endif
     }
 
-    private func handleFieldGeometryChange(height: CGFloat, width: CGFloat) {
-        guard !isRecording, !isMultiline else { return }
-        if height > multilineHeightThreshold {
-            narrowFieldWidth = width
-            isMultiline = true
+    /// Curve for composer growth — see the `.animation` modifiers in
+    /// `body`. A near-critically-damped spring: an ease-out of the same
+    /// length reads slightly abrupt at the end of the motion.
+    private static let growthAnimation = Animation.spring(response: 0.3, dampingFraction: 0.9)
+
+    /// True for the single UI pass in which `isMultiline` flips. The
+    /// TextField reads it in a `.transaction` modifier to opt out of
+    /// animating that pass: animating the field's width makes the text
+    /// wrap at every intermediate width, and a focused vertical-axis
+    /// field keeps that wrapped two-line layout after the width settles
+    /// (device-verified: h=57 at w=343 with 271 pt of text, until the
+    /// next user edit re-laid it out). Snapping the field straight to
+    /// its final width lays the text out exactly once, while the
+    /// buttons and container still animate around it.
+    @State private var fieldSkipsAnimation = false
+
+    /// Height the field most recently rendered at (from its geometry
+    /// reader). Known-correct by definition — it is what is on screen.
+    @State private var lastRenderedFieldHeight: CGFloat = 0
+    /// While non-nil, the field's height is forced to this value. Set
+    /// across a restructure: a focused vertical-axis field answers its
+    /// FIRST height query at a new width from its old text layout
+    /// (device-verified: 57 pt at a width where the text is one line),
+    /// and letting that answer render is the bounce. Pinning the field
+    /// to its last real height keeps the bogus answer off screen; the
+    /// pin is released one pass later, when re-measures are reliable —
+    /// for typing-driven flips the released height equals the pinned
+    /// one, so nothing moves.
+    @State private var pinnedFieldHeight: CGFloat?
+
+    /// Text as it stood when the current pin was set. The pin is
+    /// released only when a DIFFERENT text arrives: a text change is
+    /// the one event that makes the field re-measure correctly.
+    /// (Releasing after a timer or an extra layout pass re-exposes the
+    /// bogus height — device-verified: 57 pt rendered on release, fixed
+    /// only by the next keystroke.)
+    @State private var pinnedText = ""
+
+    /// Flips `isMultiline` with the field's animation suppressed and its
+    /// height pinned — every flip site must go through here. The pin
+    /// stays until the next text change (see `pinnedText`); for a
+    /// boundary flip the pinned height IS the correct height, so a
+    /// held pin looks right indefinitely.
+    private func setMultiline(_ value: Bool, reason: String, forText text: String) {
+        guard value != isMultiline else { return }
+        AgentLog.debug(.input, "[Layout] isMultiline \(isMultiline) -> \(value) (\(reason)) pinning h=\(Int(lastRenderedFieldHeight))")
+        fieldSkipsAnimation = true
+        if lastRenderedFieldHeight > 0 {
+            pinnedFieldHeight = lastRenderedFieldHeight
+            pinnedText = text
+        }
+        isMultiline = value
+        DispatchQueue.main.async {
+            fieldSkipsAnimation = false
         }
     }
 
-    private func handleInputTextChangeForLayout(_ text: String) {
-        guard isMultiline, !isRecording else { return }
-        if text.isEmpty {
-            isMultiline = false
-        } else if !text.contains("\n"),
-                  singleLineTextWidth(text) < narrowFieldWidth - 4 {
-            isMultiline = false
+    /// Records the single-row field width the multiline decision measures
+    /// against. Only while single-row — the two-row field is full-card
+    /// width, which is not the width that decides anything.
+    private func handleFieldWidthChange(_ width: CGFloat) {
+        guard !isRecording, !isMultiline, width > 0 else { return }
+        if width != narrowFieldWidth {
+            AgentLog.debug(.input, "[Layout] narrowFieldWidth: \(Int(narrowFieldWidth)) -> \(Int(width))")
         }
+        narrowFieldWidth = width
+    }
+
+    /// One ruler for both directions: the text needs two rows iff it
+    /// contains a newline or won't fit the single-row width. Expansion
+    /// and reversion previously used different measurements — expansion
+    /// keyed off the field's rendered height, reversion off computed text
+    /// width — and borderline text wrapped by one ruler but fit by the
+    /// other, so the composer expanded and then collapsed again on the
+    /// next keystroke. Rendered height is also an animated value, which
+    /// made the decision timing-sensitive; text width is not.
+    private func handleInputTextChangeForLayout(_ text: String, source: String = "onChange") {
+        guard !isRecording, narrowFieldWidth > 0 else {
+            AgentLog.debug(.input, "[Layout] eval(\(source)) skipped: recording=\(isRecording) narrow=\(Int(narrowFieldWidth))")
+            return
+        }
+        // Release a held pin on the first NEW text after the flip that
+        // set it — this text change is what makes the field re-measure
+        // correctly. Before the flip logic, so a flip triggered by this
+        // same text can re-pin.
+        if pinnedFieldHeight != nil, text != pinnedText {
+            AgentLog.debug(.input, "[Layout] releasing pin (\(source), text changed)")
+            withAnimation(Self.growthAnimation) {
+                pinnedFieldHeight = nil
+            }
+        }
+        if text.isEmpty {
+            setMultiline(false, reason: "\(source):empty", forText: text)
+            return
+        }
+        // The field never wraps on trailing whitespace, so trailing
+        // spaces must not count toward the wrap decision either —
+        // otherwise spaces trigger a restructure the field visually
+        // has no reason for.
+        let wrapText = text.hasSuffix(" ")
+            ? String(text[..<(text.lastIndex(where: { $0 != " " }).map(text.index(after:)) ?? text.startIndex)])
+            : text
+        #if canImport(UIKit)
+        let textWidth = singleLineTextWidth(wrapText)
+        // Hysteresis: expand only once the text genuinely exceeds the
+        // single-row width; collapse only once it is comfortably back
+        // under. The band between the two keeps borderline text stable.
+        let needsTwoRows: Bool
+        if text.contains("\n") {
+            needsTwoRows = true
+        } else if isMultiline {
+            needsTwoRows = textWidth >= narrowFieldWidth - 4
+        } else {
+            needsTwoRows = textWidth > narrowFieldWidth
+        }
+        AgentLog.debug(.input, "[Layout] eval(\(source)): chars=\(text.count) textWidth=\(Int(textWidth)) narrow=\(Int(narrowFieldWidth)) newline=\(text.contains("\n")) needsTwoRows=\(needsTwoRows) isMultiline=\(isMultiline)")
+        #else
+        // No cheap text measurement off UIKit: expand on explicit
+        // newlines only.
+        let needsTwoRows = text.contains("\n")
+        #endif
+        setMultiline(needsTwoRows, reason: source, forText: text)
     }
 
     /// Binding used by the composer's text field. Writes are dropped
@@ -169,6 +273,13 @@ public struct InputView: View {
             set: { newValue in
                 guard !isRecording else { return }
                 inputText = newValue
+                // Synchronously, not via onChange: the layout decision
+                // must land in the SAME transaction as the text so the
+                // field animates straight to its final shape. onChange
+                // fires a pass later — the field first renders wrapped
+                // at the narrow width, then restructures, which is the
+                // two-step growth this composer kept exhibiting.
+                handleInputTextChangeForLayout(newValue, source: "typing")
             }
         )
     }
@@ -185,6 +296,14 @@ public struct InputView: View {
             case .anthropic:  anthropicComposer
             }
         }
+        // The box grows (and shrinks) smoothly, whatever caused it —
+        // typing past a line, a transcript chunk landing, or the
+        // one-row ↔ two-row restructure. Both decisions come from the
+        // same text-width measurement in `handleInputTextChangeForLayout`
+        // and change together in the same update, so the two keys animate
+        // as one motion.
+        .animation(Self.growthAnimation, value: inputText)
+        .animation(Self.growthAnimation, value: isMultiline)
         .sheet(item: $activeSheet, onDismiss: {
             // If "Add files" was tapped inside the AddToChat sheet,
             // hand off to the file picker once SwiftUI has fully
@@ -218,8 +337,14 @@ public struct InputView: View {
                 }
             }
         }
+        .onAppear {
+            // Whisper's model load (and first-run download) takes long
+            // enough that starting it at mic-tap time would mean seconds
+            // of silent waveform. Warm it as soon as the composer exists.
+            DictationEngine.preload(config: config)
+        }
         .onDisappear {
-            dictation.stop()
+            dictation.cancel()
         }
     }
     
@@ -273,9 +398,11 @@ public struct InputView: View {
         composerGeneration += 1
 
         // Dictation is a one-shot: sending always ends the mic session.
-        // There is no hands-free loop to hand the mic back to.
+        // There is no hands-free loop to hand the mic back to. cancel(),
+        // not stop(): the message is already on its way, so a late final
+        // transcript (Whisper) must not repopulate the cleared field.
         if dictation.isRecording {
-            dictation.stop()
+            dictation.cancel()
         } else {
             #if canImport(UIKit)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -300,8 +427,17 @@ public struct InputView: View {
     /// what it held before dictation started, throwing the transcript
     /// away. The counterpart to ``stopDictation``, which keeps it.
     private func cancelDictation() {
-        dictation.stop()
+        dictation.cancel()
         inputText = dictationPrefix
+    }
+
+    /// Shown in the mic's slot between stopping a Whisper dictation and
+    /// its final transcript landing (~1–2 s). Without it the composer
+    /// looks finished-and-empty while the transcription is still coming.
+    private var transcribingIndicator: some View {
+        ProgressView()
+            .frame(width: 36, height: 36)
+            .accessibilityLabel("Transcribing")
     }
 
     /// Leading ✕ shown while dictating, immediately left of the waveform.
@@ -342,8 +478,12 @@ public struct InputView: View {
                     newText = ""
                 }
                 inputText = newText
+                // Same transaction as the text write — see
+                // `composerTextBinding`.
+                handleInputTextChangeForLayout(newText, source: "dictation")
             }
-            dictation.start(policy: effectiveSpeechInputPolicy)
+            dictation.start(policy: effectiveSpeechInputPolicy,
+                            backend: config.dictationBackend)
         }
     }
     
@@ -404,7 +544,9 @@ public struct InputView: View {
                                               secondary: .secondary,
                                               fill: PlatformColors.systemGray6)
                 } else {
-                    if speechInputAvailable {
+                    if dictation.isTranscribing {
+                        transcribingIndicator
+                    } else if speechInputAvailable {
                         Button(action: { toggleRecording() }) {
                             Image(systemName: "mic")
                                 .font(.title3)
@@ -478,13 +620,64 @@ public struct InputView: View {
                             .font(.body)
                             .foregroundColor(config.appearance.textPrimary)
                             .tint(config.appearance.accent)
+                            // NOTE: no `.fixedSize(vertical:)` here — it
+                            // makes the field ignore imposed heights,
+                            // which silently defeats the `pinnedFieldHeight`
+                            // guard below (device-verified: rendered 57
+                            // while pinned to 29).
+                            // See `fieldSkipsAnimation`: the field must
+                            // not animate its width through a restructure
+                            // or its text wraps at intermediate widths
+                            // and sticks there.
+                            .transaction { t in
+                                if fieldSkipsAnimation { t.animation = nil }
+                            }
+                            // Measured HERE, on the field itself — not on
+                            // the padded ZStack around it. The ZStack
+                            // width overstates the usable text width by
+                            // its leading padding, which put the computed
+                            // wrap point past the real one: the text
+                            // wrapped vertically while the layout math
+                            // still said it fit (verified on device:
+                            // wrapped at textWidth=257 against a 261
+                            // "width" that was really 255 + 6 padding).
+                            .background(GeometryReader { g in
+                                Color.clear
+                                    .onAppear {
+                                        handleFieldWidthChange(g.size.width)
+                                        // onChange never fires for the
+                                        // initial height, and the first
+                                        // flip needs a known-good height
+                                        // to pin.
+                                        lastRenderedFieldHeight = g.size.height
+                                    }
+                                    .onChange(of: g.size.width) { newWidth in
+                                        handleFieldWidthChange(newWidth)
+                                    }
+                                    .onChange(of: g.size.height) { h in
+                                        AgentLog.debug(.input, "[Layout] field rendered h=\(Int(h)) w=\(Int(g.size.width)) recording=\(isRecording) isMultiline=\(isMultiline) pinned=\(pinnedFieldHeight.map { Int($0) } ?? -1)")
+                                        if !isRecording, pinnedFieldHeight == nil {
+                                            lastRenderedFieldHeight = h
+                                        }
+                                        // Observed-wrap fallback: the
+                                        // width math is an estimate; the
+                                        // rendered height is ground
+                                        // truth. If the field has
+                                        // genuinely wrapped while still
+                                        // single-row, expand regardless
+                                        // of what the math said.
+                                        if !isRecording, !isMultiline, h > multilineHeightThreshold {
+                                            setMultiline(true, reason: "renderedWrap", forText: inputText)
+                                        }
+                                    }
+                            })
                             .opacity(isRecording ? 0 : 1)
                             .allowsHitTesting(!isRecording)
                             // Zero opacity still occupies layout, and a
                             // vertical-axis field grows with its content — so a
                             // long transcript would push the composer taller
                             // behind the waveform. Clamp it while hidden.
-                            .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
+                            .frame(height: isRecording ? RecordingWaveformView.preferredHeight : pinnedFieldHeight)
 
                         if isRecording {
                             RecordingWaveformView(level: dictation.audioLevel,
@@ -492,24 +685,15 @@ public struct InputView: View {
                         }
                     }
                     .padding(.leading, 6)
-                    .background(GeometryReader { g in
-                        Color.clear
-                            .onAppear {
-                                handleFieldGeometryChange(height: g.size.height,
-                                                          width: g.size.width)
-                            }
-                            .onChange(of: g.size.height) { newHeight in
-                                handleFieldGeometryChange(height: newHeight,
-                                                          width: g.size.width)
-                            }
-                    })
 
                     if isRecording {
                         dictationTrailingControls(accent: config.appearance.accent,
                                                   secondary: config.appearance.textSecondary,
                                                   fill: config.appearance.surfaceElevated)
                     } else if !twoRow {
-                        if speechInputAvailable {
+                        if dictation.isTranscribing {
+                            transcribingIndicator
+                        } else if speechInputAvailable {
                             Button(action: { toggleRecording() }) {
                                 Image(systemName: "mic")
                                     .font(.title3)
@@ -537,7 +721,9 @@ public struct InputView: View {
                             modelPill(label: label)
                         }
                         Spacer(minLength: 0)
-                        if speechInputAvailable {
+                        if dictation.isTranscribing {
+                            transcribingIndicator
+                        } else if speechInputAvailable {
                             Button(action: { toggleRecording() }) {
                                 Image(systemName: "mic")
                                     .font(.title3)
@@ -561,6 +747,13 @@ public struct InputView: View {
         }
         .onChange(of: inputText) { newText in
             handleInputTextChangeForLayout(newText)
+        }
+        // The reveal at stop-dictation shows already-long text without a
+        // text change, so the layout decision must run once here too.
+        .onChange(of: isRecording) { recording in
+            if !recording {
+                handleInputTextChangeForLayout(inputText, source: "recordingEnd")
+            }
         }
         .background(config.appearance.background)
     }

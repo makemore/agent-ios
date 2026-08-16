@@ -13,11 +13,28 @@ import AgentClient
 /// the main queue; the caller owns any prefix-prepending (text that was
 /// in the field before the mic started).
 ///
+/// Two transcription backends, selected by `ChatWidgetConfig.dictationBackend`:
+/// Apple's `SFSpeechRecognizer` (`.system`) or on-device Whisper via
+/// WhisperKit (`.whisper`). The audio capture, level metering, session
+/// tokens and view-facing surface are identical for both.
+///
+/// `stop()` and `cancel()` differ only for the Whisper backend: Whisper's
+/// final transcription lands *after* teardown, so `stop()` keeps that
+/// late delivery (review-and-edit flows) while `cancel()` suppresses it
+/// (discard, send, dismiss — anywhere a late transcript would clobber
+/// state the user has already moved past).
+///
 /// All public methods must be called on the main queue. `@Published`
 /// properties are only mutated there.
 final class DictationEngine: ObservableObject {
 
     @Published private(set) var isRecording = false
+    /// True between a Whisper-backend `stop()` and its final transcript
+    /// landing (or failing). The window is real — the final pass takes
+    /// ~1–2 s — and without visible state it reads as "stop didn't
+    /// transcribe". Always false for the system backend, whose partials
+    /// are complete at stop time.
+    @Published private(set) var isTranscribing = false
     /// Normalised (0...1) mic level for the waveform. Computed from the
     /// same buffers the recognizer receives — one tap on the input node,
     /// a second one would throw.
@@ -42,64 +59,131 @@ final class DictationEngine: ObservableObject {
     private let maxConsecutiveFailures = 3
     /// Captured at `start()` so recycles honour the same policy.
     private var policy: SpeechInputPolicy = .automatic
+    /// Captured at `start()`; decides which teardown path `stop()` takes.
+    private var backend: DictationBackend = .system
+    /// Live only while a `.whisper` session is recording (and briefly
+    /// after `stop()`, until its final pass delivers).
+    private var whisperSession: WhisperDictationSession?
 
     // MARK: - Availability
 
+    /// Kick off any slow backend preparation (Whisper model download /
+    /// load) ahead of the first mic tap. No-op for the system backend;
+    /// idempotent, so call it freely from `onAppear`.
+    static func preload(config: ChatWidgetConfig) {
+        if case .whisper(let model) = config.dictationBackend {
+            WhisperDictationSession.preload(model: model)
+        }
+    }
+
     /// Whether a mic affordance should render at all.
     func isAvailable(config: ChatWidgetConfig) -> Bool {
-        #if targetEnvironment(simulator)
-        // The simulator's SFSpeechRecognizer reports available=true and
-        // then fails every recognition task it is asked to start. No
-        // pre-check catches this — every health signal the API exposes
-        // says yes — so dictation is simulator-off wholesale. Test it on
-        // hardware.
-        return false
-        #else
         guard config.enableVoice else { return false }
+        guard config.effectiveSpeechInputPolicy != .disabled else { return false }
         // A mic the user has switched off in Settings is a mic that does
         // not exist for this app: showing the button would only lead to a
         // dead tap. `.undetermined` still shows it — the permission
         // prompt fires on first use and that is how the user grants it
         // in the first place.
-        #if os(iOS)
+        #if os(iOS) && !targetEnvironment(simulator)
         if #available(iOS 17.0, *) {
             guard AVAudioApplication.shared.recordPermission != .denied else { return false }
         } else {
             guard AVAudioSession.sharedInstance().recordPermission != .denied else { return false }
         }
-        let speechAuth = SFSpeechRecognizer.authorizationStatus()
-        guard speechAuth != .denied, speechAuth != .restricted else { return false }
         #endif
-        switch config.effectiveSpeechInputPolicy {
-        case .disabled: return false
-        case .localOnly:
-            return recognizer?.supportsOnDeviceRecognition == true
-        case .automatic, .remote:
-            return recognizer?.isAvailable == true
+        switch config.dictationBackend {
+        case .whisper:
+            // Whisper needs no speech-recognition permission and no
+            // recognizer service — only the mic. It is fully on-device,
+            // so every non-disabled SpeechInputPolicy (localOnly
+            // included) is inherently satisfied. Works on the simulator
+            // too (CoreML on CPU — slow, but real).
+            return true
+        case .system:
+            #if targetEnvironment(simulator)
+            // The simulator's SFSpeechRecognizer reports available=true
+            // and then fails every recognition task it is asked to
+            // start. No pre-check catches this — every health signal the
+            // API exposes says yes — so system dictation is
+            // simulator-off wholesale. Test it on hardware.
+            return false
+            #else
+            #if os(iOS)
+            let speechAuth = SFSpeechRecognizer.authorizationStatus()
+            guard speechAuth != .denied, speechAuth != .restricted else { return false }
+            #endif
+            switch config.effectiveSpeechInputPolicy {
+            case .disabled: return false
+            case .localOnly:
+                return recognizer?.supportsOnDeviceRecognition == true
+            case .automatic, .remote:
+                return recognizer?.isAvailable == true
+            }
+            #endif
         }
-        #endif
     }
 
     // MARK: - Session control
 
-    func start(policy: SpeechInputPolicy) {
+    func start(policy: SpeechInputPolicy, backend: DictationBackend = .system) {
         guard !isRecording else { return }
-        guard let recognizer = recognizer, recognizer.isAvailable else { return }
         self.policy = policy
+        self.backend = backend
         failures = 0
+        // A previous session's pending final pass no longer owns the
+        // "transcribing" state once a new recording begins.
+        isTranscribing = false
 
-        SFSpeechRecognizer.requestAuthorization { status in
-            guard status == .authorized else { return }
-            DispatchQueue.main.async {
-                self.beginSession()
+        switch backend {
+        case .whisper(let model):
+            requestMicPermission { granted in
+                guard granted else { return }
+                DispatchQueue.main.async {
+                    self.beginWhisperSession(model: model)
+                }
+            }
+        case .system:
+            guard let recognizer = recognizer, recognizer.isAvailable else { return }
+            SFSpeechRecognizer.requestAuthorization { status in
+                guard status == .authorized else { return }
+                DispatchQueue.main.async {
+                    self.beginSession()
+                }
             }
         }
     }
 
+    /// Ends the session, keeping the transcript. For the Whisper backend
+    /// one final transcription lands through ``onTranscript`` shortly
+    /// after this returns — callers whose state must not change after
+    /// stopping (send, discard, dismiss) use ``cancel()`` instead.
     func stop() {
+        if case .whisper = backend, let session = whisperSession, isRecording {
+            whisperSession = nil
+            teardownAudio()
+            // After teardown so the final pass sees every buffer the tap
+            // delivered. The session outlives the engine's reference
+            // until its delivery completes; `onFinished` clears this.
+            isTranscribing = true
+            session.finish()
+            return
+        }
+        cancel()
+    }
+
+    /// Ends the session and guarantees nothing further is delivered.
+    func cancel() {
         // Bump first so any callback that fires between cancel() and the
         // next runloop tick is filtered out by the token guard.
         sessionToken &+= 1
+        whisperSession?.cancel()
+        whisperSession = nil
+        isTranscribing = false
+        teardownAudio()
+    }
+
+    private func teardownAudio() {
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
@@ -141,6 +225,76 @@ final class DictationEngine: ObservableObject {
             AgentLog.error("[Dictation] start failed: \(error)")
             stop()
         }
+    }
+
+    // MARK: - Whisper backend
+
+    private func beginWhisperSession(model: String) {
+        do {
+            #if os(iOS)
+            // Same category/mode as the system path — the two backends
+            // must be interchangeable without audio-session surprises.
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord,
+                                         mode: .default,
+                                         options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            #endif
+
+            let inputNode = audioEngine.inputNode
+            let format = inputNode.outputFormat(forBus: 0)
+            // Same invalid-format rejection as the system path — a
+            // mid-reconfiguration input node hands back 0 Hz / 0 ch.
+            guard format.sampleRate > 0, format.channelCount > 0 else {
+                AgentLog.error("[Whisper] invalid input format (sampleRate=\(format.sampleRate) channels=\(format.channelCount))")
+                return
+            }
+
+            let session = WhisperDictationSession(model: model)
+            // Capture the handler by value: if a new dictation session
+            // starts while this one's final pass is still running, the
+            // late delivery goes to the closure (and prefix) it was
+            // started with, not the new session's.
+            let handler = onTranscript
+            session.onTranscript = { text in handler?(text) }
+            session.onFinished = { [weak self] in
+                self?.isTranscribing = false
+            }
+
+            inputNode.removeTap(onBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+                session.append(buffer)
+                let level = DictationEngine.normalisedLevel(from: buffer)
+                DispatchQueue.main.async {
+                    self?.audioLevel = level
+                }
+            }
+
+            whisperSession = session
+            session.begin()
+            audioEngine.prepare()
+            try audioEngine.start()
+            isRecording = true
+        } catch {
+            AgentLog.error("[Whisper] start failed: \(error)")
+            cancel()
+        }
+    }
+
+    private func requestMicPermission(_ completion: @escaping (Bool) -> Void) {
+        #if os(iOS)
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.requestRecordPermission { granted in
+                completion(granted)
+            }
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                completion(granted)
+            }
+        }
+        #else
+        completion(true)
+        #endif
     }
 
     /// Installs a fresh recognition request, tap, and recognition task.

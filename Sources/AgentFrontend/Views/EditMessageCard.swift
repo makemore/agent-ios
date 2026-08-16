@@ -59,7 +59,7 @@ struct EditMessageCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
                 Button(action: {
-                    dictation.stop()
+                    dictation.cancel()
                     onCancel()
                 }) {
                     Image(systemName: "xmark")
@@ -74,7 +74,7 @@ struct EditMessageCard: View {
             HStack(alignment: .center, spacing: 8) {
                 if dictation.isRecording {
                     Button(action: {
-                        dictation.stop()
+                        dictation.cancel()
                         text = dictationPrefix
                     }) {
                         Image(systemName: "xmark")
@@ -124,6 +124,10 @@ struct EditMessageCard: View {
                     }
                     .accessibilityLabel("Stop dictation")
                     .accessibilityHint("Ends recording and keeps the transcribed text for editing.")
+                } else if dictation.isTranscribing {
+                    ProgressView()
+                        .frame(width: 36, height: 36)
+                        .accessibilityLabel("Transcribing")
                 } else if dictation.isAvailable(config: config) {
                     Button(action: startDictation) {
                         Image(systemName: "mic")
@@ -135,7 +139,10 @@ struct EditMessageCard: View {
                 }
 
                 Button(action: {
-                    dictation.stop()
+                    // cancel(), not stop(): the edit is committed with the
+                    // text as it stands — a late Whisper final must not
+                    // mutate the binding after send.
+                    dictation.cancel()
                     onSend()
                 }) {
                     Image(systemName: "arrow.up")
@@ -158,8 +165,10 @@ struct EditMessageCard: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(appearance.background)
+        // Same smooth growth as the composer when text changes height.
+        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: text)
         .onAppear { focused = true }
-        .onDisappear { dictation.stop() }
+        .onDisappear { dictation.cancel() }
     }
 
     private func startDictation() {
@@ -175,6 +184,7 @@ struct EditMessageCard: View {
             }
             text = newText
         }
-        dictation.start(policy: config.effectiveSpeechInputPolicy)
+        dictation.start(policy: config.effectiveSpeechInputPolicy,
+                        backend: config.dictationBackend)
     }
 }

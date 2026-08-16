@@ -117,6 +117,11 @@ public struct ChatWidgetConfig {
     /// the mic affordance fails closed.
     public var speechInputPolicy: SpeechInputPolicy
 
+    /// Which engine transcribes dictation. `.system` is Apple's
+    /// recognizer; `.whisper` runs OpenAI Whisper on-device via
+    /// WhisperKit (better accuracy, ~150 MB model download on first use).
+    public var dictationBackend: DictationBackend
+
     /// Enable file attachments
     public var enableFiles: Bool
 
@@ -317,6 +322,7 @@ public struct ChatWidgetConfig {
         self.enableVoice = true
         self.ttsProviderPolicy = .automatic
         self.speechInputPolicy = .automatic
+        self.dictationBackend = .system
         self.enableFiles = true
         self.showModelSelector = false
         self.showTasksTab = true
