@@ -246,6 +246,41 @@ final class WhisperDictationSession {
         }
     }
 
+    /// Non-speech events Whisper narrates instead of transcribing —
+    /// `[BLANK_AUDIO]` above all, but also `[SILENCE]`, `(music)`,
+    /// `[INAUDIBLE]` and friends.
+    ///
+    /// These are annotations from its training transcripts, not special
+    /// tokens, so `skipSpecialTokens` leaves them alone and they arrive as
+    /// ordinary text. In dictation that is never what the user meant to
+    /// say: it belongs in a subtitle file, not in the message they are
+    /// about to send. Hands-free makes it worse, because there the mic
+    /// idles between turns with nothing but room tone to transcribe, and
+    /// anything left in the field gets sent on the user's behalf.
+    ///
+    /// Only bracketed forms are stripped. Whisper reserves brackets and
+    /// parentheses for these annotations, so dictated speech doesn't
+    /// collide with them, and the vocabulary is enumerated rather than
+    /// "anything in brackets" so genuinely dictated parentheses survive.
+    private static let nonSpeechAnnotation: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"[\[\(]\s*(blank[\s_]*audio|silence|silent|no[\s_]*speech|inaudible|unintelligible|music|applause|laughter|laughs|laughing|coughs|coughing|sighs|clears throat|noise|static|beep|beeping|typing|clicking|breathing|footsteps|wind|sound\s*effects?|foreign(\s+language)?|speaking\s+in\s+foreign\s+language)\s*[\]\)][.,!?]?"#,
+        options: [.caseInsensitive])
+
+    /// Removes those annotations and tidies the whitespace they leave
+    /// behind. A transcript that was nothing else comes back empty, which
+    /// callers already treat as "nothing was said".
+    static func stripNonSpeechAnnotations(_ text: String) -> String {
+        guard let regex = nonSpeechAnnotation, !text.isEmpty else { return text }
+        let cleaned = regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: " ")
+        return cleaned
+            .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private static func transcribe(_ audio: [Float], with whisper: WhisperKit) async -> String? {
         do {
             var options = DecodingOptions()
@@ -254,9 +289,10 @@ final class WhisperDictationSession {
             options.withoutTimestamps = true
             options.temperature = 0
             let results = try await whisper.transcribe(audioArray: audio, decodeOptions: options)
-            return results.map(\.text)
+            let joined = results.map(\.text)
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            return stripNonSpeechAnnotations(joined)
         } catch is CancellationError {
             // Expected: stop()/cancel() interrupts the in-flight partial
             // pass. Not an error, and the final pass follows it.
