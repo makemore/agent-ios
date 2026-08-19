@@ -103,6 +103,27 @@ final class DictationEngine: ObservableObject {
     /// mic. Wired to `VoiceController.recentSpokenText`.
     var agentSpokenText: (() -> String)?
 
+    /// Fires while the user is audibly speaking during their own turn, so
+    /// hands-free can tell "still talking" from "stopped".
+    ///
+    /// This has to come from the mic level, not from the transcript. The
+    /// Whisper backend re-transcribes the *entire* utterance on every pass
+    /// and runs on CPU, so passes start about a second apart and drift
+    /// further as the utterance grows — well past any sane silence
+    /// timeout. A countdown driven by transcript growth alone therefore
+    /// completes mid-sentence and sends half a thought.
+    ///
+    /// Throttled to ``voiceActivityInterval``: the tap delivers a buffer
+    /// roughly every 21ms and the consumer restarts a timer on each call.
+    var onVoiceActivity: (() -> Void)?
+
+    /// Normalised level at or above which the mic is hearing speech rather
+    /// than room tone. `normalisedLevel` puts conversational speech around
+    /// 0.3–0.6 and a quiet room below 0.15.
+    private let voiceActivityThreshold: CGFloat = 0.2
+    private let voiceActivityInterval: TimeInterval = 0.25
+    private var lastVoiceActivityAt: TimeInterval = 0
+
     /// Barge-in monitor: a second recognizer that runs only during
     /// `.agentSpeaking` and whose transcripts never reach the composer.
     private var monitorRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -296,10 +317,24 @@ final class DictationEngine: ObservableObject {
             let level = DictationEngine.normalisedLevel(from: buffer)
             DispatchQueue.main.async {
                 self.audioLevel = level
+                self.noteLevelForVoiceActivity(level)
             }
         }
         tapInstalled = true
         return true
+    }
+
+    /// Reports speech to ``onVoiceActivity``, throttled, and only during
+    /// the user's own turn — during the agent's, anything the mic picks up
+    /// is either leak-back or a barge-in, and neither should look like the
+    /// user still holding the floor.
+    private func noteLevelForVoiceActivity(_ level: CGFloat) {
+        guard continuous, phase == .listening, onVoiceActivity != nil else { return }
+        guard level >= voiceActivityThreshold else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastVoiceActivityAt >= voiceActivityInterval else { return }
+        lastVoiceActivityAt = now
+        onVoiceActivity?()
     }
 
     private func removeSharedTap() {

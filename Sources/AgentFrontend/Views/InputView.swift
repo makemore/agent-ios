@@ -565,12 +565,14 @@ public struct InputView: View {
                 if newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     newText = ""
                 }
-                // Growth, not mere inequality, is what says "still
-                // talking". Whisper re-transcribes the whole utterance on
-                // every pass, so a settled transcript can still come back
-                // reworded around the tail — and treating that as speech
-                // would restart the countdown forever and never send.
-                // Silence adds no words, so it cannot grow the text.
+                // Second of the two restart signals (the other is mic
+                // level): the transcription is still catching up, so don't
+                // send yet even if the user has already gone quiet.
+                //
+                // Growth, not mere inequality — Whisper re-transcribes the
+                // whole utterance every pass, so a settled transcript can
+                // come back reworded around the tail, and treating that as
+                // progress would hold the countdown open indefinitely.
                 let grew = newText.count > inputText.count
                 inputText = newText
                 // Same transaction as the text write — see
@@ -583,6 +585,14 @@ public struct InputView: View {
             if handsFree {
                 dictation.agentSpokenText = { [weak voiceController] in
                     voiceController?.recentSpokenText ?? ""
+                }
+                // Real-time "still talking" signal. Paired with the
+                // transcript-growth restart below, the countdown only
+                // completes once the user has gone quiet *and* the
+                // transcription has stopped catching up — either alone
+                // sends too early.
+                dictation.onVoiceActivity = {
+                    restartSilenceTimer()
                 }
                 dictation.onBargeIn = { [weak voiceController] in
                     // Stopping the controller ends the agent's turn, which
@@ -1077,7 +1087,10 @@ public struct InputView: View {
     private func micButton(tint: Color) -> some View {
         Button(action: { toggleRecording() }) {
             ZStack {
-                if countdownProgress > 0 {
+                // Only once there is something to send: room tone can trip
+                // the voice-activity threshold, and a ring counting down to
+                // nothing reads as the app about to act when it isn't.
+                if countdownProgress > 0, canSend {
                     Circle()
                         .trim(from: 0, to: countdownProgress)
                         .stroke(Color.red, style: StrokeStyle(lineWidth: 2, lineCap: .round))
