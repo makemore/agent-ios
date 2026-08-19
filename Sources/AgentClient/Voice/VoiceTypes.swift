@@ -42,6 +42,32 @@ public enum DictationBackend: Equatable {
     public static let defaultWhisperModel = "openai_whisper-base.en"
 }
 
+/// Tracks whether something is holding the shared `AVAudioSession` in a
+/// configuration that playback must not overwrite.
+///
+/// Playback normally reconfigures the session to `.playback`/`.spokenAudio`
+/// before every utterance — that is what gets TTS media-level loudness and
+/// A2DP over Bluetooth, and it repairs the route a previous dictation left
+/// behind. That is right whenever recording and playback take turns.
+///
+/// Hands-free conversation breaks that assumption: the mic stays open
+/// *through* playback so the user can interrupt by talking over the agent,
+/// which requires `.playAndRecord`/`.voiceChat` for the whole conversation.
+/// Reasserting `.playback` between sentences would tear the live input node
+/// down mid-turn. While a continuous session is running it claims ownership
+/// here and playback leaves the category alone.
+public enum AudioSessionOwner {
+    /// No claim — playback configures the session as it sees fit.
+    case unclaimed
+    /// A hands-free conversation owns the session for its duration.
+    case continuousVoice
+}
+
+public enum AudioSessionCoordinator {
+    /// Only ever read and written from the main queue.
+    public static var owner: AudioSessionOwner = .unclaimed
+}
+
 /// Host-visible voice output status.
 public enum VoiceMode: Equatable {
     case remote

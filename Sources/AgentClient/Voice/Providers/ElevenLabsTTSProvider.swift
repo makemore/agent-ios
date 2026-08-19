@@ -167,8 +167,15 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
     ///
     /// Also repairs the route after dictation, whose ``.playAndRecord``
     /// session would otherwise linger and quieten the next playback.
+    ///
+    /// Skipped entirely during a hands-free conversation: there the mic is
+    /// deliberately live through playback so the user can interrupt by
+    /// talking, and switching the category between sentences would tear
+    /// down the input node it is listening on. See
+    /// ``AudioSessionCoordinator``.
     private func configurePlaybackSession() {
         #if os(iOS)
+        guard AudioSessionCoordinator.owner == .unclaimed else { return }
         let session = AVAudioSession.sharedInstance()
         do {
             if session.category != .playback || session.mode != .spokenAudio {

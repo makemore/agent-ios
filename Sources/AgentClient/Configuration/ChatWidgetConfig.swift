@@ -107,6 +107,18 @@ public struct ChatWidgetConfig {
     /// Enable voice input
     public var enableVoice: Bool
 
+    /// Offer hands-free continuous conversation — the toggle beside the
+    /// mic that makes the composer send on a pause, speak the reply aloud,
+    /// and hand the mic straight back for the next turn.
+    ///
+    /// Off by default, and inert unless ``enableTTS`` and ``enableVoice``
+    /// are both on: without a voice to reply in there is no agent turn for
+    /// the loop to wait through. Hosts that opt in should expect the mic
+    /// to stay live through playback (that is what lets the user interrupt
+    /// by talking over the agent), which means a `.voiceChat` audio
+    /// session and its echo cancellation for the duration.
+    public var enableContinuousVoice: Bool
+
     /// Policy for choosing remote vs local/system TTS.
     /// In `privateOnly` mode, `.automatic` resolves to `.localOnly` so
     /// assistant text is not sent to remote voice providers by default.
@@ -320,6 +332,7 @@ public struct ChatWidgetConfig {
         self.showTTSButton = true
         self.enableTTS = false
         self.enableVoice = true
+        self.enableContinuousVoice = false
         self.ttsProviderPolicy = .automatic
         self.speechInputPolicy = .automatic
         self.dictationBackend = .system

@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Combine
 import AgentClient
 import Speech
 #if canImport(UIKit)
@@ -40,6 +41,14 @@ public struct InputView: View {
     /// falls back to local stub state.
     let viewModel: ChatViewModel?
 
+    /// End-of-turn signal from the voice controller, resolved once at init
+    /// rather than per body pass: `.onReceive` re-subscribes whenever the
+    /// publisher instance changes, and this one carries the event that
+    /// hands the mic back — not somewhere to be casually churning
+    /// subscriptions. Falls back to a publisher that never fires for hosts
+    /// with no voice controller wired.
+    private let agentTurnDidEnd: AnyPublisher<Void, Never>
+
     public init(config: ChatWidgetConfig,
                 isLoading: Bool,
                 isAgentSpeaking: Bool = false,
@@ -58,6 +67,8 @@ public struct InputView: View {
         self.onModelPillTap = onModelPillTap
         self.modelPillLabelOverride = modelPillLabelOverride
         self.viewModel = viewModel
+        self.agentTurnDidEnd = voiceController?.agentTurnDidEnd.eraseToAnyPublisher()
+            ?? Empty<Void, Never>(completeImmediately: false).eraseToAnyPublisher()
     }
 
     @State private var inputText: String = ""
@@ -99,7 +110,42 @@ public struct InputView: View {
     /// field back exactly as it was.
     @State private var dictationPrefix: String = ""
 
+    /// Hands-free continuous conversation. When on, the mic doesn't stop
+    /// at the end of an utterance: a pause auto-sends, the reply is spoken
+    /// aloud, and the mic comes back for the next turn — a spoken
+    /// back-and-forth with no tapping. Persisted, and off by default: a
+    /// fresh install should not land in a mode that sends on its own.
+    @AppStorage("voice.autoSend") private var autoSendEnabled: Bool = false
+
+    /// Counts down 1 → 0 over ``silenceTimeoutSeconds`` of quiet, drawn as
+    /// a ring around the mic. Restarted by every transcript change, so it
+    /// only reaches zero once the user has genuinely stopped talking.
+    @State private var silenceTimer: Task<Void, Never>?
+    @State private var countdownProgress: Double = 0
+    private let silenceTimeoutSeconds: Double = 3.0
+
     private var isRecording: Bool { dictation.isRecording }
+
+    /// Whether the *current* mic session is hands-free. Read from the
+    /// engine rather than from ``autoSendEnabled`` so toggling the setting
+    /// mid-utterance can't restyle a session that's already running.
+    private var isContinuous: Bool { dictation.continuous }
+
+    /// True while the agent holds the turn in continuous mode — the mic is
+    /// still live (feeding the barge-in monitor) but nothing it hears
+    /// reaches the composer.
+    private var agentHasTurn: Bool { dictation.phase == .agentSpeaking }
+
+    /// Whether the composer is in its one-shot dictation presentation:
+    /// text field hidden behind a live waveform, stop and send in place of
+    /// mic and send.
+    ///
+    /// Hands-free mode deliberately does *not* do this. There the field
+    /// stays visible with the transcript landing in it as you speak, and
+    /// the recording state reads from the mic itself — red, with the
+    /// silence countdown around it — because in a conversation you want to
+    /// see the words that are about to be sent on your behalf.
+    private var showsWaveform: Bool { isRecording && !isContinuous }
     /// Whether the composer is in its expanded two-row layout: text field
     /// full-width on top, controls on their own row underneath (the
     /// ChatGPT arrangement). Entered when the text wraps past one line;
@@ -199,7 +245,7 @@ public struct InputView: View {
     /// against. Only while single-row — the two-row field is full-card
     /// width, which is not the width that decides anything.
     private func handleFieldWidthChange(_ width: CGFloat) {
-        guard !isRecording, !isMultiline, width > 0 else { return }
+        guard !showsWaveform, !isMultiline, width > 0 else { return }
         if width != narrowFieldWidth {
             AgentLog.debug(.input, "[Layout] narrowFieldWidth: \(Int(narrowFieldWidth)) -> \(Int(width))")
         }
@@ -215,8 +261,12 @@ public struct InputView: View {
     /// next keystroke. Rendered height is also an animated value, which
     /// made the decision timing-sensitive; text width is not.
     private func handleInputTextChangeForLayout(_ text: String, source: String = "onChange") {
-        guard !isRecording, narrowFieldWidth > 0 else {
-            AgentLog.debug(.input, "[Layout] eval(\(source)) skipped: recording=\(isRecording) narrow=\(Int(narrowFieldWidth))")
+        // `showsWaveform`, not `isRecording`: hands-free keeps the field on
+        // screen, so its layout has to keep tracking the transcript as it
+        // grows. Only the waveform presentation — where the field is
+        // hidden and height-clamped — has nothing to measure.
+        guard !showsWaveform, narrowFieldWidth > 0 else {
+            AgentLog.debug(.input, "[Layout] eval(\(source)) skipped: waveform=\(showsWaveform) narrow=\(Int(narrowFieldWidth))")
             return
         }
         // Release a held pin on the first NEW text after the flip that
@@ -344,7 +394,20 @@ public struct InputView: View {
             DictationEngine.preload(config: config)
         }
         .onDisappear {
+            cancelSilenceTimer()
+            voiceController?.autoSpeakReplies = false
             dictation.cancel()
+        }
+        // The hands-free loop: the agent taking the turn, and giving it
+        // back. `isLoading` is only a fallback for a turn that never spoke.
+        .onChange(of: isAgentSpeaking) { speaking in
+            handleAgentSpeakingChanged(speaking)
+        }
+        .onChange(of: isLoading) { loading in
+            handleLoadingChanged(loading)
+        }
+        .onReceive(agentTurnDidEnd) { _ in
+            handleAgentTurnEnded()
         }
     }
     
@@ -397,11 +460,21 @@ public struct InputView: View {
         // Collapse the field back to one line — see `composerGeneration`.
         composerGeneration += 1
 
-        // Dictation is a one-shot: sending always ends the mic session.
-        // There is no hands-free loop to hand the mic back to. cancel(),
-        // not stop(): the message is already on its way, so a late final
-        // transcript (Whisper) must not repopulate the cleared field.
-        if dictation.isRecording {
+        cancelSilenceTimer()
+
+        if dictation.isRecording && isContinuous {
+            // Hands-free: the mic stays on across the whole conversation.
+            // Start a fresh utterance rather than ending the session — the
+            // user may keep talking while the reply is still coming.
+            // The next turn starts from an empty field, so it has no
+            // prefix to append to.
+            dictationPrefix = ""
+            dictation.beginUserTurn()
+        } else if dictation.isRecording {
+            // One-shot dictation: sending ends the mic session. cancel(),
+            // not stop(): the message is already on its way, so a late
+            // final transcript (Whisper) must not repopulate the cleared
+            // field.
             dictation.cancel()
         } else {
             #if canImport(UIKit)
@@ -457,19 +530,34 @@ public struct InputView: View {
 
     private func toggleRecording() {
         if dictation.isRecording {
+            cancelSilenceTimer()
+            // Leaving the conversation: replies go back to being silent
+            // unless the user asks for one.
+            voiceController?.autoSpeakReplies = false
             dictation.stop()
         } else {
-            // If a message is being read aloud, dictating supersedes it —
-            // and the two want incompatible audio-session categories.
+            // If a message is being read aloud, starting the mic supersedes
+            // it. (Only at the start of a session: within a hands-free
+            // conversation the mic is handed back and forth by
+            // `DictationEngine`, which never stops playback to do it.)
             voiceController?.stop()
-            // Snapshot existing text so dictation appends to it. Captured
-            // into the closure rather than held as view state, so a send
-            // can't resurrect a stale prefix.
+            // Snapshot existing text so dictation appends to it. Both a
+            // captured copy and view state — the transcript closure picks
+            // between them by mode; see the comment there.
             let prefix = inputText
             dictationPrefix = prefix
+            let handsFree = continuousAvailable && autoSendEnabled
             dictation.onTranscript = { transcribed in
-                let separator = prefix.isEmpty ? "" : " "
-                var newText = prefix + separator + transcribed
+                // One-shot dictation captures the prefix by value, so a
+                // send can't resurrect a stale one. Hands-free can't do
+                // that: its turns run back to back on a single mic
+                // session, and a captured prefix would re-prepend whatever
+                // was in the field when the conversation started to every
+                // turn after the first. It reads the state instead, which
+                // `sendMessage` clears at each turn boundary.
+                let base = handsFree ? dictationPrefix : prefix
+                let separator = base.isEmpty ? "" : " "
+                var newText = base + separator + transcribed
                 // Whitespace-only compositions (e.g. an empty partial
                 // against a bare separator) render as an empty field that
                 // still suppresses the placeholder — normalise them to
@@ -477,14 +565,127 @@ public struct InputView: View {
                 if newText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     newText = ""
                 }
+                // Growth, not mere inequality, is what says "still
+                // talking". Whisper re-transcribes the whole utterance on
+                // every pass, so a settled transcript can still come back
+                // reworded around the tail — and treating that as speech
+                // would restart the countdown forever and never send.
+                // Silence adds no words, so it cannot grow the text.
+                let grew = newText.count > inputText.count
                 inputText = newText
                 // Same transaction as the text write — see
                 // `composerTextBinding`.
                 handleInputTextChangeForLayout(newText, source: "dictation")
+                if handsFree, grew {
+                    restartSilenceTimer()
+                }
+            }
+            if handsFree {
+                dictation.agentSpokenText = { [weak voiceController] in
+                    voiceController?.recentSpokenText ?? ""
+                }
+                dictation.onBargeIn = { [weak voiceController] in
+                    // Stopping the controller ends the agent's turn, which
+                    // publishes `agentTurnDidEnd` and hands the mic back
+                    // through the same path a normal turn ending takes.
+                    voiceController?.stop()
+                }
+                // Replies are spoken aloud for as long as the conversation
+                // lasts — without this the loop has no agent turn to wait
+                // through, and the mic would come straight back.
+                voiceController?.setEnabled(true)
+                voiceController?.autoSpeakReplies = true
             }
             dictation.start(policy: effectiveSpeechInputPolicy,
-                            backend: config.dictationBackend)
+                            backend: config.dictationBackend,
+                            continuous: handsFree)
         }
+    }
+
+    // MARK: - Hands-free conversation
+
+    /// Whether the hands-free affordance should exist at all: the host has
+    /// opted in, and there is both a mic to listen with and a voice to
+    /// reply in. Without TTS the loop has no agent turn to wait through.
+    private var continuousAvailable: Bool {
+        config.enableContinuousVoice && config.enableTTS && speechInputAvailable
+    }
+
+    private func toggleAutoSend() {
+        autoSendEnabled.toggle()
+        // Switching it off mid-conversation must not leave a countdown
+        // running that would send on its own a moment later.
+        if !autoSendEnabled {
+            cancelSilenceTimer()
+            voiceController?.autoSpeakReplies = false
+            if isRecording, isContinuous {
+                voiceController?.stop()
+                dictation.stop()
+            }
+        }
+    }
+
+    /// Restarts the silence window. Ticks at 100ms so the ring drains
+    /// smoothly rather than jumping; auto-sends at zero.
+    private func restartSilenceTimer() {
+        silenceTimer?.cancel()
+        countdownProgress = 1
+        silenceTimer = Task { @MainActor in
+            let tickSeconds = 0.1
+            let totalTicks = Int(silenceTimeoutSeconds / tickSeconds)
+            for tick in 0..<totalTicks {
+                try? await Task.sleep(nanoseconds: UInt64(tickSeconds * 1_000_000_000))
+                if Task.isCancelled { return }
+                countdownProgress = 1 - (Double(tick + 1) / Double(totalTicks))
+            }
+            if Task.isCancelled { return }
+            countdownProgress = 0
+            if canSend {
+                sendMessage()
+            } else {
+                // Silence with nothing transcribed — the mic is on but the
+                // user isn't talking. Leave it listening; the clock only
+                // restarts when they say something.
+                AgentLog.debug(.input, "[Dictation] silence elapsed with nothing to send")
+            }
+        }
+    }
+
+    private func cancelSilenceTimer() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
+        countdownProgress = 0
+    }
+
+    /// The agent started talking: hand the mic to the barge-in monitor.
+    /// Only the rising edge matters — `isSpeaking` falls at every gap
+    /// between sentence chunks, so the end of the turn comes from
+    /// ``VoiceController/agentTurnDidEnd`` instead.
+    private func handleAgentSpeakingChanged(_ speaking: Bool) {
+        guard speaking, isRecording, isContinuous else { return }
+        cancelSilenceTimer()
+        dictation.beginAgentTurn()
+    }
+
+    /// The agent's turn is genuinely over — hand the mic back.
+    private func handleAgentTurnEnded() {
+        guard isRecording, isContinuous, agentHasTurn else { return }
+        dictation.beginUserTurn()
+    }
+
+    /// Safety net for a turn that never spoke: TTS off, the provider
+    /// errored, or the reply was empty. Without it the mic would sit in
+    /// the agent's phase with nothing coming to release it.
+    private func handleLoadingChanged(_ loading: Bool) {
+        guard !loading, isRecording, isContinuous, agentHasTurn, !isAgentSpeaking else { return }
+        AgentLog.debug(.input, "[Dictation] run ended without speech — reclaiming mic")
+        dictation.beginUserTurn()
+    }
+
+    /// Stops playback on an explicit tap. The mic comes back through
+    /// ``handleAgentTurnEnded``, same as an interrupt or a natural end.
+    private func userStopAgent() {
+        voiceController?.stop()
     }
     
     // MARK: - Composer layouts
@@ -506,11 +707,11 @@ public struct InputView: View {
             }
 
             HStack(alignment: .center, spacing: 8) {
-                if isRecording {
+                if showsWaveform {
                     dictationCancelButton(secondary: .secondary,
                                           fill: PlatformColors.systemGray6)
                 }
-                if !isRecording, config.enableFiles {
+                if !showsWaveform, config.enableFiles {
                     Button(action: { activeSheet = .addToChat }) {
                         Image(systemName: "paperclip")
                             .font(.title3)
@@ -523,15 +724,15 @@ public struct InputView: View {
                         .id(composerGeneration)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
-                        .opacity(isRecording ? 0 : 1)
+                        .opacity(showsWaveform ? 0 : 1)
                         .allowsHitTesting(!isRecording)
                         // Zero opacity still occupies layout, and a
                         // vertical-axis field grows with its content — so a
                         // long transcript would push the composer taller
                         // behind the waveform. Clamp it while hidden.
-                        .frame(height: isRecording ? RecordingWaveformView.preferredHeight : nil)
+                        .frame(height: showsWaveform ? RecordingWaveformView.preferredHeight : nil)
 
-                    if isRecording {
+                    if showsWaveform {
                         RecordingWaveformView(level: dictation.audioLevel, color: config.primaryColor)
                     }
                 }
@@ -539,20 +740,18 @@ public struct InputView: View {
                 .background(PlatformColors.systemGray6)
                 .cornerRadius(20)
 
-                if isRecording {
+                if showsWaveform {
                     dictationTrailingControls(accent: config.primaryColor,
                                               secondary: .secondary,
                                               fill: PlatformColors.systemGray6)
                 } else {
+                    if continuousAvailable {
+                        autoSendToggle(tint: .secondary)
+                    }
                     if dictation.isTranscribing {
                         transcribingIndicator
                     } else if speechInputAvailable {
-                        Button(action: { toggleRecording() }) {
-                            Image(systemName: "mic")
-                                .font(.title3)
-                                .foregroundColor(.secondary)
-                        }
-                        .accessibilityLabel("Dictate")
+                        micButton(tint: .secondary)
                     }
 
                     rightActionButton
@@ -576,20 +775,21 @@ public struct InputView: View {
     /// collapses the keyboard.
     @ViewBuilder
     private var anthropicComposer: some View {
-        // Recording always presents as a single row: the field is hidden
-        // behind the waveform, so there is no wrapped text to make room for.
-        let twoRow = isMultiline && !isRecording
+        // One-shot dictation always presents as a single row: the field is
+        // hidden behind the waveform, so there is no wrapped text to make
+        // room for. Hands-free keeps the field, and so keeps both rows.
+        let twoRow = isMultiline && !showsWaveform
         VStack(spacing: 8) {
             if !attachedFiles.isEmpty {
                 attachedFilesView
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
-                    if isRecording {
+                    if showsWaveform {
                         dictationCancelButton(secondary: config.appearance.textSecondary,
                                               fill: config.appearance.surfaceElevated)
                     }
-                    if !twoRow, !isRecording, config.enableFiles {
+                    if !twoRow, !showsWaveform, config.enableFiles {
                         circularIconButton(systemName: "plus") {
                             activeSheet = .addToChat
                         }
@@ -601,7 +801,7 @@ public struct InputView: View {
                     // on `showModelSelector` (off by default) — the pill is the
                     // only entry point to `ModelOptionsSheet`, so hiding it fully
                     // suppresses the model selector for hosts that don't opt in.
-                    if !twoRow, !isRecording,
+                    if !twoRow, !showsWaveform,
                        config.showModelSelector,
                        let label = modelPillLabelOverride ?? config.appearance.modelPillLabel,
                        !label.isEmpty {
@@ -655,8 +855,8 @@ public struct InputView: View {
                                         handleFieldWidthChange(newWidth)
                                     }
                                     .onChange(of: g.size.height) { h in
-                                        AgentLog.debug(.input, "[Layout] field rendered h=\(Int(h)) w=\(Int(g.size.width)) recording=\(isRecording) isMultiline=\(isMultiline) pinned=\(pinnedFieldHeight.map { Int($0) } ?? -1)")
-                                        if !isRecording, pinnedFieldHeight == nil {
+                                        AgentLog.debug(.input, "[Layout] field rendered h=\(Int(h)) w=\(Int(g.size.width)) waveform=\(showsWaveform) isMultiline=\(isMultiline) pinned=\(pinnedFieldHeight.map { Int($0) } ?? -1)")
+                                        if !showsWaveform, pinnedFieldHeight == nil {
                                             lastRenderedFieldHeight = h
                                         }
                                         // Observed-wrap fallback: the
@@ -666,41 +866,38 @@ public struct InputView: View {
                                         // genuinely wrapped while still
                                         // single-row, expand regardless
                                         // of what the math said.
-                                        if !isRecording, !isMultiline, h > multilineHeightThreshold {
+                                        if !showsWaveform, !isMultiline, h > multilineHeightThreshold {
                                             setMultiline(true, reason: "renderedWrap", forText: inputText)
                                         }
                                     }
                             })
-                            .opacity(isRecording ? 0 : 1)
+                            .opacity(showsWaveform ? 0 : 1)
                             .allowsHitTesting(!isRecording)
                             // Zero opacity still occupies layout, and a
                             // vertical-axis field grows with its content — so a
                             // long transcript would push the composer taller
                             // behind the waveform. Clamp it while hidden.
-                            .frame(height: isRecording ? RecordingWaveformView.preferredHeight : pinnedFieldHeight)
+                            .frame(height: showsWaveform ? RecordingWaveformView.preferredHeight : pinnedFieldHeight)
 
-                        if isRecording {
+                        if showsWaveform {
                             RecordingWaveformView(level: dictation.audioLevel,
                                                   color: config.appearance.accent)
                         }
                     }
                     .padding(.leading, 6)
 
-                    if isRecording {
+                    if showsWaveform {
                         dictationTrailingControls(accent: config.appearance.accent,
                                                   secondary: config.appearance.textSecondary,
                                                   fill: config.appearance.surfaceElevated)
                     } else if !twoRow {
+                        if continuousAvailable {
+                            autoSendToggle(tint: config.appearance.textSecondary)
+                        }
                         if dictation.isTranscribing {
                             transcribingIndicator
                         } else if speechInputAvailable {
-                            Button(action: { toggleRecording() }) {
-                                Image(systemName: "mic")
-                                    .font(.title3)
-                                    .foregroundColor(config.appearance.textSecondary)
-                                    .frame(width: 36, height: 36)
-                            }
-                            .accessibilityLabel("Dictate")
+                            micButton(tint: config.appearance.textSecondary)
                         }
 
                         rightActionButton
@@ -721,16 +918,13 @@ public struct InputView: View {
                             modelPill(label: label)
                         }
                         Spacer(minLength: 0)
+                        if continuousAvailable {
+                            autoSendToggle(tint: config.appearance.textSecondary)
+                        }
                         if dictation.isTranscribing {
                             transcribingIndicator
                         } else if speechInputAvailable {
-                            Button(action: { toggleRecording() }) {
-                                Image(systemName: "mic")
-                                    .font(.title3)
-                                    .foregroundColor(config.appearance.textSecondary)
-                                    .frame(width: 36, height: 36)
-                            }
-                            .accessibilityLabel("Dictate")
+                            micButton(tint: config.appearance.textSecondary)
                         }
                         rightActionButton
                     }
@@ -748,10 +942,11 @@ public struct InputView: View {
         .onChange(of: inputText) { newText in
             handleInputTextChangeForLayout(newText)
         }
-        // The reveal at stop-dictation shows already-long text without a
-        // text change, so the layout decision must run once here too.
-        .onChange(of: isRecording) { recording in
-            if !recording {
+        // The reveal when the waveform goes away shows already-long text
+        // without a text change, so the layout decision must run once here
+        // too.
+        .onChange(of: showsWaveform) { waveform in
+            if !waveform {
                 handleInputTextChangeForLayout(inputText, source: "recordingEnd")
             }
         }
@@ -825,10 +1020,10 @@ public struct InputView: View {
 
     // MARK: - Shared composer atoms
 
-    /// Right-hand action button shared by both composer layouts. Three
-    /// states: cancel (run in flight), stop (TTS playing), send. Sizing
-    /// and corner radius are constant across styles so the muscle
-    /// memory of "tap bottom-right" is preserved.
+    /// Right-hand action button shared by both composer layouts. Four
+    /// states: cancel (run in flight), stop speaking (hands-free, agent
+    /// mid-reply), send. Sizing and corner radius are constant across
+    /// styles so the muscle memory of "tap bottom-right" is preserved.
     @ViewBuilder
     private var rightActionButton: some View {
         if isLoading {
@@ -841,6 +1036,19 @@ public struct InputView: View {
                     .clipShape(Circle())
             }
             .accessibilityLabel("Cancel run")
+        } else if agentHasTurn {
+            // Hands-free only: tap to cut the reply short and get the mic
+            // back without waiting for the agent to finish. (Talking over
+            // it does the same thing — this is the deterministic version.)
+            Button(action: userStopAgent) {
+                Image(systemName: "stop.fill")
+                    .font(.title3)
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color(hex: "#a85d5d"))
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Stop speaking")
         } else {
             // Always present, greyed out and inert when there is nothing to
             // send. State is shown by colour, not by appearing/disappearing —
@@ -857,6 +1065,52 @@ public struct InputView: View {
             .disabled(!canSend)
             .accessibilityLabel("Send")
         }
+    }
+
+    /// Mic button, shared by every composer slot that offers one.
+    ///
+    /// While hands-free is listening it turns red and wears the silence
+    /// countdown as a ring: a shrinking arc showing how long until what
+    /// you've said is sent. Speaking refills it, so it only ever completes
+    /// on a real pause.
+    @ViewBuilder
+    private func micButton(tint: Color) -> some View {
+        Button(action: { toggleRecording() }) {
+            ZStack {
+                if countdownProgress > 0 {
+                    Circle()
+                        .trim(from: 0, to: countdownProgress)
+                        .stroke(Color.red, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 30, height: 30)
+                        .animation(.linear(duration: 0.1), value: countdownProgress)
+                }
+                Image(systemName: isRecording ? "mic.fill" : "mic")
+                    .font(.title3)
+                    .foregroundColor(isRecording ? .red : tint)
+            }
+            .frame(width: 36, height: 36)
+        }
+        .accessibilityLabel(isRecording ? "Stop listening" : "Dictate")
+    }
+
+    /// Hands-free toggle, immediately left of the mic. Filled and accented
+    /// when on, so the mode is legible at a glance before you start
+    /// talking rather than only once something has been sent for you.
+    @ViewBuilder
+    private func autoSendToggle(tint: Color) -> some View {
+        Button(action: toggleAutoSend) {
+            Image(systemName: autoSendEnabled
+                  ? "arrow.triangle.2.circlepath.circle.fill"
+                  : "arrow.triangle.2.circlepath.circle")
+                .font(.title3)
+                .foregroundColor(autoSendEnabled ? config.appearance.accent : tint)
+                .frame(width: 36, height: 36)
+        }
+        .accessibilityLabel(autoSendEnabled
+                            ? "Turn off continuous conversation"
+                            : "Turn on continuous conversation")
+        .accessibilityHint("Sends when you pause, reads replies aloud, and keeps listening.")
     }
 
     /// Compact circular icon button used for the `+` (attach) affordance

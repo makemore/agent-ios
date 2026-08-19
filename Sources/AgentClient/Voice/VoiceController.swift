@@ -30,6 +30,32 @@ public final class VoiceController: ObservableObject {
     /// is enough lookback for the monitor's word-overlap check.
     private let recentSpokenTextMaxChars: Int = 1500
 
+    /// Fires once per assistant turn, when the agent has genuinely
+    /// finished talking.
+    ///
+    /// ``isSpeaking`` cannot answer that question. The drain loop lowers
+    /// it whenever the queue runs dry, which during a streaming reply
+    /// happens at every gap between sentence chunks — so a consumer
+    /// watching for its falling edge sees several "finished"s per turn.
+    /// Hands-free mode hands the mic back on this signal instead, which
+    /// waits for ``finishTurn`` *and* an empty queue.
+    ///
+    /// Also fires on ``stop()``: an interrupted turn is still over.
+    public let agentTurnDidEnd = PassthroughSubject<Void, Never>()
+
+    /// Set by ``finishTurn`` — no more text is coming for this turn, so
+    /// the next time the queue empties it is the end and not a gap.
+    private var turnClosed: Bool = false
+
+    /// Whether replies should be spoken as they stream, without anyone
+    /// asking. Off by default: playback is otherwise started only by an
+    /// explicit act — a message's speaker button, or a host injecting a
+    /// scripted turn — and switching that on for every reply is a much
+    /// bigger behaviour change than any one feature should make on its
+    /// own. Hands-free conversation turns it on for the duration of the
+    /// conversation, because a spoken reply is the whole point of it.
+    @Published public var autoSpeakReplies: Bool = false
+
     private let provider: TTSProvider?
     private var queue: [String] = []
     private var isDraining: Bool = false
@@ -84,6 +110,7 @@ public final class VoiceController: ObservableObject {
     public func pushDelta(_ delta: String, emotion: Emotion? = nil) {
         guard isEnabled, !delta.isEmpty else { return }
         if let emotion = emotion { currentEmotion = emotion }
+        turnClosed = false
         chunker.push(delta)
     }
 
@@ -93,11 +120,19 @@ public final class VoiceController: ObservableObject {
     public func finishTurn(finalText: String? = nil, emotion: Emotion? = nil) {
         guard isEnabled else { return }
         if let emotion = emotion { currentEmotion = emotion }
+        turnClosed = true
         if let finalText = finalText, queue.isEmpty, !isSpeaking, !isDraining {
             chunker.reset()
             enqueue(SentenceChunker.sanitizeForSpeech(finalText))
         } else {
             chunker.flush()
+        }
+        // A turn that produced no speakable text at all (empty reply, TTS
+        // failed earlier in the turn, chunker had nothing buffered) never
+        // enters the drain loop, so the end-of-turn signal has to come
+        // from here or a hands-free caller would wait forever.
+        if queue.isEmpty, !isDraining {
+            endTurn()
         }
     }
 
@@ -112,6 +147,12 @@ public final class VoiceController: ObservableObject {
         setSpeaking(false)
         // Wipe the leak-back filter buffer so the next turn starts fresh.
         recentSpokenText = ""
+        // An interrupted turn is over as far as any listener is concerned,
+        // whether or not `finishTurn` ever ran. Closing it here also means
+        // the drain loop — which may still be unwinding from the cancel —
+        // finds the latch already spent and doesn't fire a second time.
+        turnClosed = true
+        endTurn()
     }
 
     /// Clear emotion + buffer at the start of a new assistant turn.
@@ -119,6 +160,7 @@ public final class VoiceController: ObservableObject {
     public func reset() {
         currentEmotion = nil
         turnFailed = false
+        turnClosed = false
         chunker.reset()
         recentSpokenText = ""
     }
@@ -199,10 +241,21 @@ public final class VoiceController: ObservableObject {
         setSpeaking(false)
         isDraining = false
         currentTask = nil
+        // Only a drained queue on a *closed* turn is the end of it. An
+        // empty queue mid-stream is just the gap before the chunker emits
+        // the next sentence.
+        if turnClosed { endTurn() }
     }
 
     private func setSpeaking(_ value: Bool) {
         if isSpeaking != value { isSpeaking = value }
+    }
+
+    /// Announces the end of the turn, at most once per turn.
+    private func endTurn() {
+        guard turnClosed else { return }
+        turnClosed = false
+        agentTurnDidEnd.send()
     }
 
     /// Append a freshly-queued sentence to the rolling agent-text

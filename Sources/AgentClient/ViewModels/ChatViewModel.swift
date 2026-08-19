@@ -1537,12 +1537,17 @@ public class ChatViewModel: ObservableObject {
         }
 
         // Enqueue into buffer; drain timer reveals chars at a steady rate.
-        // Deltas are *not* pushed to the voice controller: replies are never
-        // spoken automatically. Playback happens only when the user taps the
-        // speaker button on a message, which drives the controller directly
-        // from `ChatWidgetView`.
         streamBuffer.append(delta)
         startDrainTimerIfNeeded()
+
+        // Deltas reach the voice controller only in hands-free mode, where
+        // the reply is meant to be heard and speaking it as it streams is
+        // what keeps the conversation moving. Otherwise replies stay
+        // silent and playback happens only when the user taps a message's
+        // speaker button, which drives the controller from `ChatWidgetView`.
+        if let vc = voiceController, vc.autoSpeakReplies {
+            vc.pushDelta(delta, emotion: Emotion.from(payload["emotion"]))
+        }
     }
 
     /// Handle an `assistant.message` event — the final authoritative text
@@ -1571,6 +1576,22 @@ public class ChatViewModel: ObservableObject {
         // via a sub-agent tool result) must be dropped to avoid a second
         // typewriter bubble below the one we're about to finalise.
         turnFinalized = true
+
+        // Voice: when the run streamed, the chunker has been fed
+        // throughout and `finishTurn(finalText: nil)` only flushes the
+        // trailing fragment — the chunker emits on sentence boundaries, so
+        // a reply's last few words would otherwise sit in its buffer
+        // unspoken. When it didn't stream (non-streaming run, or an SSE
+        // that emits only the authoritative message) pass `content` so the
+        // reply is still heard.
+        //
+        // Placed after the pill-mode return above: sub-agent narration is
+        // deliberately never spoken, only the parent's synthesis.
+        if let vc = voiceController, vc.autoSpeakReplies {
+            let needsFallbackText = streamBuffer.isEmpty && drainTimer == nil
+            vc.finishTurn(finalText: needsFallbackText ? content : nil,
+                          emotion: Emotion.from(payload["emotion"]))
+        }
 
         // Sub-agent echo resolution. If we were still comparing the parent's
         // stream against a sub-agent snapshot when the final message lands,
@@ -2117,10 +2138,17 @@ public class ChatViewModel: ObservableObject {
             // turn if not cleared.
             clearPendingEcho()
             // A cancelled/timed-out run stops any playback still in flight
-            // from a speaker-button tap. There is nothing to flush on
-            // success: replies are never spoken automatically.
+            // from a speaker-button tap.
             if type == "run.cancelled" || type == "run.timed_out" {
                 voiceController?.stop()
+            } else if let vc = voiceController, vc.autoSpeakReplies {
+                // Belt and braces for a run that ended without a clean
+                // `assistant.message`: flush whatever the chunker still
+                // holds so the reply doesn't end mid-sentence, and — since
+                // `finishTurn` closes the turn — release anything waiting
+                // on the end-of-turn signal. A no-op when the message
+                // handler already flushed.
+                vc.finishTurn()
             }
         }
 
