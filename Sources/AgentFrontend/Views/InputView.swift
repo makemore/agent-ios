@@ -132,14 +132,6 @@ public struct InputView: View {
     /// user's setting and not the mode's.
     @AppStorage("voice.speakReplies") private var speakRepliesEnabled: Bool = false
 
-    /// True for the whole of an agent speaking turn, unlike
-    /// ``isAgentSpeaking`` which drops at every gap between sentence
-    /// chunks. Binding the speak-aloud button straight to `isSpeaking`
-    /// would flicker it between speaker and stop several times per reply.
-    /// Raised on the rising edge, cleared by
-    /// ``VoiceController/agentTurnDidEnd``.
-    @State private var agentIsSpeakingTurn = false
-
     private var isRecording: Bool { dictation.isRecording }
 
     /// Whether the *current* mic session is hands-free. Read from the
@@ -695,25 +687,20 @@ public struct InputView: View {
         countdownProgress = 0
     }
 
-    /// The agent started talking. Raises the speaking latch — which the
-    /// speak-aloud button reads, in every mode — and in hands-free also
-    /// hands the mic to the barge-in monitor.
+    /// The agent started talking: in hands-free, hand the mic to the
+    /// barge-in monitor.
     ///
-    /// Only the rising edge matters: `isSpeaking` falls at every gap
+    /// Only the rising edge matters — `isSpeaking` falls at every gap
     /// between sentence chunks, so the end of the turn comes from
     /// ``VoiceController/agentTurnDidEnd`` instead.
     private func handleAgentSpeakingChanged(_ speaking: Bool) {
-        guard speaking else { return }
-        agentIsSpeakingTurn = true
-        guard isRecording, isContinuous else { return }
+        guard speaking, isRecording, isContinuous else { return }
         cancelSilenceTimer()
         dictation.beginAgentTurn()
     }
 
-    /// The agent's turn is genuinely over: drop the latch, and in
-    /// hands-free hand the mic back.
+    /// The agent's turn is genuinely over — hand the mic back.
     private func handleAgentTurnEnded() {
-        agentIsSpeakingTurn = false
         guard isRecording, isContinuous, agentHasTurn else { return }
         dictation.beginUserTurn()
     }
@@ -727,11 +714,6 @@ public struct InputView: View {
         dictation.beginUserTurn()
     }
 
-    /// Stops playback on an explicit tap. The mic comes back through
-    /// ``handleAgentTurnEnded``, same as an interrupt or a natural end.
-    private func userStopAgent() {
-        voiceController?.stop()
-    }
     
     // MARK: - Composer layouts
     //
@@ -1172,51 +1154,46 @@ public struct InputView: View {
         config.enableTTS && config.showTTSButton
     }
 
-    /// Decides whether S'Ai talks out loud, and stops it when it is.
+    /// Decides whether S'Ai talks out loud.
     ///
-    /// Three states in one slot at the left of the bar: muted, will-speak,
-    /// and speaking-now. The third is the point — while a reply is being
-    /// read aloud this is the button that shuts it up, and it is the only
-    /// one that does. It deliberately does *not* touch the run: the reply
-    /// keeps arriving as text, you just stop hearing it.
+    /// Two states, not three: switching it off *is* the stop. Tapping the
+    /// speaker while a reply is being read cuts the audio immediately and
+    /// leaves it off, which is what "turn the sound off" means everywhere
+    /// else. A separate stop state was tried and dropped — it rendered as
+    /// a red stop circle indistinguishable from the cancel-run button on
+    /// the other side of the bar, so a spoken reply put two identical stop
+    /// buttons on screen doing very different things.
     ///
-    /// Stopping also hands the mic straight back in hands-free, via the
-    /// same end-of-turn path a natural finish takes — so it behaves
-    /// exactly like talking over S'Ai, only deliberate.
+    /// Stopping never touches the run: the reply keeps arriving as text,
+    /// you just stop hearing it. In hands-free it also hands the mic
+    /// straight back, through the same end-of-turn path a natural finish
+    /// takes.
     @ViewBuilder
     private func speakRepliesButton(tint: Color) -> some View {
-        if agentIsSpeakingTurn {
-            Button(action: userStopAgent) {
-                Image(systemName: "stop.fill")
-                    .font(.title3)
-                    .foregroundColor(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Color(hex: "#a85d5d"))
-                    .clipShape(Circle())
-            }
-            .accessibilityLabel("Stop speaking")
-            .accessibilityHint("Stops reading the reply aloud. The reply itself keeps arriving.")
-        } else {
-            Button(action: toggleSpeakReplies) {
-                Image(systemName: speakRepliesEnabled ? "speaker.wave.2" : "speaker.slash")
-                    .font(.title3)
-                    .foregroundColor(speakRepliesEnabled ? config.appearance.accent : tint)
-                    .frame(width: 36, height: 36)
-            }
-            .accessibilityLabel(speakRepliesEnabled
-                                ? "Turn off reading replies aloud"
-                                : "Read replies aloud")
+        Button(action: toggleSpeakReplies) {
+            Image(systemName: speakRepliesEnabled ? "speaker.wave.2" : "speaker.slash")
+                .font(.title3)
+                .foregroundColor(speakRepliesEnabled ? config.appearance.accent : tint)
+                .frame(width: 36, height: 36)
         }
+        .accessibilityLabel(speakRepliesEnabled
+                            ? "Stop reading replies aloud"
+                            : "Read replies aloud")
     }
 
-    /// Toggles spoken replies. Turning it on also clears the process-wide
-    /// "voice provider is unavailable" latch, so a user who hit a TTS
-    /// failure earlier gets a real retry rather than a dead button.
+    /// Toggles spoken replies, and silences anything mid-sentence on the
+    /// way off — the button is the stop.
+    ///
+    /// Turning it on also clears the process-wide "voice provider is
+    /// unavailable" latch, so a user who hit a TTS failure earlier gets a
+    /// real retry rather than a dead button.
     private func toggleSpeakReplies() {
         speakRepliesEnabled.toggle()
         if speakRepliesEnabled {
             voiceController?.setEnabled(true)
         } else {
+            // Ends playback now, and suppresses the rest of this turn so
+            // the next sentence chunk can't restart it.
             voiceController?.stop()
         }
         voiceController?.autoSpeakReplies = speakRepliesEnabled
