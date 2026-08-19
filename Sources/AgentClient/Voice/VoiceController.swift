@@ -47,6 +47,15 @@ public final class VoiceController: ObservableObject {
     /// the next time the queue empties it is the end and not a gap.
     private var turnClosed: Bool = false
 
+    /// Set by ``stop()``: the listener has heard enough of *this* turn.
+    ///
+    /// Stopping only empties the queue, and the reply is usually still
+    /// streaming — so without this the chunker's next sentence would
+    /// enqueue and playback would start again a second later, which reads
+    /// as the stop button not having worked. Cleared by ``reset()``, which
+    /// every path that legitimately begins a new utterance already calls.
+    private var turnSuppressed: Bool = false
+
     /// Whether replies should be spoken as they stream, without anyone
     /// asking. Off by default: playback is otherwise started only by an
     /// explicit act — a message's speaker button, or a host injecting a
@@ -163,6 +172,9 @@ public final class VoiceController: ObservableObject {
         // finds the latch already spent and doesn't fire a second time.
         turnClosed = true
         endTurn()
+        // Anything still to come from this turn stays unspoken; the next
+        // turn clears this in `reset()`.
+        turnSuppressed = true
     }
 
     /// Clear emotion + buffer at the start of a new assistant turn.
@@ -171,6 +183,7 @@ public final class VoiceController: ObservableObject {
         currentEmotion = nil
         turnFailed = false
         turnClosed = false
+        turnSuppressed = false
         chunker.reset()
         recentSpokenText = ""
     }
@@ -194,7 +207,7 @@ public final class VoiceController: ObservableObject {
     // MARK: - Internals
 
     private func enqueue(_ text: String) {
-        guard !text.isEmpty, !turnFailed else { return }
+        guard !text.isEmpty, !turnFailed, !turnSuppressed else { return }
         queue.append(text)
         if !isDraining { drain() }
     }

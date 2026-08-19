@@ -124,6 +124,22 @@ public struct InputView: View {
     @State private var countdownProgress: Double = 0
     private let silenceTimeoutSeconds: Double = 3.0
 
+    /// Whether S'Ai reads its replies out loud. Off by default — typing a
+    /// message and having it answered silently is what most people expect
+    /// — and persisted once chosen. Switching hands-free on turns it on,
+    /// since a spoken reply is the whole point of a spoken conversation;
+    /// switching hands-free off leaves it alone, because by then it is the
+    /// user's setting and not the mode's.
+    @AppStorage("voice.speakReplies") private var speakRepliesEnabled: Bool = false
+
+    /// True for the whole of an agent speaking turn, unlike
+    /// ``isAgentSpeaking`` which drops at every gap between sentence
+    /// chunks. Binding the speak-aloud button straight to `isSpeaking`
+    /// would flicker it between speaker and stop several times per reply.
+    /// Raised on the rising edge, cleared by
+    /// ``VoiceController/agentTurnDidEnd``.
+    @State private var agentIsSpeakingTurn = false
+
     private var isRecording: Bool { dictation.isRecording }
 
     /// Whether the *current* mic session is hands-free. Read from the
@@ -392,10 +408,13 @@ public struct InputView: View {
             // enough that starting it at mic-tap time would mean seconds
             // of silent waveform. Warm it as soon as the composer exists.
             DictationEngine.preload(config: config)
+            // The controller starts every mount with speech off, so the
+            // user's persisted choice has to be pushed back into it or it
+            // would silently reset itself on every remount.
+            voiceController?.autoSpeakReplies = speakRepliesEnabled
         }
         .onDisappear {
             cancelSilenceTimer()
-            voiceController?.autoSpeakReplies = false
             dictation.cancel()
         }
         // The hands-free loop: the agent taking the turn, and giving it
@@ -531,9 +550,8 @@ public struct InputView: View {
     private func toggleRecording() {
         if dictation.isRecording {
             cancelSilenceTimer()
-            // Leaving the conversation: replies go back to being silent
-            // unless the user asks for one.
-            voiceController?.autoSpeakReplies = false
+            // Leaving the conversation leaves speaking exactly as the user
+            // set it. It is their preference now, not the mode's.
             dictation.stop()
         } else {
             // If a message is being read aloud, starting the mic supersedes
@@ -600,9 +618,11 @@ public struct InputView: View {
                     // through the same path a normal turn ending takes.
                     voiceController?.stop()
                 }
-                // Replies are spoken aloud for as long as the conversation
-                // lasts — without this the loop has no agent turn to wait
-                // through, and the mic would come straight back.
+                // A spoken conversation needs spoken replies — without
+                // them the loop has no agent turn to wait through. Set the
+                // stored preference too, so the speak-aloud button shows
+                // the state the mode just put it in.
+                speakRepliesEnabled = true
                 voiceController?.setEnabled(true)
                 voiceController?.autoSpeakReplies = true
             }
@@ -623,11 +643,19 @@ public struct InputView: View {
 
     private func toggleAutoSend() {
         autoSendEnabled.toggle()
-        // Switching it off mid-conversation must not leave a countdown
-        // running that would send on its own a moment later.
-        if !autoSendEnabled {
+        if autoSendEnabled {
+            // Switching the mode on switches speaking on with it: a
+            // conversation you can't hear isn't one. Switching the mode
+            // off again deliberately leaves it alone — by then it is the
+            // user's setting, and silently reversing it would be the kind
+            // of tidying-up that loses someone's choice.
+            speakRepliesEnabled = true
+            voiceController?.setEnabled(true)
+            voiceController?.autoSpeakReplies = true
+        } else {
+            // Must not leave a countdown running that would send on its
+            // own a moment after the mode was switched off.
             cancelSilenceTimer()
-            voiceController?.autoSpeakReplies = false
             if isRecording, isContinuous {
                 voiceController?.stop()
                 dictation.stop()
@@ -667,18 +695,25 @@ public struct InputView: View {
         countdownProgress = 0
     }
 
-    /// The agent started talking: hand the mic to the barge-in monitor.
-    /// Only the rising edge matters — `isSpeaking` falls at every gap
+    /// The agent started talking. Raises the speaking latch — which the
+    /// speak-aloud button reads, in every mode — and in hands-free also
+    /// hands the mic to the barge-in monitor.
+    ///
+    /// Only the rising edge matters: `isSpeaking` falls at every gap
     /// between sentence chunks, so the end of the turn comes from
     /// ``VoiceController/agentTurnDidEnd`` instead.
     private func handleAgentSpeakingChanged(_ speaking: Bool) {
-        guard speaking, isRecording, isContinuous else { return }
+        guard speaking else { return }
+        agentIsSpeakingTurn = true
+        guard isRecording, isContinuous else { return }
         cancelSilenceTimer()
         dictation.beginAgentTurn()
     }
 
-    /// The agent's turn is genuinely over — hand the mic back.
+    /// The agent's turn is genuinely over: drop the latch, and in
+    /// hands-free hand the mic back.
     private func handleAgentTurnEnded() {
+        agentIsSpeakingTurn = false
         guard isRecording, isContinuous, agentHasTurn else { return }
         dictation.beginUserTurn()
     }
@@ -720,6 +755,9 @@ public struct InputView: View {
                 if showsWaveform {
                     dictationCancelButton(secondary: .secondary,
                                           fill: PlatformColors.systemGray6)
+                }
+                if !showsWaveform, speakAloudAvailable {
+                    speakRepliesButton(tint: .secondary)
                 }
                 if !showsWaveform, config.enableFiles {
                     Button(action: { activeSheet = .addToChat }) {
@@ -798,6 +836,9 @@ public struct InputView: View {
                     if showsWaveform {
                         dictationCancelButton(secondary: config.appearance.textSecondary,
                                               fill: config.appearance.surfaceElevated)
+                    }
+                    if !twoRow, !showsWaveform, speakAloudAvailable {
+                        speakRepliesButton(tint: config.appearance.textSecondary)
                     }
                     if !twoRow, !showsWaveform, config.enableFiles {
                         circularIconButton(systemName: "plus") {
@@ -916,6 +957,9 @@ public struct InputView: View {
 
                 if twoRow {
                     HStack(alignment: .center, spacing: 8) {
+                        if speakAloudAvailable {
+                            speakRepliesButton(tint: config.appearance.textSecondary)
+                        }
                         if config.enableFiles {
                             circularIconButton(systemName: "plus") {
                                 activeSheet = .addToChat
@@ -1030,10 +1074,19 @@ public struct InputView: View {
 
     // MARK: - Shared composer atoms
 
-    /// Right-hand action button shared by both composer layouts. Four
-    /// states: cancel (run in flight), stop speaking (hands-free, agent
-    /// mid-reply), send. Sizing and corner radius are constant across
-    /// styles so the muscle memory of "tap bottom-right" is preserved.
+    /// Right-hand action button shared by both composer layouts. Three
+    /// states: cancel (run in flight), send, and send-disabled. Sizing and
+    /// corner radius are constant across styles so the muscle memory of
+    /// "tap bottom-right" is preserved.
+    ///
+    /// Stopping *speech* deliberately does not live here. It used to, and
+    /// it was unreachable: TTS starts while the reply is still streaming,
+    /// so `isLoading` was still true and the cancel-run branch won for the
+    /// whole of it. Both branches drew the same glyph in the same colour,
+    /// so the user pressing the obvious stop button silently cancelled the
+    /// run instead of just muting it. Speech is stopped from
+    /// ``speakRepliesButton`` on the left, which is unambiguous and
+    /// independent of the run's state.
     @ViewBuilder
     private var rightActionButton: some View {
         if isLoading {
@@ -1046,19 +1099,6 @@ public struct InputView: View {
                     .clipShape(Circle())
             }
             .accessibilityLabel("Cancel run")
-        } else if agentHasTurn {
-            // Hands-free only: tap to cut the reply short and get the mic
-            // back without waiting for the agent to finish. (Talking over
-            // it does the same thing — this is the deterministic version.)
-            Button(action: userStopAgent) {
-                Image(systemName: "stop.fill")
-                    .font(.title3)
-                    .foregroundColor(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Color(hex: "#a85d5d"))
-                    .clipShape(Circle())
-            }
-            .accessibilityLabel("Stop speaking")
         } else {
             // Always present, greyed out and inert when there is nothing to
             // send. State is shown by colour, not by appearing/disappearing —
@@ -1124,6 +1164,62 @@ public struct InputView: View {
                             ? "Turn off continuous conversation"
                             : "Turn on continuous conversation")
         .accessibilityHint("Sends when you pause, reads replies aloud, and keeps listening.")
+    }
+
+    /// Whether the speak-aloud control should exist: the host renders it
+    /// and has a voice to speak with.
+    private var speakAloudAvailable: Bool {
+        config.enableTTS && config.showTTSButton
+    }
+
+    /// Decides whether S'Ai talks out loud, and stops it when it is.
+    ///
+    /// Three states in one slot at the left of the bar: muted, will-speak,
+    /// and speaking-now. The third is the point — while a reply is being
+    /// read aloud this is the button that shuts it up, and it is the only
+    /// one that does. It deliberately does *not* touch the run: the reply
+    /// keeps arriving as text, you just stop hearing it.
+    ///
+    /// Stopping also hands the mic straight back in hands-free, via the
+    /// same end-of-turn path a natural finish takes — so it behaves
+    /// exactly like talking over S'Ai, only deliberate.
+    @ViewBuilder
+    private func speakRepliesButton(tint: Color) -> some View {
+        if agentIsSpeakingTurn {
+            Button(action: userStopAgent) {
+                Image(systemName: "stop.fill")
+                    .font(.title3)
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color(hex: "#a85d5d"))
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Stop speaking")
+            .accessibilityHint("Stops reading the reply aloud. The reply itself keeps arriving.")
+        } else {
+            Button(action: toggleSpeakReplies) {
+                Image(systemName: speakRepliesEnabled ? "speaker.wave.2" : "speaker.slash")
+                    .font(.title3)
+                    .foregroundColor(speakRepliesEnabled ? config.appearance.accent : tint)
+                    .frame(width: 36, height: 36)
+            }
+            .accessibilityLabel(speakRepliesEnabled
+                                ? "Turn off reading replies aloud"
+                                : "Read replies aloud")
+        }
+    }
+
+    /// Toggles spoken replies. Turning it on also clears the process-wide
+    /// "voice provider is unavailable" latch, so a user who hit a TTS
+    /// failure earlier gets a real retry rather than a dead button.
+    private func toggleSpeakReplies() {
+        speakRepliesEnabled.toggle()
+        if speakRepliesEnabled {
+            voiceController?.setEnabled(true)
+        } else {
+            voiceController?.stop()
+        }
+        voiceController?.autoSpeakReplies = speakRepliesEnabled
     }
 
     /// Compact circular icon button used for the `+` (attach) affordance

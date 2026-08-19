@@ -94,11 +94,18 @@ public struct ChatWidgetConfig {
     /// Only applies to assistant messages — user messages are always plain text.
     public var enableMarkdown: Bool
 
-    /// Show TTS toggle button
-    /// No longer rendered: the global TTS mute made sense when replies
-    /// spoke automatically; with playback only ever started from a
-    /// message's speaker button there is nothing to mute. Retained so
-    /// existing host configs keep compiling.
+    /// Show the speak-aloud control at the left of the composer — the
+    /// button that decides whether replies are read out, and stops them
+    /// mid-reply when they are.
+    ///
+    /// This was dark for a while: the global mute stopped making sense
+    /// once playback only ever started from a message's speaker button,
+    /// because there was nothing to mute. Hands-free conversation brought
+    /// automatic speech back, so the control has a job again — and it is
+    /// the only unambiguous way to stop a reply being read aloud.
+    ///
+    /// Inert unless ``enableTTS`` is also on, so hosts that never opted
+    /// into voice see no new control.
     public var showTTSButton: Bool
 
     /// Enable text-to-speech
