@@ -118,9 +118,19 @@ public final class VoiceController: ObservableObject {
     /// trailing text gets spoken. Pass ``finalText`` to play the
     /// authoritative content when no deltas were received.
     public func finishTurn(finalText: String? = nil, emotion: Emotion? = nil) {
-        guard isEnabled else { return }
-        if let emotion = emotion { currentEmotion = emotion }
+        // Close the turn before the enabled check, not after. Anything
+        // waiting on `agentTurnDidEnd` — hands-free hands the mic back on
+        // it — has to be released even when this turn will never make a
+        // sound: voice switched off, or the provider failed earlier in the
+        // turn and disabled itself. Bailing out first is how a failed TTS
+        // request left the mic stranded in the agent's phase with nothing
+        // coming to reclaim it.
         turnClosed = true
+        guard isEnabled else {
+            endTurn()
+            return
+        }
+        if let emotion = emotion { currentEmotion = emotion }
         if let finalText = finalText, queue.isEmpty, !isSpeaking, !isDraining {
             chunker.reset()
             enqueue(SentenceChunker.sanitizeForSpeech(finalText))
