@@ -286,10 +286,30 @@ struct MarkdownTextView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: blockSpacing) {
-            ForEach(Array(MarkdownRenderCache.blocks(id: cacheKey ?? content, content: content).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(renderableBlocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
+    }
+
+    /// Parsed blocks minus the ones that draw nothing.
+    ///
+    /// Thematic breaks are dropped here rather than in the parser — the
+    /// parser's block vocabulary is the tested contract and stays intact;
+    /// this is purely a rendering decision.
+    ///
+    /// They used to render as one blank line, which is fine for the
+    /// occasional stray rule but not for what the agent actually emits: a
+    /// `---` between *every sentence*. At that density each break costs a
+    /// blank line plus a block gap either side — roughly triple the
+    /// intended paragraph spacing — and the reply reads as a poem. Dropping
+    /// the block entirely (rather than rendering an `EmptyView`, which
+    /// would still take a `VStack` slot and its spacing) leaves the
+    /// neighbouring paragraphs exactly one `blockSpacing` apart, which is
+    /// what a paragraph break was always meant to look like.
+    private var renderableBlocks: [MarkdownBlock] {
+        MarkdownRenderCache.blocks(id: cacheKey ?? content, content: content)
+            .filter { $0 != .thematicBreak }
     }
 
     // MARK: - Block rendering
@@ -302,13 +322,11 @@ struct MarkdownTextView: View {
                 .textSelection(.enabled)
 
         case .thematicBreak:
-            // Rendered as one blank line rather than a drawn rule — in a
-            // conversational bubble a hairline reads as UI chrome. Using a
-            // space glyph (not a fixed frame) keeps the gap proportional
-            // when the host raises `textStyle`.
-            Text(verbatim: " ")
-                .font(bodyFont)
-                .lineSpacing(lineSpacing)
+            // Unreachable — `renderableBlocks` filters these out before
+            // they reach here; the case remains only to keep the switch
+            // exhaustive. A rule is never drawn: in a conversational
+            // transcript a hairline reads as UI chrome.
+            EmptyView()
 
         case .codeBlock(let code, let lang):
             VStack(alignment: .leading, spacing: 4) {
