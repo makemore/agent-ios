@@ -216,6 +216,16 @@ public struct ChatWidgetView: View {
                         speakingMessageId = nil
                     } else {
                         voiceController.stop()
+                        // `stop()` sets the controller's turn-suppressed
+                        // latch, and `enqueue` drops everything while it is
+                        // set — so without this `reset()` the very next
+                        // `finishTurn` below is swallowed and the button
+                        // does nothing at all, on every message and every
+                        // tap. `reset()` is what every other path that
+                        // begins a fresh utterance calls (both injected-turn
+                        // paths, and the send path in `ChatViewModel`);
+                        // this one started an utterance without it.
+                        voiceController.reset()
                         // With the global mute toggle gone, an explicit
                         // play tap is the "try again" affordance: it
                         // clears the session-wide unavailable latch a
