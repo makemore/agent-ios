@@ -79,7 +79,7 @@ public class LocalHistoryStore {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         }
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
-            print("[LocalHistoryStore] Failed to open database at \(dbPath)")
+            AgentLog.error("[LocalHistoryStore] Failed to open database at \(dbPath)")
         }
         if dbPath != ":memory:" {
             Self.protectFileAtRest(dbPath)

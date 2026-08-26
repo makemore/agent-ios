@@ -265,7 +265,12 @@ public class ChatViewModel: ObservableObject {
     // and drain them at a steady cadence so the displayed text flows smoothly.
     private var streamBuffer: String = ""
     private var drainTimer: Timer?
-    private let drainInterval: TimeInterval = 0.03   // ~33 Hz
+    // ~20 Hz. Every tick mutates `messages`, which re-renders the whole
+    // transcript, so this is effectively the UI's refresh budget during a
+    // streamed reply rather than just a typewriter speed. 33 Hz left no
+    // headroom on a long conversation; 20 Hz reads identically and cuts
+    // the render load by nearly half.
+    private let drainInterval: TimeInterval = 0.05
     /// Set true when server signals stream end — lets the drain catch up
     /// at a higher rate without flushing everything instantly.
     private var streamingDone: Bool = false
@@ -459,12 +464,22 @@ public class ChatViewModel: ObservableObject {
     // MARK: - Public Methods
     
     /// Send a message to the agent
+    /// - Parameter hidden: send the message to the agent without ever
+    ///   appending it to the visible transcript. For scripted triggers
+    ///   (check-in / debrief session openers): hosts previously appended
+    ///   the trigger and deleted it a runloop tick later, which flashed a
+    ///   structured blob at the user and left the scroll offset with a
+    ///   ghost gap the size of the removed row. A message that never
+    ///   enters `messages` can do neither.
     public func sendMessage(
         _ content: String,
         files: [FileAttachment] = [],
         model: String? = nil,
         thinking: Bool = false,
-        supersedeFromMessageIndex: Int? = nil
+        supersedeFromMessageIndex: Int? = nil,
+        supersedeOriginalContent: String? = nil,
+        supersedeUserMessageOrdinal: Int? = nil,
+        hidden: Bool = false
     ) async {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
 
@@ -476,30 +491,34 @@ public class ChatViewModel: ObservableObject {
         // response and clear the chunker's buffer.
         voiceController?.reset()
 
-        // Add user message
-        let userMessage = Message(
-            role: .user,
-            content: content.trimmingCharacters(in: .whitespacesAndNewlines),
-            files: files.isEmpty ? nil : files
-        )
-        messages.append(userMessage)
-        
+        // Add user message (skipped for hidden scripted triggers — the
+        // agent still receives the content below, the transcript doesn't).
+        if !hidden {
+            let userMessage = Message(
+                role: .user,
+                content: content.trimmingCharacters(in: .whitespacesAndNewlines),
+                files: files.isEmpty ? nil : files
+            )
+            messages.append(userMessage)
+        }
+
         do {
             // In ephemeral mode send the full conversation history so the
             // server has complete context (it won't load from the DB).
             let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
             let apiMessages: [[String: Any]]
             if config.ephemeral {
-                let history: [[String: Any]] = messages
+                var history: [[String: Any]] = messages
                     .filter { $0.role == .user || $0.role == .assistant }
-                    .dropLast()  // the user message we just appended is re-added below
                     .map { ["role": $0.role.rawValue, "content": $0.content] }
+                // The visible tail duplicates trimmedContent unless hidden.
+                if !hidden { history.removeLast() }
                 apiMessages = history + [["role": "user", "content": trimmedContent]]
             } else {
                 apiMessages = [["role": "user", "content": trimmedContent]]
             }
 
-            print("[ChatViewModel] createRun sending conversationId=\(conversationId ?? "nil")")
+            AgentLog.debug(.network, "[ChatVM] createRun sending conversationId=\(conversationId ?? "nil")")
 
             // Caller-provided `model:` wins (so deep-link / scripted flows
             // can pin a specific id); otherwise fall back to the user's
@@ -518,6 +537,8 @@ public class ChatViewModel: ObservableObject {
                 model: resolvedModel,
                 thinking: thinking,
                 supersedeFromMessageIndex: supersedeFromMessageIndex,
+                supersedeOriginalContent: supersedeOriginalContent,
+                supersedeUserMessageOrdinal: supersedeUserMessageOrdinal,
                 agentKeyOverride: effectiveAgentKey != config.agentKey ? effectiveAgentKey : nil,
                 systemVersionId: selectedSystemVersionId,
                 ephemeral: config.ephemeral,
@@ -526,7 +547,7 @@ public class ChatViewModel: ObservableObject {
                 params: resolvedParams.isEmpty ? nil : resolvedParams
             )
 
-            print("[ChatViewModel] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
+            AgentLog.debug(.network, "[ChatVM] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
 
             currentRunId = run.id
             runState = .streaming
@@ -593,7 +614,7 @@ public class ChatViewModel: ObservableObject {
                 type: .cancelled
             ))
         } catch {
-            print("[ChatViewModel] Failed to cancel run: \(error)")
+            AgentLog.error("[ChatVM] Failed to cancel run: \(error)")
         }
     }
     
@@ -789,15 +810,15 @@ public class ChatViewModel: ObservableObject {
         // timing callbacks from the voice pipeline.
         if speak {
             if let vc = voiceController {
-                print("[Voice/streamed] pushing \(trimmed.count) chars — controller.isEnabled=\(vc.isEnabled)")
+                AgentLog.debug(.voice, "[Voice/streamed] pushing \(trimmed.count) chars — controller.isEnabled=\(vc.isEnabled)")
                 vc.reset()
                 vc.pushDelta(trimmed, emotion: emotion)
                 vc.finishTurn(finalText: nil, emotion: emotion)
             } else {
-                print("[Voice/streamed] SKIPPED — voiceController is nil at inject time")
+                AgentLog.debug(.voice, "[Voice/streamed] SKIPPED — voiceController is nil at inject time")
             }
         } else {
-            print("[Voice/streamed] speak=false, no voice push")
+            AgentLog.debug(.voice, "[Voice/streamed] speak=false, no voice push")
         }
 
         // Per-word delay derived from the requested WPM. Clamp at a
@@ -1018,7 +1039,7 @@ public class ChatViewModel: ObservableObject {
                 selectSystem(loaded[0])
             }
         } catch {
-            print("[ChatViewModel] Failed to load systems: \(error)")
+            AgentLog.error("[ChatVM] Failed to load systems: \(error)")
         }
         isLoadingSystems = false
     }
@@ -1089,7 +1110,7 @@ public class ChatViewModel: ObservableObject {
                 selectedModelId = nil
             }
         } catch {
-            print("[ChatViewModel] Failed to load models: \(error)")
+            AgentLog.error("[ChatVM] Failed to load models: \(error)")
         }
     }
 
@@ -1100,7 +1121,14 @@ public class ChatViewModel: ObservableObject {
         selectedModelId = modelId
     }
 
-    /// Load a specific conversation
+    /// Load a specific conversation, in full.
+    ///
+    /// Fetches the entire message history in one request (no `limit`) —
+    /// safe because conversations are capped, and required by the
+    /// transcript: a plain (non-lazy) `VStack` can only place scroll
+    /// targets exactly if every message is present. Paging in tens left
+    /// the list guessing at the height of rows it hadn't fetched, which
+    /// is what every jump-scroll bug ultimately traced back to.
     public func loadConversation(_ convId: String) async {
         // Ephemeral mode: conversation is local-only, nothing to fetch.
         if config.ephemeral {
@@ -1121,7 +1149,15 @@ public class ChatViewModel: ObservableObject {
                 messages = apiMessages.flatMap { mapApiMessage($0) }
             }
 
-            hasMoreMessages = conversation.hasMore ?? false
+            // Whole-thread fetch: nothing is left to page in, so the
+            // "Load earlier messages" button never renders. The server
+            // answers `has_more: false` for an unpaginated request; we
+            // don't trust it into `true` here, since a stale/proxied
+            // response saying otherwise would put a button on screen
+            // that can only re-fetch what we already hold.
+            hasMoreMessages = false
+            // Server-side count (API messages, not the mapped rows —
+            // one API message can expand into several).
             messagesOffset = conversation.messages?.count ?? 0
 
             // Suppress the first-assistant lifecycle hook for restored
@@ -1150,13 +1186,20 @@ public class ChatViewModel: ObservableObject {
             conversationId = nil
             storage.set(config.conversationIdKey, value: nil)
         } catch {
-            print("[ChatViewModel] Failed to load conversation: \(error)")
+            AgentLog.error("[ChatVM] Failed to load conversation: \(error)")
         }
 
         isLoading = false
     }
     
-    /// Load more messages (pagination)
+    /// Load more messages (pagination).
+    ///
+    /// Vestigial since `loadConversation` started fetching whole
+    /// threads: `hasMoreMessages` is now permanently false, so the guard
+    /// below returns immediately and the "Load earlier messages" button
+    /// that calls this never renders. Kept working (rather than deleted)
+    /// because it is public API, and because a host that wants windowed
+    /// loading back only has to set `hasMoreMessages` itself.
     public func loadMoreMessages() async {
         guard let convId = conversationId, !loadingMoreMessages, hasMoreMessages else { return }
         
@@ -1174,7 +1217,7 @@ public class ChatViewModel: ObservableObject {
                 hasMoreMessages = false
             }
         } catch {
-            print("[ChatViewModel] Failed to load more messages: \(error)")
+            AgentLog.error("[ChatVM] Failed to load more messages: \(error)")
         }
         
         loadingMoreMessages = false
@@ -1187,11 +1230,24 @@ public class ChatViewModel: ObservableObject {
         let messageToEdit = messages[index]
         guard messageToEdit.role == .user else { return }
 
+        // Captured before truncation: the original text and the message's
+        // ordinal among user-role rows let the backend find the exact run
+        // to supersede from, independent of display-row drift.
+        let originalContent = messageToEdit.content
+        let userOrdinal = messages.prefix(index).filter { $0.role == .user }.count
+
         // Truncate messages to just before this message
         messages = Array(messages.prefix(index))
 
         // Send the edited message with supersede flag
-        await sendMessage(newContent, model: model, thinking: thinking, supersedeFromMessageIndex: index)
+        await sendMessage(
+            newContent,
+            model: model,
+            thinking: thinking,
+            supersedeFromMessageIndex: index,
+            supersedeOriginalContent: originalContent,
+            supersedeUserMessageOrdinal: userOrdinal
+        )
     }
 
     /// Retry from a specific message
@@ -1216,11 +1272,20 @@ public class ChatViewModel: ObservableObject {
             return
         }
 
+        let userOrdinal = messages.prefix(userMessageIndex).filter { $0.role == .user }.count
+
         // Truncate messages to just before the user message
         messages = Array(messages.prefix(userMessageIndex))
 
         // Resend the same message with supersede flag
-        await sendMessage(userMessage.content, model: model, thinking: thinking, supersedeFromMessageIndex: userMessageIndex)
+        await sendMessage(
+            userMessage.content,
+            model: model,
+            thinking: thinking,
+            supersedeFromMessageIndex: userMessageIndex,
+            supersedeOriginalContent: userMessage.content,
+            supersedeUserMessageOrdinal: userOrdinal
+        )
     }
 
     // MARK: - Private Methods
@@ -1299,7 +1364,7 @@ public class ChatViewModel: ObservableObject {
                 }
             }
 
-            print("[ChatViewModel] subscribing runId=\(runId) url=\(redactURLForLogging(url))")
+            AgentLog.debug(.network, "[ChatVM] subscribing runId=\(runId) url=\(redactURLForLogging(url))")
             client.connect(url: url, headers: apiClient.authHeaders(), runId: runId)
         }
     }
@@ -1316,23 +1381,31 @@ public class ChatViewModel: ObservableObject {
     private func handleSSEEvent(_ event: SSEEvent) {
         guard let json = event.json(), let payload = json["payload"] as? [String: Any] else {
             #if DEBUG
-            print("[AgentFrontend][ChatVM] dropping event type=\(event.type) — no payload")
+            AgentLog.debug(.sse, "[ChatVM] dropping event type=\(event.type) — no payload")
             #endif
             return
         }
 
         #if DEBUG
         let payloadKeys = Array(payload.keys).sorted().joined(separator: ",")
-        print("[AgentFrontend][ChatVM] dispatch type=\(event.type) payload_keys=[\(payloadKeys)]")
+        AgentLog.debug(.sse, "[ChatVM] dispatch type=\(event.type) payload_keys=[\(payloadKeys)]")
         #endif
 
-        // Notify callback
-        config.onEvent?(event.type, payload)
+        // TEMP diagnostics (see HangDiagnostics): the freeze signature in
+        // the logs is main-thread dispatch stopping right after the FIRST
+        // assistant.delta of a turn, while SSE keeps arriving on the
+        // background thread. Time each phase of that path so whichever one
+        // wedges names itself.
+        HangDiagnostics.measure("onEvent callback (\(event.type))") {
+            config.onEvent?(event.type, payload)
+        }
         runState = runState.applying(eventType: event.type)
 
         switch event.type {
         case "assistant.delta":
-            handleAssistantDelta(payload)
+            HangDiagnostics.measure("handleAssistantDelta") {
+                handleAssistantDelta(payload)
+            }
 
         case "assistant.message":
             handleAssistantMessage(payload)
@@ -1403,9 +1476,6 @@ public class ChatViewModel: ObservableObject {
         // event (tool/video/sub-agent), which resets `turnFinalized`.
         if turnFinalized { return }
 
-        // Per-delta emotion overrides the turn-level value when present.
-        let emotion = Emotion.from(payload["emotion"])
-
         // Sub-agent echo suppression. After a sub-agent finishes streaming
         // its final answer, the parent typically re-streams the exact same
         // text as its own deltas (it's echoing the tool result). Buffer the
@@ -1439,7 +1509,6 @@ public class ChatViewModel: ObservableObject {
             assistantContent = ""
             resetStreamBuffer()
             streamBuffer.append(replay)
-            voiceController?.pushDelta(replay, emotion: emotion)
             startDrainTimerIfNeeded()
             return
         }
@@ -1469,8 +1538,16 @@ public class ChatViewModel: ObservableObject {
 
         // Enqueue into buffer; drain timer reveals chars at a steady rate.
         streamBuffer.append(delta)
-        voiceController?.pushDelta(delta, emotion: emotion)
         startDrainTimerIfNeeded()
+
+        // Deltas reach the voice controller only in hands-free mode, where
+        // the reply is meant to be heard and speaking it as it streams is
+        // what keeps the conversation moving. Otherwise replies stay
+        // silent and playback happens only when the user taps a message's
+        // speaker button, which drives the controller from `ChatWidgetView`.
+        if let vc = voiceController, vc.autoSpeakReplies {
+            vc.pushDelta(delta, emotion: Emotion.from(payload["emotion"]))
+        }
     }
 
     /// Handle an `assistant.message` event — the final authoritative text
@@ -1500,17 +1577,21 @@ public class ChatViewModel: ObservableObject {
         // typewriter bubble below the one we're about to finalise.
         turnFinalized = true
 
-        // Voice: if the run streamed deltas the chunker has been fed
-        // throughout — `finishTurn(finalText: nil)` flushes the trailing
-        // fragment. If it didn't (non-streaming run, or an SSE that only
-        // emits the authoritative message), pass `content` so the user
-        // still hears the reply.
-        let voiceEmotion = Emotion.from(payload["emotion"])
-        let needsFallbackText = streamBuffer.isEmpty && drainTimer == nil
-        voiceController?.finishTurn(
-            finalText: needsFallbackText ? content : nil,
-            emotion: voiceEmotion
-        )
+        // Voice: when the run streamed, the chunker has been fed
+        // throughout and `finishTurn(finalText: nil)` only flushes the
+        // trailing fragment — the chunker emits on sentence boundaries, so
+        // a reply's last few words would otherwise sit in its buffer
+        // unspoken. When it didn't stream (non-streaming run, or an SSE
+        // that emits only the authoritative message) pass `content` so the
+        // reply is still heard.
+        //
+        // Placed after the pill-mode return above: sub-agent narration is
+        // deliberately never spoken, only the parent's synthesis.
+        if let vc = voiceController, vc.autoSpeakReplies {
+            let needsFallbackText = streamBuffer.isEmpty && drainTimer == nil
+            vc.finishTurn(finalText: needsFallbackText ? content : nil,
+                          emotion: Emotion.from(payload["emotion"]))
+        }
 
         // Sub-agent echo resolution. If we were still comparing the parent's
         // stream against a sub-agent snapshot when the final message lands,
@@ -1788,24 +1869,24 @@ public class ChatViewModel: ObservableObject {
         closeStreamingSession()
         guard let blocksArray = payload["blocks"] as? [[String: Any]] else {
             #if DEBUG
-            print("[AgentFrontend][ChatVM] content.blocks: payload has no 'blocks' array — keys=\(Array(payload.keys))")
+            AgentLog.error("[ChatVM] content.blocks: payload has no 'blocks' array — keys=\(Array(payload.keys))")
             #endif
             return
         }
         #if DEBUG
         let rawTypes = blocksArray.compactMap { $0["type"] as? String }
-        print("[AgentFrontend][ChatVM] content.blocks: \(blocksArray.count) raw block(s) types=\(rawTypes) tool=\(payload["tool_name"] ?? "-")")
+        AgentLog.debug(.chat, "[ChatVM] content.blocks: \(blocksArray.count) raw block(s) types=\(rawTypes) tool=\(payload["tool_name"] ?? "-")")
         #endif
         let blocks = ContentBlock.parse(from: blocksArray)
         #if DEBUG
-        print("[AgentFrontend][ChatVM] content.blocks: parsed \(blocks.count) typed block(s)")
+        AgentLog.debug(.chat, "[ChatVM] content.blocks: parsed \(blocks.count) typed block(s)")
         if blocks.count != blocksArray.count {
-            print("[AgentFrontend][ChatVM] content.blocks: WARNING — parse dropped \(blocksArray.count - blocks.count) block(s); check ContentBlock Codable schema")
+            AgentLog.error("[ChatVM] content.blocks: parse dropped \(blocksArray.count - blocks.count) block(s); check ContentBlock Codable schema")
         }
         #endif
         guard !blocks.isEmpty else {
             #if DEBUG
-            print("[AgentFrontend][ChatVM] content.blocks: dropping — parsed to empty")
+            AgentLog.debug(.chat, "[ChatVM] content.blocks: dropping — parsed to empty")
             #endif
             return
         }
@@ -1913,7 +1994,7 @@ public class ChatViewModel: ObservableObject {
         }
 
         #if DEBUG
-        print("[AgentFrontend][ChatVM] memory.update: \(clientMemories.count) memories persisted")
+        AgentLog.debug(.chat, "[ChatVM] memory.update: \(clientMemories.count) memories persisted")
         #endif
     }
 
@@ -2029,7 +2110,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
-        print("[ChatViewModel] terminal type=\(type) runId=\(currentRunId ?? "nil")")
+        AgentLog.debug(.chat, "[ChatVM] terminal type=\(type) runId=\(currentRunId ?? "nil")")
         if type == "run.failed" {
             // Close out the stream so the error message doesn't orphan a
             // streaming bubble or cause subsequent text to overwrite it.
@@ -2056,13 +2137,18 @@ public class ChatViewModel: ObservableObject {
             // resolved by another event and would only leak into the next
             // turn if not cleared.
             clearPendingEcho()
+            // A cancelled/timed-out run stops any playback still in flight
+            // from a speaker-button tap.
             if type == "run.cancelled" || type == "run.timed_out" {
                 voiceController?.stop()
-            } else {
-                // Success: flush any trailing text the chunker still holds
-                // so the final fragment gets spoken. No-op when
-                // assistant.message already flushed.
-                voiceController?.finishTurn()
+            } else if let vc = voiceController, vc.autoSpeakReplies {
+                // Belt and braces for a run that ended without a clean
+                // `assistant.message`: flush whatever the chunker still
+                // holds so the reply doesn't end mid-sentence, and — since
+                // `finishTurn` closes the turn — release anything waiting
+                // on the end-of-turn signal. A no-op when the message
+                // handler already flushed.
+                vc.finishTurn()
             }
         }
 

@@ -17,7 +17,8 @@ public struct ContentBlockRenderer: View {
     var onAction: ((BlockAction) -> Void)?
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let _ = HangDiagnostics.mark("ContentBlockRenderer body (\(blocks.count) blocks)")
+        return VStack(alignment: .leading, spacing: 8) {
             ForEach(blocks) { block in
                 renderBlock(block)
             }
@@ -483,7 +484,7 @@ struct VideoBlockView: View {
         }
         .onAppear {
             #if DEBUG
-            print("[AgentFrontend][VideoBlock] onAppear url=\(block.url) autoplay=\(block.autoplay ?? false) title=\(block.title ?? "-")")
+            AgentLog.debug(.lifecycle, "[VideoBlock] onAppear url=\(block.url) autoplay=\(block.autoplay ?? false) title=\(block.title ?? "-")")
             #endif
             if block.autoplay == true { loadPlayer() }
         }
@@ -538,12 +539,12 @@ struct VideoBlockView: View {
     private func loadPlayer() {
         guard let url = URL(string: block.url) else {
             #if DEBUG
-            print("[AgentFrontend][VideoBlock] loadPlayer FAILED — invalid URL: \(block.url)")
+            AgentLog.error("[VideoBlock] loadPlayer FAILED — invalid URL: \(block.url)")
             #endif
             return
         }
         #if DEBUG
-        print("[AgentFrontend][VideoBlock] loadPlayer starting AVPlayer for \(url)")
+        AgentLog.debug(.lifecycle, "[VideoBlock] loadPlayer starting AVPlayer for \(url)")
         #endif
         onPlaybackStart?()
         let p = AVPlayer(url: url)

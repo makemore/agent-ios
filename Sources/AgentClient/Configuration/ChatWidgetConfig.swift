@@ -94,7 +94,18 @@ public struct ChatWidgetConfig {
     /// Only applies to assistant messages — user messages are always plain text.
     public var enableMarkdown: Bool
 
-    /// Show TTS toggle button
+    /// Show the speak-aloud control at the left of the composer — the
+    /// button that decides whether replies are read out, and stops them
+    /// mid-reply when they are.
+    ///
+    /// This was dark for a while: the global mute stopped making sense
+    /// once playback only ever started from a message's speaker button,
+    /// because there was nothing to mute. Hands-free conversation brought
+    /// automatic speech back, so the control has a job again — and it is
+    /// the only unambiguous way to stop a reply being read aloud.
+    ///
+    /// Inert unless ``enableTTS`` is also on, so hosts that never opted
+    /// into voice see no new control.
     public var showTTSButton: Bool
 
     /// Enable text-to-speech
@@ -102,6 +113,18 @@ public struct ChatWidgetConfig {
 
     /// Enable voice input
     public var enableVoice: Bool
+
+    /// Offer hands-free continuous conversation — the toggle beside the
+    /// mic that makes the composer send on a pause, speak the reply aloud,
+    /// and hand the mic straight back for the next turn.
+    ///
+    /// Off by default, and inert unless ``enableTTS`` and ``enableVoice``
+    /// are both on: without a voice to reply in there is no agent turn for
+    /// the loop to wait through. Hosts that opt in should expect the mic
+    /// to stay live through playback (that is what lets the user interrupt
+    /// by talking over the agent), which means a `.voiceChat` audio
+    /// session and its echo cancellation for the duration.
+    public var enableContinuousVoice: Bool
 
     /// Policy for choosing remote vs local/system TTS.
     /// In `privateOnly` mode, `.automatic` resolves to `.localOnly` so
@@ -112,6 +135,11 @@ public struct ChatWidgetConfig {
     /// resolves to `.localOnly`; if on-device recognition is unavailable,
     /// the mic affordance fails closed.
     public var speechInputPolicy: SpeechInputPolicy
+
+    /// Which engine transcribes dictation. `.system` is Apple's
+    /// recognizer; `.whisper` runs OpenAI Whisper on-device via
+    /// WhisperKit (better accuracy, ~150 MB model download on first use).
+    public var dictationBackend: DictationBackend
 
     /// Enable file attachments
     public var enableFiles: Bool
@@ -311,8 +339,10 @@ public struct ChatWidgetConfig {
         self.showTTSButton = true
         self.enableTTS = false
         self.enableVoice = true
+        self.enableContinuousVoice = false
         self.ttsProviderPolicy = .automatic
         self.speechInputPolicy = .automatic
+        self.dictationBackend = .system
         self.enableFiles = true
         self.showModelSelector = false
         self.showTasksTab = true

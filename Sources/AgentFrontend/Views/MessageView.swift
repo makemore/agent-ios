@@ -13,6 +13,21 @@ public struct MessageView: View {
     let showDebug: Bool
     let onRetry: (() -> Void)?
     let onEdit: (() -> Void)?
+    /// Speak this message aloud. Supplied by the parent list only when
+    /// the host enabled TTS (`ChatWidgetConfig.enableTTS`); `nil` hides
+    /// the Play affordances entirely. Defaulted so preview/harness call
+    /// sites keep compiling.
+    var onSpeak: (() -> Void)? = nil
+    /// Whether THIS message is the one currently being read aloud. Flips
+    /// the speaker affordance into a stop button; ``onSpeak`` then stops
+    /// rather than replays. Defaulted so preview/harness call sites keep
+    /// compiling.
+    var isSpeaking: Bool = false
+    /// Fired *after* this message's text has been put on the pasteboard,
+    /// by either the actions-row button or the context menu. Purely a
+    /// notification so the host can confirm the copy — the copy itself
+    /// happens here.
+    var onCopy: (() -> Void)? = nil
     /// When `true` and this is an assistant text/tool/system message,
     /// render the S'Ai presence orb as a small avatar at the leading
     /// edge of the row. The parent list decides per-message whether
@@ -40,6 +55,20 @@ public struct MessageView: View {
     /// reply from the agent").
     private var shouldShowAvatar: Bool {
         showAgentAvatar
+            && !isPlainAssistant
+            && !isUser
+            && !isSystem
+            && !isToolMessage
+            && !isContentBlocks
+            && !isThoughtRow
+    }
+    /// `true` when this row is an assistant reply and the host asked for
+    /// the `.plain` assistant style: no bubble fill, no bubble padding,
+    /// no avatar, no right gutter — the reply is just text sitting on the
+    /// chat background. Tool, system and content-block rows keep their
+    /// own treatments, which is what makes them legible as *not* prose.
+    private var isPlainAssistant: Bool {
+        appearance.assistantMessageStyle == .plain
             && !isUser
             && !isSystem
             && !isToolMessage
@@ -85,10 +114,11 @@ public struct MessageView: View {
         if isContentBlocks, let blocks = message.metadata?.contentBlocks, !blocks.isEmpty {
             let _: Void = {
                 #if DEBUG
-                print("[AgentFrontend][MessageView] rendering ContentBlockRenderer with \(blocks.count) block(s)")
+                AgentLog.debug(.chat, "[MessageView] rendering ContentBlockRenderer with \(blocks.count) block(s)")
                 #endif
             }()
             ContentBlockRenderer(blocks: blocks, config: config, onAction: onBlockAction)
+                .onAppear { HangDiagnostics.mark("ContentBlockRenderer appear") }
                 .padding(.horizontal, 12)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
@@ -120,12 +150,7 @@ public struct MessageView: View {
                 messageBubble
                     .contextMenu {
                         Button {
-                            #if os(iOS)
-                            UIPasteboard.general.string = message.content
-                            #else
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(message.content, forType: .string)
-                            #endif
+                            copyMessage()
                         } label: {
                             Label("Copy", systemImage: "doc.on.doc")
                         }
@@ -145,6 +170,15 @@ public struct MessageView: View {
                                 Label("Edit", systemImage: "pencil")
                             }
                         }
+
+                        if let onSpeak = onSpeak {
+                            Button {
+                                onSpeak()
+                            } label: {
+                                Label(isSpeaking ? "Stop" : "Play",
+                                      systemImage: isSpeaking ? "stop.fill" : "speaker.wave.2")
+                            }
+                        }
                     }
 
                 // Actions row
@@ -153,7 +187,7 @@ public struct MessageView: View {
                 }
             }
 
-            if !isUser { Spacer(minLength: 40) }
+            if !isUser { Spacer(minLength: isPlainAssistant ? 0 : 40) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
@@ -184,11 +218,21 @@ public struct MessageView: View {
             // region — pressing near the composer would select through the
             // message list and the input bar.
             if !isUser && !isSystem && !isToolMessage && config.enableMarkdown {
-                MarkdownTextView(content: message.content, foregroundColor: messageTextColor, linkColor: linkColor)
+                MarkdownTextView(content: message.content,
+                                 foregroundColor: messageTextColor,
+                                 linkColor: linkColor,
+                                 cacheKey: message.id,
+                                 textStyle: appearance.messageTextStyle,
+                                 fontDesign: appearance.messageFontDesign,
+                                 lineSpacing: appearance.messageLineSpacing,
+                                 blockSpacing: appearance.messageBlockSpacing)
                     .textSelection(.enabled)
             } else {
+                // Tool and system rows stay at `.body` on purpose — they
+                // are metadata, and scaling them with the user's own
+                // messages makes a tool header shout.
                 Text(message.content)
-                    .font(.body)
+                    .font(isUser ? .system(appearance.userTextStyle) : .body)
                     .foregroundColor(messageTextColor)
                     .textSelection(.enabled)
             }
@@ -210,9 +254,9 @@ public struct MessageView: View {
                 fileAttachments(files)
             }
         }
-        .padding(12)
-        .background(bubbleBackground)
-        .cornerRadius(appearance.bubbleCornerRadius)
+        .padding(isPlainAssistant ? 0 : 12)
+        .background(isPlainAssistant ? Color.clear : bubbleBackground)
+        .cornerRadius(isPlainAssistant ? 0 : appearance.bubbleCornerRadius)
     }
     
     @ViewBuilder
@@ -243,7 +287,7 @@ public struct MessageView: View {
     
     private var messageTextColor: Color {
         if isUser {
-            return appearance.textOnAccent
+            return appearance.userBubbleText ?? appearance.textOnAccent
         }
         return appearance.textPrimary
     }
@@ -265,28 +309,78 @@ public struct MessageView: View {
         return appearance.assistantBubble ?? PlatformColors.systemGray5
     }
     
+    /// Put this message's text on the pasteboard and notify the host so
+    /// it can confirm the copy. Shared by the actions-row button and the
+    /// bubble's context menu so both paths behave identically.
+    private func copyMessage() {
+        #if os(iOS)
+        UIPasteboard.general.string = message.content
+        #else
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.content, forType: .string)
+        #endif
+        onCopy?()
+    }
+
     @ViewBuilder
     private var actionsRow: some View {
-        HStack(spacing: 12) {
+        // Spacing is 0 because `actionIconHitTarget()` carries its own
+        // horizontal padding — the frames supply the 12pt between glyphs
+        // that this row used to get from stack spacing. Adding spacing on
+        // top of the frames double-counts it and the row sprawls.
+        HStack(spacing: 0) {
+            if !isUser {
+                Button {
+                    copyMessage()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.subheadline)
+                        .actionIconHitTarget()
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .accessibilityLabel("Copy message")
+            }
+
+            if let onSpeak = onSpeak {
+                Button(action: onSpeak) {
+                    Image(systemName: isSpeaking ? "stop.fill" : "speaker.wave.2")
+                        .font(.subheadline)
+                        .actionIconHitTarget()
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .accessibilityLabel(isSpeaking ? "Stop playback" : "Play message")
+            }
+
             if let onRetry = onRetry {
                 Button(action: onRetry) {
                     Image(systemName: "arrow.clockwise")
-                        .font(.caption)
+                        .font(.subheadline)
+                        .actionIconHitTarget()
                 }
+                .buttonStyle(.plain)
                 .foregroundColor(.secondary)
+                .accessibilityLabel("Retry")
             }
-            
+
             if let onEdit = onEdit {
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
-                        .font(.caption)
+                        .font(.subheadline)
+                        .actionIconHitTarget()
                 }
+                .buttonStyle(.plain)
                 .foregroundColor(.secondary)
+                .accessibilityLabel("Edit")
             }
-            
+
             Text(message.timestamp, style: .time)
                 .font(.caption2)
                 .foregroundColor(.secondary)
+                // The icons' hit frames end ~8pt past the last glyph, so
+                // this tops the timestamp gap up to match the icon spread.
+                .padding(.leading, 9)
         }
     }
     
@@ -320,3 +414,74 @@ public struct MessageView: View {
     }
 }
 
+
+private extension View {
+    /// Expand a caption-sized glyph into a real tap target.
+    ///
+    /// The action-row icons render at `.font(.caption)`, so without this
+    /// the hit area is the glyph itself — roughly 10pt, well under the
+    /// 44pt Apple asks for. Taps landed next to the icon and silently did
+    /// nothing, which read as the button being broken. `contentShape`
+    /// makes the padded frame hit-testable rather than just the drawn
+    /// pixels.
+    ///
+    /// 30pt around a ~13pt subheadline glyph leaves ~8pt each side, so
+    /// two adjacent icons sit ~17pt apart — wider than the original 12pt
+    /// row but tighter than the 22pt it briefly had — while height stays
+    /// generous because nothing crowds the row vertically.
+    func actionIconHitTarget() -> some View {
+        self.frame(minWidth: 25, minHeight: 36)
+            .contentShape(Rectangle())
+    }
+}
+
+#if DEBUG
+/// Canvas playground for the assistant action row. Live-interactive:
+/// tapping the speaker toggles the play/stop icon in place, so spacing
+/// and sizing tweaks in `actionIconHitTarget()` show immediately.
+private struct MessageActionRowHarness: View {
+    @State private var speaking = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            MessageView(
+                message: Message(
+                    id: "preview-1",
+                    role: .assistant,
+                    content: "Here's a reply long enough to wrap a couple of lines, so the bubble and the action row underneath both look like the real thing."
+                ),
+                config: ChatWidgetConfig(),
+                showDebug: false,
+                onRetry: {},
+                onEdit: nil,
+                onSpeak: { speaking.toggle() },
+                isSpeaking: speaking,
+                onCopy: {},
+                showAgentAvatar: true,
+                agentAvatarSpeaking: speaking
+            )
+            MessageView(
+                message: Message(
+                    id: "preview-2",
+                    role: .user,
+                    content: "A user message for contrast."
+                ),
+                config: ChatWidgetConfig(),
+                showDebug: false,
+                onRetry: {},
+                onEdit: {},
+                showAgentAvatar: false,
+                agentAvatarSpeaking: false
+            )
+        }
+        .padding()
+    }
+}
+
+struct MessageView_Previews: PreviewProvider {
+    static var previews: some View {
+        MessageActionRowHarness()
+            .previewDisplayName("Action row — tap speaker to toggle")
+    }
+}
+#endif

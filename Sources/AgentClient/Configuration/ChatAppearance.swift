@@ -48,6 +48,20 @@ public struct ChatAppearance {
         case bubbles
     }
 
+    /// How an assistant reply is drawn in the transcript.
+    ///
+    /// - `.bubble`: the reply sits in its own filled, rounded bubble,
+    ///   mirroring the user's side of the conversation.
+    /// - `.plain`: no fill, no bubble padding — the reply is just text
+    ///   on the chat background, so the agent reads as the page itself
+    ///   rather than as another participant posting messages. The
+    ///   per-message avatar is suppressed in this style too; the
+    ///   presence orb above the list already carries agent identity.
+    public enum AssistantMessageStyle {
+        case bubble
+        case plain
+    }
+
     // MARK: - Surfaces
 
     /// Root background colour behind the whole widget.
@@ -81,6 +95,13 @@ public struct ChatAppearance {
     /// to theme the user side of the transcript independently.
     public var userBubble: Color?
 
+    /// Text colour inside the user's own message bubbles. When `nil`
+    /// the transcript falls back to `textOnAccent`, which is correct
+    /// while the user bubble *is* the accent fill. Set this when
+    /// `userBubble` is themed independently of the accent, so bubble
+    /// text and on-accent chrome (send button) can differ.
+    public var userBubbleText: Color?
+
     /// Background colour for assistant message bubbles. When `nil` the
     /// transcript falls back to the adaptive system grey it used before
     /// the warm-dark redesign, so `.classic` is unchanged. The default
@@ -108,6 +129,31 @@ public struct ChatAppearance {
     /// Greeting headline point size.
     public var greetingFontSize: CGFloat
 
+    /// Text style for the user's own messages. Separate from
+    /// `messageTextStyle` because the two sides are set in different
+    /// faces — a sans bubble and serif prose at the same nominal size
+    /// do not read as the same size — and because tool/system rows
+    /// deliberately stay at `.body` regardless.
+    public var userTextStyle: Font.TextStyle
+    /// Base text style for assistant prose. Everything else in a reply
+    /// is sized relative to it — headings step up from here, so raising
+    /// this raises the whole reply coherently. Kept as a `TextStyle`
+    /// rather than a point size so Dynamic Type still scales it.
+    public var messageTextStyle: Font.TextStyle
+    /// Font design for assistant prose in the transcript — body copy,
+    /// headings and list items alike. `.serif` gives the editorial look
+    /// where the agent reads as the page rather than as a chat partner;
+    /// `.default` keeps the system sans. Deliberately does *not* touch
+    /// user bubbles or UI chrome: those stay sans so the two voices in
+    /// the transcript are typographically distinct.
+    public var messageFontDesign: Font.Design
+    /// Extra leading between lines of assistant prose. Long-form serif
+    /// text needs more air than the system default gives it.
+    public var messageLineSpacing: CGFloat
+    /// Vertical gap between markdown blocks in an assistant reply —
+    /// paragraph to paragraph, paragraph to heading, heading to list.
+    public var messageBlockSpacing: CGFloat
+
     // MARK: - Layout knobs
 
     /// Composer layout variant.
@@ -118,6 +164,10 @@ public struct ChatAppearance {
     public var composerCornerRadius: CGFloat
     /// Corner radius applied to message bubbles.
     public var bubbleCornerRadius: CGFloat
+
+    /// Whether assistant replies are drawn as bubbles or as plain text
+    /// on the background. Library default is `.bubble`.
+    public var assistantMessageStyle: AssistantMessageStyle
     /// Label rendered in the model pill on the anthropic composer.
     /// When `nil` the pill is hidden. Host apps drive this from their
     /// currently selected model so the composer surfaces what's active.
@@ -139,15 +189,22 @@ public struct ChatAppearance {
         textOnAccent: Color = Color.white,
         accent: Color = Color(hex: "#D97757"),
         userBubble: Color? = nil,
+        userBubbleText: Color? = nil,
         assistantBubble: Color? = Color(hex: "#3A3A37"),
         systemBubble: Color? = Color(hex: "#2F2F2D"),
         link: Color? = nil,
         greetingFontDesign: Font.Design = .serif,
         greetingFontSize: CGFloat = 32,
+        userTextStyle: Font.TextStyle = .body,
+        messageTextStyle: Font.TextStyle = .body,
+        messageFontDesign: Font.Design = .default,
+        messageLineSpacing: CGFloat = 0,
+        messageBlockSpacing: CGFloat = 6,
         composerStyle: ComposerStyle = .anthropic,
         brandMark: BrandMark = .none,
         composerCornerRadius: CGFloat = 28,
         bubbleCornerRadius: CGFloat = 18,
+        assistantMessageStyle: AssistantMessageStyle = .bubble,
         modelPillLabel: String? = nil,
         subAgentActivityStyle: SubAgentActivityStyle = .pill
     ) {
@@ -160,15 +217,22 @@ public struct ChatAppearance {
         self.textOnAccent = textOnAccent
         self.accent = accent
         self.userBubble = userBubble
+        self.userBubbleText = userBubbleText
         self.assistantBubble = assistantBubble
         self.systemBubble = systemBubble
         self.link = link
         self.greetingFontDesign = greetingFontDesign
         self.greetingFontSize = greetingFontSize
+        self.userTextStyle = userTextStyle
+        self.messageTextStyle = messageTextStyle
+        self.messageFontDesign = messageFontDesign
+        self.messageLineSpacing = messageLineSpacing
+        self.messageBlockSpacing = messageBlockSpacing
         self.composerStyle = composerStyle
         self.brandMark = brandMark
         self.composerCornerRadius = composerCornerRadius
         self.bubbleCornerRadius = bubbleCornerRadius
+        self.assistantMessageStyle = assistantMessageStyle
         self.modelPillLabel = modelPillLabel
         self.subAgentActivityStyle = subAgentActivityStyle
     }

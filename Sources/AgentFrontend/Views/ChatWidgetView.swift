@@ -26,6 +26,11 @@ public struct ChatWidgetView: View {
     /// APIClient is now retained so the sidebar's recents list can fetch
     /// `loadConversations()` without the host having to pass a second copy.
     let apiClient: APIClient?
+    /// Host-supplied hard block on sending, forwarded to ``InputView``.
+    /// Lets a host hold the composer shut while its backend cannot take a
+    /// turn yet — a cold-starting private model, say — without the widget
+    /// needing to know why. Defaults to `false`.
+    let sendDisabled: Bool
     @State private var showSystemPicker = false
     @State private var showSidebar = false
     /// Drives presentation of `ModelOptionsSheet` when the user taps
@@ -33,10 +38,28 @@ public struct ChatWidgetView: View {
     /// level (not inside `InputView`) so the sheet is anchored to the
     /// whole screen and the input view stays purely about the composer.
     @State private var showModelOptions = false
+    /// Drives the transient "Copied" confirmation over the transcript.
+    @State private var copyConfirmationVisible = false
+    /// Incremented per copy so a second copy while the toast is still up
+    /// restarts the dismiss timer instead of the first one cutting the
+    /// second one short.
+    @State private var copyConfirmationToken = 0
     /// TTS controller, created lazily on first appear so the view can be
     /// previewed without a backend. Bound to the viewModel so SSE events
     /// flow into voice playback.
     @StateObject private var voiceController: VoiceController
+    /// Id of the message whose text was last handed to the voice
+    /// controller by the per-message speaker button. Only meaningful
+    /// while ``voiceController.isSpeaking``; cleared when playback ends
+    /// so the row's stop button reverts to a speaker on its own.
+    @State private var speakingMessageId: String? = nil
+    /// Index and working text of the user message being edited, or `nil`.
+    /// While set, ``EditMessageCard`` replaces the composer; sending
+    /// commits via ``ChatViewModel.editMessage(at:newContent:)``, which
+    /// truncates the transcript and restarts the conversation from that
+    /// point.
+    @State private var editingMessageIndex: Int? = nil
+    @State private var editingText: String = ""
     /// Optional host hook fired when the user taps a ``BlockAction``
     /// inside a rendered ``ContentBlock``. The widget supplies a
     /// default handler that auto-sends `type == "message"` actions
@@ -52,11 +75,13 @@ public struct ChatWidgetView: View {
         config: ChatWidgetConfig,
         apiClient: APIClient? = nil,
         voiceController: VoiceController? = nil,
+        sendDisabled: Bool = false,
         onBlockAction: ((BlockAction) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.config = config
         self.apiClient = apiClient
+        self.sendDisabled = sendDisabled
         self.onBlockAction = onBlockAction
         // Build the controller up front: ``StateObject`` only honours its
         // initial value on first creation, so we have to resolve the
@@ -99,6 +124,21 @@ public struct ChatWidgetView: View {
             }
         }
         .background(config.appearance.background.ignoresSafeArea())
+    }
+
+    /// Flash the "Message copied" confirmation over the transcript.
+    ///
+    /// The token guard means copying a second message while the first
+    /// toast is still on screen restarts the dwell rather than letting
+    /// the earlier timer dismiss the newer confirmation early.
+    private func showCopyConfirmation() {
+        copyConfirmationToken += 1
+        let token = copyConfirmationToken
+        copyConfirmationVisible = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            guard copyConfirmationToken == token else { return }
+            copyConfirmationVisible = false
+        }
     }
 
     /// UI-facing config after applying view-model runtime preferences.
@@ -160,15 +200,43 @@ public struct ChatWidgetView: View {
                 onRetry: { index in
                     Task { await viewModel.retryMessage(at: index) }
                 },
-                onEdit: { index, content in
-                    Task { await viewModel.editMessage(at: index, newContent: content) }
+                onBeginEdit: { index, content in
+                    editingText = content
+                    editingMessageIndex = index
                 },
+                // Toggle: tapping the speaker on the playing message stops
+                // it; tapping any other message switches playback to that
+                // one. `stop()` also clears the turn-failed latch, so
+                // replaying still works after a provider error earlier in
+                // the same turn. Playback never touches the composer — the
+                // user keeps typing and sending while a message plays.
+                onSpeak: effectiveConfig.enableTTS ? { message in
+                    if speakingMessageId == message.id, voiceController.isSpeaking {
+                        voiceController.stop()
+                        speakingMessageId = nil
+                    } else {
+                        voiceController.stop()
+                        // With the global mute toggle gone, an explicit
+                        // play tap is the "try again" affordance: it
+                        // clears the session-wide unavailable latch a
+                        // provider failure may have set, so playback can
+                        // recover without an app restart.
+                        voiceController.setEnabled(true)
+                        speakingMessageId = message.id
+                        voiceController.finishTurn(finalText: message.content)
+                    }
+                } : nil,
+                speakingMessageId: voiceController.isSpeaking ? speakingMessageId : nil,
+                onCopy: { showCopyConfirmation() },
                 activity: viewModel.subAgentActivity,
                 agentIsSpeaking: voiceController.isSpeaking,
                 onBlockAction: { action in
                     handleBlockAction(action)
                 }
             )
+            .onChange(of: voiceController.isSpeaking) { speaking in
+                if !speaking { speakingMessageId = nil }
+            }
 
             // Error display
             if let error = viewModel.error {
@@ -177,8 +245,8 @@ public struct ChatWidgetView: View {
                 }
             }
 
-            // System picker / TTS toggle row — bottom-right, above input
-            if config.showSystemPicker || config.showTTSButton {
+            // System picker row — bottom-right, above input
+            if config.showSystemPicker {
                 HStack {
                     // Show current system name if selected
                     if config.showSystemPicker,
@@ -197,22 +265,6 @@ public struct ChatWidgetView: View {
 
                     Spacer()
 
-                    // TTS toggle: shows speaker icon, fills/animates while
-                    // playback is active. Tapping toggles ``enableTTS`` on
-                    // the controller — disabling cuts off any in-flight
-                    // audio so the user isn't trapped listening to the rest.
-                    if config.showTTSButton {
-                        Button(action: { voiceController.setEnabled(!voiceController.isEnabled) }) {
-                            Image(systemName: ttsIconName)
-                                .font(.body)
-                                .foregroundColor(voiceController.isEnabled ? config.primaryColor : .secondary)
-                                .padding(8)
-                                .background(PlatformColors.systemGray6)
-                                .clipShape(Circle())
-                        }
-                        .accessibilityLabel(voiceController.isEnabled ? "Disable voice output" : "Enable voice output")
-                    }
-
                     if config.showSystemPicker {
                         Button(action: { showSystemPicker = true }) {
                             Image(systemName: "gearshape")
@@ -229,6 +281,22 @@ public struct ChatWidgetView: View {
             }
 
             // Input form
+            if let editIndex = editingMessageIndex {
+                EditMessageCard(
+                    config: effectiveConfig,
+                    text: $editingText,
+                    onSend: {
+                        let content = editingText
+                        editingMessageIndex = nil
+                        editingText = ""
+                        Task { await viewModel.editMessage(at: editIndex, newContent: content) }
+                    },
+                    onCancel: {
+                        editingMessageIndex = nil
+                        editingText = ""
+                    }
+                )
+            } else {
             InputView(
                 config: config,
                 isLoading: viewModel.isLoading,
@@ -252,7 +320,8 @@ public struct ChatWidgetView: View {
                 },
                 onModelPillTap: { showModelOptions = true },
                 modelPillLabelOverride: viewModel.selectedModelDisplayName,
-                viewModel: viewModel
+                viewModel: viewModel,
+                sendDisabled: sendDisabled
             )
             // Publish the composer's rendered height so host overlays (e.g. an
             // empty-state Sessions button) can sit above it and track its
@@ -265,7 +334,18 @@ public struct ChatWidgetView: View {
                     )
                 }
             )
+            }
         }
+        .overlay(alignment: .top) {
+            if copyConfirmationVisible {
+                CopyConfirmationToast(appearance: effectiveConfig.appearance)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    // Never intercept taps — it sits over the transcript.
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: copyConfirmationVisible)
         // Auto-restore saved conversation on launch (paginated, not full history)
         .task {
             // Bind the voice controller to the viewModel so SSE deltas
@@ -279,9 +359,9 @@ public struct ChatWidgetView: View {
             config.onVoiceControllerReady?(viewModel)
 
 
-            print("[📜 ChatWidgetView] .task fired — calling restoreConversationIfNeeded()")
+            AgentLog.debug(.lifecycle, "[ChatWidgetView] .task fired — restoreConversationIfNeeded()")
             await viewModel.restoreConversationIfNeeded()
-            print("[📜 ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
+            AgentLog.debug(.lifecycle, "[ChatWidgetView] .task complete — messages.count=\(viewModel.messages.count)")
 
             // Load systems if picker is enabled
             if config.showSystemPicker {
@@ -310,13 +390,6 @@ public struct ChatWidgetView: View {
         .sheet(isPresented: $showModelOptions) {
             ModelOptionsSheet(config: config, viewModel: viewModel)
         }
-    }
-
-    /// Speaker icon: filled when speech is enabled, ``.3`` waves while
-    /// playback is in flight, slashed when muted.
-    private var ttsIconName: String {
-        if !voiceController.isEnabled { return "speaker.slash.fill" }
-        return voiceController.isSpeaking ? "speaker.wave.3.fill" : "speaker.wave.2.fill"
     }
 
     /// Top bar shown when `config.showInternalTopBar` is `true`. Left
@@ -433,3 +506,35 @@ struct ChatWidgetView_Previews: PreviewProvider {
 }
 #endif
 
+
+/// Transient "Copied" confirmation shown over the top of the transcript.
+///
+/// Exists because copying a message was previously silent: a successful
+/// copy and a tap that missed the icon looked identical, so the button
+/// read as broken. Purely presentational — the copy itself happens in
+/// ``MessageView``.
+private struct CopyConfirmationToast: View {
+    let appearance: ChatAppearance
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption)
+            Text("Message copied")
+                .font(.caption)
+        }
+        .foregroundColor(appearance.textPrimary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                // `assistantBubble` is optional in ChatAppearance — fall
+                // back to the themed surface so the toast is never
+                // transparent against the transcript.
+                .fill(appearance.assistantBubble ?? appearance.background)
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Message copied")
+    }
+}

@@ -32,10 +32,24 @@ extension APIClient {
         return try decoder.decode([Conversation].self, from: data)
     }
     
-    /// Load a specific conversation
-    public func loadConversation(id: String, limit: Int = 10, offset: Int = 0) async throws -> Conversation {
+    /// Load a specific conversation.
+    ///
+    /// `limit == nil` (the default) omits the pagination params entirely,
+    /// which the runtime's `AgentConversationDetailSerializer` reads as
+    /// "send the whole message history" and answers with `has_more: false`.
+    /// That is what the client wants now that conversations are capped —
+    /// a whole-thread load is what lets the transcript render eagerly
+    /// instead of guessing at the geometry of rows it hasn't fetched.
+    ///
+    /// Pass a `limit` to opt back into windowed paging (see
+    /// `ChatViewModel.loadMoreMessages`); `offset` counts back from the
+    /// newest message, matching the server's slicing.
+    public func loadConversation(id: String, limit: Int? = nil, offset: Int = 0) async throws -> Conversation {
         let token = try await getOrCreateSession()
-        let path = "\(config.apiPaths.conversations)\(id)/?limit=\(limit)&offset=\(offset)"
+        var path = "\(config.apiPaths.conversations)\(id)/"
+        if let limit {
+            path += "?limit=\(limit)&offset=\(offset)"
+        }
         let request = buildRequest(path: path, method: "GET", token: token)
         
         let (data, response) = try await session.data(for: request)
@@ -72,6 +86,8 @@ extension APIClient {
         model: String? = nil,
         thinking: Bool = false,
         supersedeFromMessageIndex: Int? = nil,
+        supersedeOriginalContent: String? = nil,
+        supersedeUserMessageOrdinal: Int? = nil,
         agentKeyOverride: String? = nil,
         systemVersionId: String? = nil,
         ephemeral: Bool = false,
@@ -101,6 +117,17 @@ extension APIClient {
 
         if let index = supersedeFromMessageIndex {
             body["supersedeFromMessageIndex"] = index
+        }
+
+        // Robust edit/retry hints: the edited user message's original text
+        // and its ordinal among user-role messages. The backend prefers
+        // these over the display-row index above, which can drift from the
+        // server's transcript (tool rows, hidden trigger messages).
+        if let original = supersedeOriginalContent {
+            body["supersedeOriginalContent"] = original
+        }
+        if let ordinal = supersedeUserMessageOrdinal {
+            body["supersedeUserMessageOrdinal"] = ordinal
         }
 
         if let systemVersionId = systemVersionId {
