@@ -133,6 +133,55 @@ final class AgentFrontendTests: XCTestCase {
         ])
     }
 
+    func testThematicBreakBecomesDivider() {
+        // The agent occasionally emits "---" between paragraphs (learned
+        // from a prompt artifact); it used to render as literal dashes.
+        let blocks = MarkdownBlockParser.parse("""
+        Hey.
+
+        ---
+
+        I'm here.
+        """)
+        XCTAssertEqual(blocks, [
+            .paragraph("Hey."),
+            .thematicBreak,
+            .paragraph("I'm here.")
+        ])
+    }
+
+    func testThematicBreakVariants() {
+        XCTAssertEqual(MarkdownBlockParser.parse("***"), [.thematicBreak])
+        XCTAssertEqual(MarkdownBlockParser.parse("___"), [.thematicBreak])
+        XCTAssertEqual(MarkdownBlockParser.parse("- - -"), [.thematicBreak])
+        XCTAssertEqual(MarkdownBlockParser.parse("----------"), [.thematicBreak])
+    }
+
+    func testThematicBreakEndsAParagraph() {
+        // No blank line before the rule — it must still terminate the
+        // paragraph rather than being swallowed into it.
+        let blocks = MarkdownBlockParser.parse("""
+        Hey.
+        ---
+        I'm here.
+        """)
+        XCTAssertEqual(blocks, [
+            .paragraph("Hey."),
+            .thematicBreak,
+            .paragraph("I'm here.")
+        ])
+    }
+
+    func testTwoDashesStayProse() {
+        let blocks = MarkdownBlockParser.parse("--")
+        XCTAssertEqual(blocks, [.paragraph("--")])
+    }
+
+    func testBulletListNotMistakenForThematicBreak() {
+        let blocks = MarkdownBlockParser.parse("- item")
+        XCTAssertEqual(blocks, [.bulletList(["item"])])
+    }
+
     func testCodeBlockUnaffected() {
         let blocks = MarkdownBlockParser.parse("""
         ```swift

@@ -55,6 +55,20 @@ public struct MessageView: View {
     /// reply from the agent").
     private var shouldShowAvatar: Bool {
         showAgentAvatar
+            && !isPlainAssistant
+            && !isUser
+            && !isSystem
+            && !isToolMessage
+            && !isContentBlocks
+            && !isThoughtRow
+    }
+    /// `true` when this row is an assistant reply and the host asked for
+    /// the `.plain` assistant style: no bubble fill, no bubble padding,
+    /// no avatar, no right gutter — the reply is just text sitting on the
+    /// chat background. Tool, system and content-block rows keep their
+    /// own treatments, which is what makes them legible as *not* prose.
+    private var isPlainAssistant: Bool {
+        appearance.assistantMessageStyle == .plain
             && !isUser
             && !isSystem
             && !isToolMessage
@@ -173,7 +187,7 @@ public struct MessageView: View {
                 }
             }
 
-            if !isUser { Spacer(minLength: 40) }
+            if !isUser { Spacer(minLength: isPlainAssistant ? 0 : 40) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isUser ? "chat.message.user" : "chat.message.assistant")
@@ -207,11 +221,18 @@ public struct MessageView: View {
                 MarkdownTextView(content: message.content,
                                  foregroundColor: messageTextColor,
                                  linkColor: linkColor,
-                                 cacheKey: message.id)
+                                 cacheKey: message.id,
+                                 textStyle: appearance.messageTextStyle,
+                                 fontDesign: appearance.messageFontDesign,
+                                 lineSpacing: appearance.messageLineSpacing,
+                                 blockSpacing: appearance.messageBlockSpacing)
                     .textSelection(.enabled)
             } else {
+                // Tool and system rows stay at `.body` on purpose — they
+                // are metadata, and scaling them with the user's own
+                // messages makes a tool header shout.
                 Text(message.content)
-                    .font(.body)
+                    .font(isUser ? .system(appearance.userTextStyle) : .body)
                     .foregroundColor(messageTextColor)
                     .textSelection(.enabled)
             }
@@ -233,9 +254,9 @@ public struct MessageView: View {
                 fileAttachments(files)
             }
         }
-        .padding(12)
-        .background(bubbleBackground)
-        .cornerRadius(appearance.bubbleCornerRadius)
+        .padding(isPlainAssistant ? 0 : 12)
+        .background(isPlainAssistant ? Color.clear : bubbleBackground)
+        .cornerRadius(isPlainAssistant ? 0 : appearance.bubbleCornerRadius)
     }
     
     @ViewBuilder
@@ -266,7 +287,7 @@ public struct MessageView: View {
     
     private var messageTextColor: Color {
         if isUser {
-            return appearance.textOnAccent
+            return appearance.userBubbleText ?? appearance.textOnAccent
         }
         return appearance.textPrimary
     }

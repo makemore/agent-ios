@@ -9,6 +9,7 @@ enum MarkdownBlock: Equatable {
     case heading(text: String, level: Int)          // level 1-3
     case bulletList([String])
     case numberedList(items: [String], start: Int)  // start = first item's number
+    case thematicBreak                              // ---, ***, ___
 }
 
 /// Block-level parser for assistant message bodies.
@@ -112,6 +113,14 @@ enum MarkdownBlockParser {
                 continue
             }
 
+            // Thematic break (---) — before the bullet check so "- - -"
+            // style rules can't be mistaken for a list item.
+            if isThematicBreak(line) {
+                blocks.append(.thematicBreak)
+                i += 1
+                continue
+            }
+
             // Bullet list
             if bulletItemText(line) != nil {
                 var items: [String] = []
@@ -160,7 +169,7 @@ enum MarkdownBlockParser {
             var paraLines: [String] = []
             while i < lines.count {
                 let l = lines[i]
-                if l.hasPrefix("```") || heading(l) != nil ||
+                if l.hasPrefix("```") || heading(l) != nil || isThematicBreak(l) ||
                    bulletItemText(l) != nil || numberedItem(l) != nil || isBlank(l) {
                     break
                 }
@@ -194,6 +203,17 @@ enum MarkdownBlockParser {
 
     private static func isBlank(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Three or more of the same marker (-, *, _) alone on a line, with
+    /// optional spaces between them ("---", "***", "- - -"). Rendered as a
+    /// blank line — the agent shouldn't emit these, but when one slips
+    /// through it must not appear as literal dashes.
+    private static func isThematicBreak(_ line: String) -> Bool {
+        let marks = line.filter { $0 != " " && $0 != "\t" }
+        guard marks.count >= 3, let first = marks.first,
+              first == "-" || first == "*" || first == "_" else { return false }
+        return marks.allSatisfy { $0 == first }
     }
 
     private static func heading(_ line: String) -> MarkdownBlock? {
@@ -238,6 +258,7 @@ enum MarkdownBlockParser {
 ///   lists with blank lines between items
 /// - Headers (# h1, ## h2, ### h3)
 /// - [Links](url) — tappable, open in Safari
+/// - Thematic breaks (---) — rendered as a blank line
 /// - Line breaks / paragraphs
 ///
 /// Uses SwiftUI's built-in `AttributedString(markdown:)` for inline formatting
@@ -251,9 +272,20 @@ struct MarkdownTextView: View {
     /// don't have an id still behave correctly, just without the
     /// streaming-friendly reuse.
     var cacheKey: String? = nil
+    /// Base text style. Headings step up from it, so the whole reply
+    /// scales together when the host raises this.
+    var textStyle: Font.TextStyle = .body
+    /// Typeface family for the whole reply. `.serif` is the editorial
+    /// voice; `.default` keeps the system sans. Code blocks stay
+    /// monospaced regardless — a serif code block is unreadable.
+    var fontDesign: Font.Design = .default
+    /// Extra leading between wrapped lines.
+    var lineSpacing: CGFloat = 0
+    /// Vertical gap between blocks.
+    var blockSpacing: CGFloat = 6
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: blockSpacing) {
             ForEach(Array(MarkdownRenderCache.blocks(id: cacheKey ?? content, content: content).enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
@@ -268,6 +300,15 @@ struct MarkdownTextView: View {
         case .paragraph(let text):
             inlineMarkdownText(text)
                 .textSelection(.enabled)
+
+        case .thematicBreak:
+            // Rendered as one blank line rather than a drawn rule — in a
+            // conversational bubble a hairline reads as UI chrome. Using a
+            // space glyph (not a fixed frame) keeps the gap proportional
+            // when the host raises `textStyle`.
+            Text(verbatim: " ")
+                .font(bodyFont)
+                .lineSpacing(lineSpacing)
 
         case .codeBlock(let code, let lang):
             VStack(alignment: .leading, spacing: 4) {
@@ -294,22 +335,38 @@ struct MarkdownTextView: View {
                 .font(headingFont(level))
                 .fontWeight(.bold)
                 .textSelection(.enabled)
+                // A heading belongs to what follows it, so it wants more
+                // air above than the uniform block gap gives. Half a gap
+                // again reads as a section break rather than as one more
+                // paragraph that happens to be bold.
+                .padding(.top, blockSpacing / 2)
 
-        // Lists render as ONE Text, not a VStack of glyph+Text HStack
-        // rows. The row-per-item structure was what tail-truncated long
-        // items: the lazy stack's height proposal for the bubble got
-        // split across the nested containers (rows VStack → bullet
-        // HStack), each row's Text obeyed its too-small slice, and any
-        // item needing more than its share ellipsised — while sibling
-        // paragraphs rendered fully. Joining the items with "\n" and
-        // going through `inlineMarkdownText` is the exact paragraph
-        // path, the one shape proven to wrap correctly under the
-        // rewritten list ( `.inlineOnlyPreservingWhitespace` keeps the
-        // newlines; the glyph/number prefixes are literal text to the
-        // inline parser). `fixedSize` on row Texts is NOT an
-        // alternative — see `inlineMarkdownText`; it hangs the lazy
-        // layout. Cost: wrapped lines start at the margin instead of
-        // hanging under the item text.
+        // Lists render as ONE Text: items joined with newlines, markers
+        // as literal text. Wrapped lines return to the margin instead of
+        // hanging under the item text — a real cost, paid on purpose.
+        //
+        // HISTORY, now with two data points, because the row-per-item
+        // shape (marker column + text column, the one with hanging
+        // indents) has been tried and reverted TWICE:
+        //
+        //   1. 2026-07, against the lazy message list: long items
+        //      tail-ellipsised while sibling paragraphs wrapped fine.
+        //      Diagnosed as the lazy stack's height proposal being split
+        //      across the nested row containers.
+        //   2. 2026-08-20, against the rewritten PLAIN-VStack list, on
+        //      the theory that the lazy stack was the cause and its
+        //      removal made rows safe. Same symptom on device: first
+        //      bullet ellipsised at one line, its sibling wrapped — so
+        //      the lazy stack was NOT the whole cause, and the real
+        //      constraint is still undiagnosed.
+        //
+        // Do not attempt the row shape a third time without a live
+        // repro in hand: RM debug builds auto-install a fixture
+        // conversation (ChatDebugSeeder) whose "list-item truncation"
+        // case has bullets long enough to wrap 2-3 lines, and every one
+        // of them must render unelided before and after. And do NOT reach for `fixedSize`
+        // if anything here looks short — see `inlineMarkdownText`; it
+        // hangs the layout.
         case .bulletList(let items):
             inlineMarkdownText(items.map { "•  \($0)" }
                 .joined(separator: "\n"))
@@ -323,15 +380,17 @@ struct MarkdownTextView: View {
         }
     }
 
+    /// The body face, shared by prose and list markers.
+    private var bodyFont: Font { .system(textStyle, design: fontDesign) }
+
     /// Render inline markdown (bold, italic, code, links) using AttributedString
     ///
-    /// Wrapping fix: these Texts sit inside the message list's lazy stack,
-    /// which proposes a height rather than letting the Text grow — without
-    /// intervention a long run of text clips to one line and ellipsises.
-    ///
-    /// Wrapping fix: these Texts sit inside the message list's lazy stack,
-    /// which proposes a height rather than letting the Text grow — without
-    /// intervention a long run of text clips to one line and ellipsises.
+    /// Wrapping fix: without intervention a long run of text here clips
+    /// to one line and ellipsises instead of growing. The original
+    /// diagnosis blamed the then-lazy message list's height proposal;
+    /// the list is a plain `VStack` now and the constraint evidently
+    /// survives (see the list HISTORY above), so treat the width pin
+    /// below as load-bearing regardless of what the container is.
     ///
     /// Deliberately `.frame(maxWidth:)`, NOT `fixedSize(horizontal:false,
     /// vertical:true)`. The fixedSize form (the original July fix, written
@@ -349,29 +408,48 @@ struct MarkdownTextView: View {
     /// `LazySubviewPlacements.placeSubviews` → `LazyStack.place`). A
     /// definite width does not rescue the height negotiation, so do not
     /// reintroduce fixedSize here in any form. List-item truncation is
-    /// instead solved structurally in `listText(items:prefix:)`.
+    /// instead solved structurally by the joined-Text list shape above.
     @ViewBuilder
     private func inlineMarkdownText(_ text: String) -> some View {
         if let attributed = MarkdownRenderCache.attributed(for: text) {
             Text(attributed)
-                .font(.body)
+                .font(bodyFont)
+                .lineSpacing(lineSpacing)
                 .foregroundColor(foregroundColor)
                 .tint(linkColor)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             // Fallback to plain text if markdown parsing fails
             Text(text)
-                .font(.body)
+                .font(bodyFont)
+                .lineSpacing(lineSpacing)
                 .foregroundColor(foregroundColor)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    /// Text styles in ascending size order. `Font.TextStyle` is
+    /// `CaseIterable` but its case order is not documented as size
+    /// order, so headings step through this instead.
+    private static let sizeOrder: [Font.TextStyle] = [
+        .caption2, .caption, .footnote, .subheadline,
+        .callout, .body, .title3, .title2, .title, .largeTitle
+    ]
+
+    /// Headings are sized *relative to the body*, so raising
+    /// `textStyle` lifts the whole reply and keeps the hierarchy
+    /// intact. h3 sits at body size and earns its rank from weight
+    /// alone, matching the previous `.headline`.
     private func headingFont(_ level: Int) -> Font {
+        let steps: Int
         switch level {
-        case 1: return .title2
-        case 2: return .title3
-        default: return .headline
+        case 1: steps = 2
+        case 2: steps = 1
+        default: steps = 0
         }
+        let base = Self.sizeOrder.firstIndex(of: textStyle)
+            ?? Self.sizeOrder.firstIndex(of: .body)!
+        let style = Self.sizeOrder[min(base + steps, Self.sizeOrder.count - 1)]
+        return .system(style, design: fontDesign)
     }
 }

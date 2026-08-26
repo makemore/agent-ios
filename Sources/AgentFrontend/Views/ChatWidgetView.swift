@@ -26,6 +26,11 @@ public struct ChatWidgetView: View {
     /// APIClient is now retained so the sidebar's recents list can fetch
     /// `loadConversations()` without the host having to pass a second copy.
     let apiClient: APIClient?
+    /// Host-supplied hard block on sending, forwarded to ``InputView``.
+    /// Lets a host hold the composer shut while its backend cannot take a
+    /// turn yet — a cold-starting private model, say — without the widget
+    /// needing to know why. Defaults to `false`.
+    let sendDisabled: Bool
     @State private var showSystemPicker = false
     @State private var showSidebar = false
     /// Drives presentation of `ModelOptionsSheet` when the user taps
@@ -70,11 +75,13 @@ public struct ChatWidgetView: View {
         config: ChatWidgetConfig,
         apiClient: APIClient? = nil,
         voiceController: VoiceController? = nil,
+        sendDisabled: Bool = false,
         onBlockAction: ((BlockAction) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.config = config
         self.apiClient = apiClient
+        self.sendDisabled = sendDisabled
         self.onBlockAction = onBlockAction
         // Build the controller up front: ``StateObject`` only honours its
         // initial value on first creation, so we have to resolve the
@@ -313,7 +320,8 @@ public struct ChatWidgetView: View {
                 },
                 onModelPillTap: { showModelOptions = true },
                 modelPillLabelOverride: viewModel.selectedModelDisplayName,
-                viewModel: viewModel
+                viewModel: viewModel,
+                sendDisabled: sendDisabled
             )
             // Publish the composer's rendered height so host overlays (e.g. an
             // empty-state Sessions button) can sit above it and track its

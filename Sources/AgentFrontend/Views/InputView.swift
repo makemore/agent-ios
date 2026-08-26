@@ -40,6 +40,11 @@ public struct InputView: View {
     /// that don't pipe a `ChatViewModel` through. When `nil` the sheet
     /// falls back to local stub state.
     let viewModel: ChatViewModel?
+    /// Host-supplied hard block on sending, independent of what the user has
+    /// typed. Set while the backend cannot accept a turn yet (e.g. a private
+    /// model still cold-starting). Defaults to `false`, so hosts that don't
+    /// pass it behave exactly as before.
+    let sendDisabled: Bool
 
     /// End-of-turn signal from the voice controller, resolved once at init
     /// rather than per body pass: `.onReceive` re-subscribes whenever the
@@ -57,7 +62,8 @@ public struct InputView: View {
                 onCancel: @escaping () -> Void,
                 onModelPillTap: (() -> Void)? = nil,
                 modelPillLabelOverride: String? = nil,
-                viewModel: ChatViewModel? = nil) {
+                viewModel: ChatViewModel? = nil,
+                sendDisabled: Bool = false) {
         self.config = config
         self.isLoading = isLoading
         self.isAgentSpeaking = isAgentSpeaking
@@ -67,6 +73,7 @@ public struct InputView: View {
         self.onModelPillTap = onModelPillTap
         self.modelPillLabelOverride = modelPillLabelOverride
         self.viewModel = viewModel
+        self.sendDisabled = sendDisabled
         self.agentTurnDidEnd = voiceController?.agentTurnDidEnd.eraseToAnyPublisher()
             ?? Empty<Void, Never>(completeImmediately: false).eraseToAnyPublisher()
     }
@@ -175,17 +182,31 @@ public struct InputView: View {
     /// the observed-wrap fallback in the field's geometry reader.
     private var multilineHeightThreshold: CGFloat {
         #if canImport(UIKit)
-        return UIFont.preferredFont(forTextStyle: .body).lineHeight * 1.5
+        return composerUIFont.lineHeight * 1.5
         #else
         return 33
         #endif
     }
 
+    #if canImport(UIKit)
+    /// The field's font as a `UIFont`, for the wrap math below.
+    ///
+    /// Both the width estimate and the height threshold have to measure
+    /// in the font the field is *actually* set in. They were pinned to
+    /// `.body` while the field was too; now that the host can raise it
+    /// via `userTextStyle`, a stale `.body` here would under-measure
+    /// every string and the field would visually wrap a word or two
+    /// before the math admitted it had.
+    private var composerUIFont: UIFont {
+        UIFont.preferredFont(forTextStyle: UIFont.TextStyle(config.appearance.userTextStyle))
+    }
+    #endif
+
     /// Width the text would occupy laid out on one line.
     private func singleLineTextWidth(_ text: String) -> CGFloat {
         #if canImport(UIKit)
         return (text as NSString).size(
-            withAttributes: [.font: UIFont.preferredFont(forTextStyle: .body)]
+            withAttributes: [.font: composerUIFont]
         ).width
         #else
         return 0
@@ -423,7 +444,8 @@ public struct InputView: View {
     }
     
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
+        guard !sendDisabled else { return false }
+        return !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
     }
 
     private var effectiveSpeechInputPolicy: SpeechInputPolicy {
@@ -754,6 +776,7 @@ public struct InputView: View {
                         .id(composerGeneration)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
+                        .font(.system(config.appearance.userTextStyle))
                         .opacity(showsWaveform ? 0 : 1)
                         .allowsHitTesting(!isRecording)
                         // Zero opacity still occupies layout, and a
@@ -850,7 +873,7 @@ public struct InputView: View {
                             .id(composerGeneration)
                             .textFieldStyle(.plain)
                             .lineLimit(1...6)
-                            .font(.body)
+                            .font(.system(config.appearance.userTextStyle))
                             .foregroundColor(config.appearance.textPrimary)
                             .tint(config.appearance.accent)
                             // NOTE: no `.fixedSize(vertical:)` here — it
@@ -1320,6 +1343,30 @@ struct InputView_Previews: PreviewProvider {
         }
         .background(Color(white: 0.95))
         .previewDisplayName("Run in flight — cancel button")
+    }
+}
+#endif
+
+#if canImport(UIKit)
+private extension UIFont.TextStyle {
+    /// SwiftUI's `Font.TextStyle` has no bridge to UIKit's, and the
+    /// composer needs one so its `UIFont`-based measurements can follow
+    /// whatever style the field is set in.
+    init(_ style: Font.TextStyle) {
+        switch style {
+        case .largeTitle:  self = .largeTitle
+        case .title:       self = .title1
+        case .title2:      self = .title2
+        case .title3:      self = .title3
+        case .headline:    self = .headline
+        case .subheadline: self = .subheadline
+        case .body:        self = .body
+        case .callout:     self = .callout
+        case .footnote:    self = .footnote
+        case .caption:     self = .caption1
+        case .caption2:    self = .caption2
+        @unknown default:  self = .body
+        }
     }
 }
 #endif
