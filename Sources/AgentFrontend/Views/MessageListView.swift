@@ -482,6 +482,7 @@ public struct MessageListView: View {
                     .id(Self.bottomAnchorId)
             }
             .padding()
+            .chatReadableColumn()
         }
         // iOS 18+: the ScrollView owns bottom anchoring. Opens at the
         // newest message (`.initialOffset`) and keeps the bottom pinned
