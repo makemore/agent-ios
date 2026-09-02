@@ -375,6 +375,9 @@ public struct InputView: View {
             case .anthropic:  anthropicComposer
             }
         }
+        // Same width as the message list's readable column, so the composer
+        // sits flush under the conversation on wide layouts.
+        .chatReadableColumn()
         // The box grows (and shrinks) smoothly, whatever caused it —
         // typing past a line, a transcript chunk landing, or the
         // one-row ↔ two-row restructure. Both decisions come from the
