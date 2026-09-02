@@ -121,6 +121,11 @@ config.subtitle = "How can I help?"
 config.primaryColor = Color(hex: "#FF6600")
 config.placeholder = "Ask me anything..."
 
+// Appearance — new integrations should start from .recommended.
+// Named presets: .classic (pre-0.8 look), .anthropic (warm-dark),
+// .neutral (system-adaptive, unbranded), .resilientGold (RM house style).
+config.appearance = .recommended
+
 // Features
 config.showTasksTab = true
 config.showModelSelector = false

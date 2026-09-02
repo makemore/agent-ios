@@ -471,6 +471,10 @@ final class AppViewModel: ObservableObject {
         )
         config.title = "My Assistant"
         config.subtitle = ""
+        // Appearance — .recommended is the generic starting point for new
+        // integrations. Pin a named preset (.classic, .anthropic, .neutral,
+        // .resilientGold) if you need a stable look across library updates.
+        config.appearance = .recommended
         config.showConversationSidebar = false   // We provide our own sidebar
         config.showClearButton = false           // We handle this ourselves
         config.showTasksTab = false              // Optional: set true if you want tasks
