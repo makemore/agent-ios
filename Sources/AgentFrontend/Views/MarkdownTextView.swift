@@ -10,6 +10,7 @@ enum MarkdownBlock: Equatable {
     case bulletList([String])
     case numberedList(items: [String], start: Int)  // start = first item's number
     case thematicBreak                              // ---, ***, ___
+    case table(headers: [String], rows: [[String]]) // GitHub-style pipe table
 }
 
 /// Block-level parser for assistant message bodies.
@@ -113,6 +114,27 @@ enum MarkdownBlockParser {
                 continue
             }
 
+            // Pipe table — must come before the thematic-break check: the
+            // separator row ("|---|---|") is nothing but dashes and pipes,
+            // and a table body row of dashes would otherwise read as a rule.
+            if isTableStart(lines, at: i) {
+                let headers = tableCells(lines[i])
+                i += 2 // header + separator
+                var rows: [[String]] = []
+                while i < lines.count, isTableRow(lines[i]) {
+                    // Pad/trim to the header count so a sloppy row can't
+                    // shear the whole grid.
+                    var cells = tableCells(lines[i])
+                    if cells.count < headers.count {
+                        cells += Array(repeating: "", count: headers.count - cells.count)
+                    }
+                    rows.append(Array(cells.prefix(headers.count)))
+                    i += 1
+                }
+                blocks.append(.table(headers: headers, rows: rows))
+                continue
+            }
+
             // Thematic break (---) — before the bullet check so "- - -"
             // style rules can't be mistaken for a list item.
             if isThematicBreak(line) {
@@ -170,7 +192,8 @@ enum MarkdownBlockParser {
             while i < lines.count {
                 let l = lines[i]
                 if l.hasPrefix("```") || heading(l) != nil || isThematicBreak(l) ||
-                   bulletItemText(l) != nil || numberedItem(l) != nil || isBlank(l) {
+                   bulletItemText(l) != nil || numberedItem(l) != nil || isBlank(l) ||
+                   isTableStart(lines, at: i) {
                     break
                 }
                 paraLines.append(l)
@@ -203,6 +226,49 @@ enum MarkdownBlockParser {
 
     private static func isBlank(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    // MARK: Tables
+
+    /// A table starts at a pipe row whose NEXT line is a separator row
+    /// (`| --- | :--: |`). Both are required — a lone pipe line is prose
+    /// ("either | or"), and during streaming the header arrives a tick
+    /// before the separator, so the header renders as a paragraph for a
+    /// moment and upgrades to a table once the separator lands.
+    private static func isTableStart(_ lines: [String], at index: Int) -> Bool {
+        guard index + 1 < lines.count,
+              isTableRow(lines[index]),
+              isTableSeparator(lines[index + 1]) else { return false }
+        return true
+    }
+
+    private static func isTableRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.contains("|") && !trimmed.isEmpty && !trimmed.hasPrefix("```")
+    }
+
+    /// Separator cells are runs of dashes with optional alignment colons.
+    /// One dash is accepted (the spec wants three; models don't always
+    /// oblige), but every cell must match or the line is just prose.
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let cells = tableCells(line)
+        guard !cells.isEmpty else { return false }
+        return cells.allSatisfy { cell in
+            let core = cell.hasPrefix(":") ? String(cell.dropFirst()) : cell
+            let body = core.hasSuffix(":") ? String(core.dropLast()) : core
+            return !body.isEmpty && body.allSatisfy { $0 == "-" }
+        }
+    }
+
+    /// Split a pipe row into trimmed cells, dropping the empties produced
+    /// by leading/trailing pipes ("| a | b |" -> ["a", "b"]).
+    private static func tableCells(_ line: String) -> [String] {
+        var cells = line.trimmingCharacters(in: .whitespaces)
+            .components(separatedBy: "|")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        if cells.first?.isEmpty == true { cells.removeFirst() }
+        if cells.last?.isEmpty == true { cells.removeLast() }
+        return cells
     }
 
     /// Three or more of the same marker (-, *, _) alone on a line, with
@@ -259,6 +325,7 @@ enum MarkdownBlockParser {
 /// - Headers (# h1, ## h2, ### h3)
 /// - [Links](url) — tappable, open in Safari
 /// - Thematic breaks (---) — rendered as a blank line
+/// - Pipe tables (| a | b |) — header + striped rows, horizontal scroll
 /// - Line breaks / paragraphs
 ///
 /// Uses SwiftUI's built-in `AttributedString(markdown:)` for inline formatting
@@ -395,7 +462,75 @@ struct MarkdownTextView: View {
                 .map { "\($0.offset + start). \($0.element)" }
                 .joined(separator: "\n"))
                 .textSelection(.enabled)
+
+        // Wide tables scroll horizontally like code blocks rather than
+        // squeezing: JSP replies cite rate tables with 5+ columns, and
+        // compressing those into a phone width makes every cell a one-
+        // word-per-line ribbon. Each cell wraps against a bounded width,
+        // which keeps the layout out of the lazy list's height
+        // negotiation (see inlineMarkdownText — no fixedSize, ever).
+        case .table(let headers, let rows):
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .topLeading,
+                     horizontalSpacing: 0,
+                     verticalSpacing: 0) {
+                    GridRow {
+                        ForEach(Array(headers.enumerated()), id: \.offset) { _, cell in
+                            tableCellText(cell, isHeader: true)
+                        }
+                    }
+                    .background(PlatformColors.systemGray6)
+                    ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                        GridRow {
+                            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                tableCellText(cell, isHeader: false)
+                            }
+                        }
+                        .background(rowIndex.isMultiple(of: 2)
+                            ? Color.clear
+                            : PlatformColors.systemGray6.opacity(0.5))
+                    }
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(PlatformColors.systemGray6, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
         }
+    }
+
+    /// One table cell. Caps cell width so a prose-length cell wraps at a
+    /// readable measure instead of stretching the whole grid off-screen.
+    ///
+    /// The `fixedSize(horizontal: false, vertical: true)` here is the fix
+    /// for cells ellipsising at one line: the Grid row proposes a single
+    /// line of height and the Text truncates rather than grow. Yes, the
+    /// big warning in `inlineMarkdownText` says never to use fixedSize —
+    /// that hang is a negotiation between message-body Text and the (once
+    /// lazy) message list. This subtree is a `Grid` inside its own
+    /// horizontal `ScrollView`: the width cap right above gives the Text
+    /// a definite measure to wrap against, and no lazy container takes
+    /// part in the height negotiation, so the ideal-height request
+    /// resolves in one pass.
+    @ViewBuilder
+    private func tableCellText(_ text: String, isHeader: Bool) -> some View {
+        Group {
+            if let attributed = MarkdownRenderCache.attributed(for: text) {
+                Text(attributed)
+            } else {
+                Text(text)
+            }
+        }
+        .font(.system(.callout, design: fontDesign).weight(isHeader ? .semibold : .regular))
+        .foregroundColor(foregroundColor)
+        .tint(linkColor)
+        .textSelection(.enabled)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: 280, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// The body face, shared by prose and list markers.

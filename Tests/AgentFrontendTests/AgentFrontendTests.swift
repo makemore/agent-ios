@@ -191,5 +191,47 @@ final class AgentFrontendTests: XCTestCase {
         XCTAssertEqual(blocks, [.codeBlock(code: "let x = 1", language: "swift")])
     }
 
+    func testPipeTable() {
+        let blocks = MarkdownBlockParser.parse("""
+        | JSP | Title |
+        | --- | ----- |
+        | 752 | Allowances |
+        | 800 | Movement |
+        """)
+        XCTAssertEqual(blocks, [.table(
+            headers: ["JSP", "Title"],
+            rows: [["752", "Allowances"], ["800", "Movement"]]
+        )])
+    }
+
+    func testTableWithAlignmentColonsAndProseAround() {
+        let blocks = MarkdownBlockParser.parse("""
+        See the summary:
+        | A | B | C |
+        |:--|:-:|--:|
+        | 1 | 2 |
+        After.
+        """)
+        XCTAssertEqual(blocks, [
+            .paragraph("See the summary:"),
+            .table(headers: ["A", "B", "C"], rows: [["1", "2", ""]]),
+            .paragraph("After."),
+        ])
+    }
+
+    func testLonePipeLineStaysProse() {
+        let blocks = MarkdownBlockParser.parse("choose either | or both")
+        XCTAssertEqual(blocks, [.paragraph("choose either | or both")])
+    }
+
+    func testSeparatorStillThematicBreakWithoutHeader() {
+        let blocks = MarkdownBlockParser.parse("""
+        text above
+
+        ---
+        """)
+        XCTAssertEqual(blocks, [.paragraph("text above"), .thematicBreak])
+    }
+
 }
 

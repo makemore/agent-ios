@@ -257,6 +257,12 @@ public class ChatViewModel: ObservableObject {
     private var sseClient: SSEClient?
     private var assistantContent: String = ""
     private var hasRestoredConversation: Bool = false
+    /// Index into `messages` where the current run's assistant-side rows
+    /// begin (captured at subscribe time, i.e. just after the user's row
+    /// was appended). `reconcilePendingRun()` trims from here before
+    /// replaying the run's event stream, so the replayed events rebuild
+    /// the turn without duplicating partially-rendered rows.
+    private var turnStartIndex: Int = 0
 
     // MARK: - Streaming buffer
     // Decouples network receive rate from visual display rate. OpenAI emits
@@ -617,7 +623,51 @@ public class ChatViewModel: ObservableObject {
             AgentLog.error("[ChatVM] Failed to cancel run: \(error)")
         }
     }
-    
+
+    /// Re-attach to a run whose SSE stream was severed without reaching a
+    /// terminal event — typically because iOS suspended the app and tore
+    /// the socket down. The runtime persists every event, so reconnecting
+    /// to the run's event stream makes the server replay the whole turn
+    /// from the first event and then live-tail if the run is still
+    /// executing (or close out immediately on the persisted terminal
+    /// event). Call this from the host's foreground handler.
+    ///
+    /// No-op when no run is pending: terminal events clear `currentRunId`,
+    /// so a turn that finished normally is never replayed.
+    public func reconcilePendingRun() async {
+        guard let runId = currentRunId else { return }
+
+        AgentLog.debug(.network, "[ChatVM] reconciling pending runId=\(runId)")
+
+        // The old socket is dead or dying — drop it explicitly and wake
+        // any outstanding `sendMessage` awaiter now. Late callbacks from
+        // this client are ignored by the identity guard in
+        // `subscribeToEvents`.
+        sseClient?.disconnect(reason: .lifecycle)
+        sseClient = nil
+        resumeStreamContinuation()
+
+        // Trim the rows rendered for this turn so the replayed events
+        // rebuild it without duplicates. The user's own message sits
+        // before `turnStartIndex`, so it survives. Clamped because a
+        // conversation load/clear may have shrunk `messages` since the
+        // index was captured.
+        let trimFrom = min(turnStartIndex, messages.count)
+        if trimFrom < messages.count {
+            messages.removeSubrange(trimFrom...)
+        }
+
+        // Replayed deltas re-enter the voice pipeline; clear any
+        // half-spoken audio from before the suspension first.
+        voiceController?.reset()
+
+        error = nil
+        isLoading = true
+        runState = .streaming
+
+        await subscribeToEvents(runId: runId)
+    }
+
     /// Clear all messages and start fresh.
     /// Does NOT delete the conversation from local storage — it just
     /// starts a new in-memory conversation.
@@ -1320,6 +1370,11 @@ public class ChatViewModel: ObservableObject {
         // stale pill hovering on the next send.
         subAgentActivity = SubAgentActivityState()
 
+        // Everything appended from here on belongs to this run's turn —
+        // remember where it starts so `reconcilePendingRun()` can trim
+        // and replay it without duplication.
+        turnStartIndex = messages.count
+
         let client = SSEClient()
         sseClient = client
 
@@ -1345,20 +1400,30 @@ public class ChatViewModel: ObservableObject {
         // fires first. `resumeStreamContinuation` is single-shot so a late
         // callback after cancellation is a no-op.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // Release any prior awaiter before installing the new one —
+            // a reconcile-resubscribe would otherwise leak the old
+            // continuation and hang its caller forever.
+            self.resumeStreamContinuation()
             self.streamContinuation = continuation
 
-            client.onError = { [weak self] error in
+            client.onError = { [weak self, weak client] error in
                 Task { @MainActor in
                     guard let self = self else { return }
+                    // Ignore callbacks from a superseded client (e.g. a
+                    // dead socket replaced by `reconcilePendingRun()`) —
+                    // only the live stream may mutate loading state or
+                    // resume the awaiter.
+                    guard client === self.sseClient else { return }
                     self.isLoading = false
                     self.error = error.localizedDescription
                     self.resumeStreamContinuation()
                 }
             }
 
-            client.onComplete = { [weak self] in
+            client.onComplete = { [weak self, weak client] in
                 Task { @MainActor in
                     guard let self = self else { return }
+                    guard client === self.sseClient else { return }
                     self.isLoading = false
                     self.resumeStreamContinuation()
                 }
