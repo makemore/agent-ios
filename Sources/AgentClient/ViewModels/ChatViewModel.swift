@@ -2499,6 +2499,9 @@ public class ChatViewModel: ObservableObject {
             // resolved by another event and would only leak into the next
             // turn if not cleared.
             clearPendingEcho()
+            if type == "run.timed_out" {
+                error = "The response timed out. Please try again."
+            }
             // A cancelled/timed-out run stops any playback still in flight
             // from a speaker-button tap.
             if type == "run.cancelled" || type == "run.timed_out" {

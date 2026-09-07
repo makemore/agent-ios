@@ -1,6 +1,6 @@
 import Foundation
 
-/// Loads the shared SSE fixtures in `clients/test-fixtures/sse/` and
+/// Loads the shared SSE fixtures in `test-harness/fixtures/sse/` and
 /// renders them to either:
 ///   - a single `Data` blob in the same wire format the real backend
 ///     produces (one `event:`/`data:` frame per event), or
@@ -25,7 +25,10 @@ struct SSEFixture {
     let events: [Event]
 
     static func load(_ name: String, file: StaticString = #filePath) throws -> SSEFixture {
-        let url = try fixturesDirectory(from: file, fixtureName: name).appendingPathComponent("\(name).json")
+        let url = try SharedFixture.locate(
+            "sse/\(name).json",
+            from: URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
+        )
         let data = try Data(contentsOf: url)
         struct Raw: Decodable {
             let name: String?
@@ -67,24 +70,44 @@ struct SSEFixture {
         }
         return out
     }
+}
 
-    private static func fixturesDirectory(from file: StaticString, fixtureName: String) throws -> URL {
-        var url = URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
-        // Walk up until we find the `clients/` directory, then descend.
-        for _ in 0..<10 {
-            let siblings = url.appendingPathComponent("clients/test-fixtures/sse")
-            if FileManager.default.fileExists(atPath: siblings.appendingPathComponent("\(fixtureName).json").path) {
-                return siblings
+/// Shared by SSE and ephemeral parity tests. Canonical fixtures take precedence
+/// over standalone/legacy copies, even if those copies are nearer the source.
+enum SharedFixture {
+    static func locate(_ relativePath: String, from directory: URL) throws -> URL {
+        let start = directory.standardizedFileURL
+        var ancestors: [URL] = []
+        var current = start
+        while true {
+            ancestors.append(current)
+            // Directory URLs can append /.. when deleting the root component.
+            // Normalize each step so traversal always terminates at /.
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            if parent.path == current.path { break }
+            current = parent
+        }
+
+        var searched: [String] = []
+        for layout in ["test-harness/fixtures", "test-fixtures", "clients/test-fixtures"] {
+            for ancestor in ancestors {
+                let candidate = ancestor.appendingPathComponent(layout).appendingPathComponent(relativePath)
+                searched.append(candidate.path)
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+                   !isDirectory.boolValue {
+                    return candidate
+                }
             }
-            let candidate = url.appendingPathComponent("test-fixtures/sse")
-            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("\(fixtureName).json").path) {
-                return candidate
-            }
-            url.deleteLastPathComponent()
         }
         throw NSError(
-            domain: "SSEFixture", code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Could not locate clients/test-fixtures/sse from \(file)"]
+            domain: "SharedFixture", code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Could not locate fixture \(relativePath) from \(start.path). " +
+                "Check out test-harness/fixtures in a common ancestor of the client, " +
+                "or provide test-fixtures (legacy clients/test-fixtures is also supported). " +
+                "Searched:\n\(searched.joined(separator: "\n"))"
+            ]
         )
     }
 }

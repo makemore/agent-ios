@@ -251,8 +251,11 @@ public struct ChatWidgetView: View {
             // Error display
             if let error = viewModel.error {
                 ErrorBannerView(message: error) {
-                    viewModel.error = nil
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        viewModel.error = nil
+                    }
                 }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             // System picker row — bottom-right, above input
@@ -381,6 +384,14 @@ public struct ChatWidgetView: View {
                 // model catalogue so the composer pill and
                 // `ModelOptionsSheet` reflect the real options.
                 await viewModel.loadModels()
+            }
+        }
+        .task(id: viewModel.error) {
+            guard let displayedError = viewModel.error else { return }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, viewModel.error == displayedError else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                viewModel.error = nil
             }
         }
         .sheet(isPresented: $showSystemPicker) {
