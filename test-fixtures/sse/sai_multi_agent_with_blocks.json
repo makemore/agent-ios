@@ -1,0 +1,39 @@
+{
+  "name": "sai_multi_agent_with_blocks",
+  "description": "Synthetic account specialist emits callout, cardList and actionButtons inside its bracket, followed by an authoritative parent answer. Root output is the retained recovery snapshot.",
+  "run_id": "test-run-agent-blocks-001",
+  "conversation_id": "test-conv-agent-blocks-001",
+  "status": "succeeded",
+  "output": {
+    "final_output": {"response": "Your account is in good standing. Here are your plan and billing details."},
+    "final_messages": [
+      {"role": "assistant", "content": "", "tool_calls": [{"id": "call-account-001", "type": "function", "function": {"name": "get_account", "arguments": "{}"}}]},
+      {"role": "tool", "tool_call_id": "call-account-001", "content": "{\"summary\":\"Account in good standing\"}", "metadata": {"toolName": "get_account", "contentBlocks": [
+        {"type": "callout", "style": "info", "title": "Account in good standing", "body": "Your subscription is active."},
+        {"type": "cardList", "layout": "vertical", "items": [{"type": "card", "title": "Plan", "subtitle": "Pro Monthly"}, {"type": "card", "title": "Latest invoice", "subtitle": "$29.00"}]},
+        {"type": "actionButtons", "buttons": [{"type": "callback", "label": "Pay invoice", "callbackId": "pay_invoice", "style": "primary"}, {"type": "callback", "label": "Manage plan", "callbackId": "manage_plan", "style": "secondary"}]}
+      ]}},
+      {"role": "assistant", "content": "Your account is in good standing. Here are your plan and billing details."}
+    ],
+    "usage": {},
+    "artifacts": []
+  },
+  "events": [
+    {"event": "run.started", "payload": {"agent_key": "sai-triage", "attempt": 1}},
+    {"event": "sub_agent.start", "payload": {"sub_agent_key": "sai-account", "agent_key": "sai-account", "agent_name": "S'Ai Account", "tool_name": "consult_account", "invocation_mode": "handoff", "mode": "handoff", "context_mode": "full"}},
+    {"event": "tool.call", "payload": {"id": "call-account-001", "name": "get_account", "arguments": {}}},
+    {"event": "tool.result", "payload": {"tool_call_id": "call-account-001", "name": "get_account", "result": {"summary": "Account in good standing"}}},
+    {"event": "content.blocks", "payload": {"tool_call_id": "call-account-001", "tool_name": "get_account", "blocks": [
+      {"type": "callout", "style": "info", "title": "Account in good standing", "body": "Your subscription is active."},
+      {"type": "cardList", "layout": "vertical", "items": [{"type": "card", "title": "Plan", "subtitle": "Pro Monthly"}, {"type": "card", "title": "Latest invoice", "subtitle": "$29.00"}]},
+      {"type": "actionButtons", "buttons": [{"type": "callback", "label": "Pay invoice", "callbackId": "pay_invoice", "style": "primary"}, {"type": "callback", "label": "Manage plan", "callbackId": "manage_plan", "style": "secondary"}]}
+    ]}},
+    {"event": "assistant.delta", "payload": {"delta": "Your account is in good standing. "}},
+    {"event": "assistant.delta", "payload": {"delta": "Here are your plan and billing details."}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "Your account is in good standing. Here are your plan and billing details."}},
+    {"event": "sub_agent.end", "payload": {"sub_agent_key": "sai-account", "agent_key": "sai-account", "agent_name": "S'Ai Account", "tool_name": "consult_account", "invocation_mode": "handoff", "mode": "handoff", "duration_ms": 2000, "success": true, "handoff": true, "handback": null}},
+    {"event": "assistant.delta", "payload": {"delta": "Your account is in good standing. Here are your plan and billing details."}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "Your account is in good standing. Here are your plan and billing details."}},
+    {"event": "run.succeeded", "payload": {"output": {"response": "Your account is in good standing. Here are your plan and billing details."}, "usage": {}}}
+  ]
+}

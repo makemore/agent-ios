@@ -253,16 +253,28 @@ public class ChatViewModel: ObservableObject {
     // MARK: - Private State
 
     private var messagesOffset: Int = 0
+    private var nextBeforeSeq: Int?
+    private let pendingStore: PendingRunStore
+    private var pendingRun: PendingRun?
+    private var recoveryTask: Task<Void, Never>?
+    private var reconciling = false
+    private var lifecyclePaused = false
+    private var invalidated = false
+    private var stateGeneration = UUID()
+    private var reconstructing = false
+    private var seenSequences: Set<Int> = []
+    private var turnBaseMessages: [Message] = []
+    private var cancelledSendKey: String?
+    private var sendStartedAt: Date?
+    private var firstUsefulTokenSeen = false
+    private var voiceReceivedDelta = false
+    private var receivedAuthoritativeMessage = false
+    private var streamFailure: Error?
+    private var appliedRecoverySnapshot = false
     private var currentRunId: String?
     private var sseClient: SSEClient?
     private var assistantContent: String = ""
     private var hasRestoredConversation: Bool = false
-    /// Index into `messages` where the current run's assistant-side rows
-    /// begin (captured at subscribe time, i.e. just after the user's row
-    /// was appended). `reconcilePendingRun()` trims from here before
-    /// replaying the run's event stream, so the replayed events rebuild
-    /// the turn without duplicating partially-rendered rows.
-    private var turnStartIndex: Int = 0
 
     // MARK: - Streaming buffer
     // Decouples network receive rate from visual display rate. OpenAI emits
@@ -277,21 +289,11 @@ public class ChatViewModel: ObservableObject {
     // headroom on a long conversation; 20 Hz reads identically and cuts
     // the render load by nearly half.
     private let drainInterval: TimeInterval = 0.05
-    /// Set true when server signals stream end — lets the drain catch up
-    /// at a higher rate without flushing everything instantly.
-    private var streamingDone: Bool = false
     /// ID of the in-flight streaming message. Tracked explicitly so we can
     /// find and update it even after non-streaming messages (tool calls,
     /// content blocks, sub-agent events) have been appended after it.
     private var currentStreamingMessageId: String?
-    /// Set true at terminal-event time when the drain timer is still
-    /// flushing buffered chars; the next `drainTick` that empties the
-    /// buffer will then call `persistToLocalHistory()` so the on-disk
-    /// snapshot includes the final assistant bubble. Without this flag
-    /// the success-path persist would race the typewriter and capture
-    /// only the user message (the streaming bubble is appended to
-    /// `messages` from inside `drainTick` via `upsertStreamingMessage`).
-    private var pendingPersistAfterDrain: Bool = false
+    private var finalizedMessageId: String?
     /// Set true when an `assistant.message` finalises the current turn's
     /// bubble. While true, any further `assistant.delta` events are dropped
     /// because they are late-arriving tokens for a turn that has already
@@ -368,6 +370,7 @@ public class ChatViewModel: ObservableObject {
     private let config: ChatWidgetConfig
     private let apiClient: APIClient
     private let storage: StorageService
+    private let authenticationGeneration: UUID
 
     // MARK: - Voice (TTS)
     /// Optional voice controller. When set, ``assistant.delta`` and
@@ -378,10 +381,13 @@ public class ChatViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    public init(config: ChatWidgetConfig, apiClient: APIClient, storage: StorageService) {
+    public init(config: ChatWidgetConfig, apiClient: APIClient, storage: StorageService, pendingStorage: StorageService? = nil) {
         self.config = config
         self.apiClient = apiClient
         self.storage = storage
+        self.authenticationGeneration = apiClient.authenticationGeneration
+        self.pendingStore = PendingRunStore(storage: pendingStorage ?? (storage is InMemoryStorage
+            ? storage : KeychainStorage(service: "com.makemore.agent.pending-runs")))
 
         // Load saved conversation ID — server-side mode only.
         // In ephemeral mode the conversationIdKey slot holds a stale
@@ -452,12 +458,18 @@ public class ChatViewModel: ObservableObject {
             self.localHistoryStore = store
             self.localConversations = store.loadIndex()
         }
+        restorePendingState()
     }
 
     /// Restore the saved conversation on launch (call from .task or .onAppear)
     public func restoreConversationIfNeeded() async {
         guard !hasRestoredConversation else { return }
         hasRestoredConversation = true
+
+        if pendingRun != nil {
+            await reconcilePendingRun()
+            return
+        }
 
         // Ephemeral mode: nothing to restore from the server.
         if config.ephemeral { return }
@@ -487,7 +499,16 @@ public class ChatViewModel: ObservableObject {
         supersedeUserMessageOrdinal: Int? = nil,
         hidden: Bool = false
     ) async {
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
+        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration,
+              !lifecyclePaused, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
+        // Waiting and ambiguous acknowledgements remain owned by the original
+        // send. A second tap must never silently start a second model/tool run.
+        if pendingRun != nil { await reconcilePendingRun(); return }
+        let generation = stateGeneration
+        let sendKey = UUID().uuidString
+        sendStartedAt = Date()
+        firstUsefulTokenSeen = false
+        reconstructing = false
 
         isLoading = true
         runState = .sending
@@ -495,6 +516,7 @@ public class ChatViewModel: ObservableObject {
 
         // New turn — drop any half-spoken audio from the previous assistant
         // response and clear the chunker's buffer.
+        voiceController?.stop()
         voiceController?.reset()
 
         // Add user message (skipped for hidden scripted triggers — the
@@ -509,6 +531,12 @@ public class ChatViewModel: ObservableObject {
         }
 
         do {
+            _ = try await apiClient.getOrCreateSession()
+            guard generation == stateGeneration, !invalidated, !lifecyclePaused,
+                  authenticationGeneration == apiClient.authenticationGeneration else { return }
+            guard let scope = apiClient.recoveryScope(agentKey: effectiveAgentKey) else {
+                throw PendingRunFailure.identityUnavailable
+            }
             // In ephemeral mode send the full conversation history so the
             // server has complete context (it won't load from the DB).
             let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -550,8 +578,32 @@ public class ChatViewModel: ObservableObject {
                 ephemeral: config.ephemeral,
                 privateOnly: config.privateOnly,
                 memories: config.ephemeral ? clientMemories : nil,
-                params: resolvedParams.isEmpty ? nil : resolvedParams
+                params: resolvedParams.isEmpty ? nil : resolvedParams,
+                idempotencyKey: sendKey,
+                beforePost: { [self] body in
+                    guard generation == stateGeneration, !invalidated, !lifecyclePaused,
+                          apiClient.recoveryScope(agentKey: effectiveAgentKey) == scope else { throw CancellationError() }
+                    let pending = PendingRun(scope: scope, ownerScope: apiClient.recoveryOwnerScope, idempotencyKey: sendKey, body: body,
+                                             createdAt: Date(), conversationId: conversationId,
+                                             transcript: messages.map { PendingMessage(from: $0) },
+                                             messagesOffset: messagesOffset, nextBeforeSeq: nextBeforeSeq,
+                                             hasMore: hasMoreMessages)
+                    try pendingStore.save(pending)
+                    pendingRun = pending
+                    turnBaseMessages = messages
+                }
             )
+
+            guard generation == stateGeneration, !invalidated,
+                  apiClient.recoveryScope(agentKey: effectiveAgentKey) == scope else {
+                if cancelledSendKey == sendKey, apiClient.recoveryScope(agentKey: effectiveAgentKey) == scope {
+                    try? await apiClient.cancelRun(id: run.id)
+                }
+                return
+            }
+            let isNewConversation = conversationId == nil
+            try acknowledge(run)
+            AgentLog.debug(.network, "[ChatVM] accepted elapsed_ms=\(Int(Date().timeIntervalSince(sendStartedAt ?? Date()) * 1000))")
 
             AgentLog.debug(.network, "[ChatVM] createRun response runId=\(run.id) conversationId=\(run.conversationId ?? "nil")")
 
@@ -559,7 +611,7 @@ public class ChatViewModel: ObservableObject {
             runState = .streaming
 
             // Update conversation ID if new
-            if conversationId == nil, let newConvId = run.conversationId {
+            if isNewConversation, let newConvId = run.conversationId {
                 conversationId = newConvId
                 storage.set(config.conversationIdKey, value: newConvId)
                 // Mark creation time for the local conversation
@@ -572,117 +624,318 @@ public class ChatViewModel: ObservableObject {
                 // `loadConversation(_:)` does not trigger this.
                 config.onConversationStart?(newConvId)
             }
+            guard generation == stateGeneration, !invalidated, pendingRun?.idempotencyKey == sendKey else { return }
 
             // Subscribe to SSE events
-            await subscribeToEvents(runId: run.id)
+            if ["succeeded", "completed", "failed", "cancelled", "timed_out"].contains(run.normalizedStatus) {
+                try applyRecoveredRun(run)
+            } else if ["waiting", "suspended"].contains(run.normalizedStatus) {
+                handleRequiredAction([:])
+            } else {
+                await subscribeToEvents(runId: run.id)
+            }
             
         } catch {
-            self.error = error.localizedDescription
+            guard generation == stateGeneration, !invalidated else { return }
+            self.error = safeDeliveryError(error)
             isLoading = false
             runState = .failed
+            if pendingRun != nil {
+                if isRetryableDeliveryError(error) || error is DecodingError {
+                    await reconcilePendingRun()
+                } else if isDefinitiveCreateRejection(error) {
+                    clearPendingRun()
+                }
+            }
         }
     }
     
     /// Cancel the current run
     public func cancelRun() async {
-        guard let runId = currentRunId, isLoading else { return }
-
+        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration,
+              pendingRun != nil || isLoading else { return }
+        let pending = pendingRun
+        cancelledSendKey = pending?.idempotencyKey
+        let runId = currentRunId
+        discardPendingRun()
+        runState = .cancelled
+        messages.append(Message(role: .system, content: "⏹ Run cancelled", type: .cancelled))
+        let generation = stateGeneration
         do {
-            runState = .cancelling
-            try await apiClient.cancelRun(id: runId)
-
-            sseClient?.disconnect(reason: .explicit)
-            sseClient = nil
-            // Drop any buffered-but-not-yet-drained characters and stop the
-            // typewriter timer. Without this, the drain timer keeps revealing
-            // whatever the server sent before the disconnect — the user sees
-            // text continuing to type for seconds after tapping Stop. This
-            // differs from the natural-end path (`handleTerminalEvent`) which
-            // deliberately lets the drain finish smoothly.
-            resetStreamBuffer()
-            // Clear any in-flight sub-agent activity so the pill
-            // disappears immediately on Stop.
-            subAgentActivity = SubAgentActivityState()
-            // Cut off any in-flight TTS playback when the user cancels.
-            voiceController?.stop()
-            isLoading = false
-            runState = .cancelled
-            currentRunId = nil
-            // Wake the awaiter inside `subscribeToEvents` — disconnecting
-            // the SSE client doesn't fire `onComplete`, so without this any
-            // outstanding `await sendMessage(...)` would hang forever.
-            resumeStreamContinuation()
-
-            // Add cancelled message
-            messages.append(Message(
-                role: .system,
-                content: "⏹ Run cancelled",
-                type: .cancelled
-            ))
+            var target = runId
+            if target == nil, let pending {
+                target = try await apiClient.loadRun(idempotencyKey: pending.idempotencyKey).id
+            }
+            guard generation == stateGeneration, !invalidated else { return }
+            if let target { try await apiClient.cancelRun(id: target) }
         } catch {
-            AgentLog.error("[ChatVM] Failed to cancel run: \(error)")
+            guard generation == stateGeneration, !invalidated else { return }
+            self.error = "Stopped locally. Server cancellation could not be confirmed."
         }
     }
 
-    /// Re-attach to a run whose SSE stream was severed without reaching a
-    /// terminal event — typically because iOS suspended the app and tore
-    /// the socket down. The runtime persists every event, so reconnecting
-    /// to the run's event stream makes the server replay the whole turn
-    /// from the first event and then live-tail if the run is still
-    /// executing (or close out immediately on the persisted terminal
-    /// event). Call this from the host's foreground handler.
-    ///
-    /// No-op when no run is pending: terminal events clear `currentRunId`,
-    /// so a turn that finished normally is never replayed.
+    /// Resolve acceptance before subscribing. EOF is never completion and
+    /// transport recovery never invents another send identity.
     public func reconcilePendingRun() async {
-        guard let runId = currentRunId else { return }
-
-        AgentLog.debug(.network, "[ChatVM] reconciling pending runId=\(runId)")
-
-        // The old socket is dead or dying — drop it explicitly and wake
-        // any outstanding `sendMessage` awaiter now. Late callbacks from
-        // this client are ignored by the identity guard in
-        // `subscribeToEvents`.
-        sseClient?.disconnect(reason: .lifecycle)
-        sseClient = nil
-        resumeStreamContinuation()
-
-        // Trim the rows rendered for this turn so the replayed events
-        // rebuild it without duplicates. The user's own message sits
-        // before `turnStartIndex`, so it survives. Clamped because a
-        // conversation load/clear may have shrunk `messages` since the
-        // index was captured.
-        let trimFrom = min(turnStartIndex, messages.count)
-        if trimFrom < messages.count {
-            messages.removeSubrange(trimFrom...)
+        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration, !reconciling else { return }
+        // An ordinary foreground notification must not compete with a live
+        // create acknowledgement or restart a healthy connection.
+        guard sseClient == nil, !(isLoading && runState == .sending) else { return }
+        lifecyclePaused = false
+        if pendingRun == nil { restorePendingState() }
+        guard let initial = pendingRun, matches(initial) else {
+            if !hasRestoredConversation { await restoreConversationIfNeeded() }
+            return
         }
+        reconciling = true
+        let generation = stateGeneration
+        defer { if generation == stateGeneration { reconciling = false } }
+        stopStream(reason: .lifecycle)
+        voiceController?.stop()
+        reconstructing = true
+        // Bounded per activation; persisted backoff survives process death.
+        for _ in 0..<4 {
+            guard let pending = pendingRun, matches(pending), generation == stateGeneration,
+                  !lifecyclePaused, !Task.isCancelled else { return }
+            if let next = pending.nextRetryAt, next > Date() {
+                do { try await Task.sleep(nanoseconds: UInt64(max(0, min(30, next.timeIntervalSinceNow)) * 1_000_000_000)) }
+                catch { return }
+            }
+            guard matches(pending), generation == stateGeneration, !lifecyclePaused, !Task.isCancelled else { return }
+            do {
+                isLoading = true
+                error = nil
+                let run: AgentRun
+                if let runId = pending.runId {
+                    run = try await apiClient.loadRun(id: runId)
+                } else {
+                    do { run = try await apiClient.loadRun(idempotencyKey: pending.idempotencyKey) }
+                    catch APIError.notFound {
+                        guard matches(pending), generation == stateGeneration, !lifecyclePaused else { return }
+                        guard pending.mayRetryCreation else { throw PendingRunFailure.expired }
+                        // Only an authorized unknown-key response permits POST.
+                        // Exact original bytes, including key and private_only.
+                        run = try await apiClient.postRun(body: pending.body, beforePost: { [self] _ in
+                            guard matches(pending), generation == stateGeneration,
+                                  !lifecyclePaused else { throw CancellationError() }
+                        })
+                    }
+                }
+                guard matches(pending), generation == stateGeneration, !lifecyclePaused else { return }
+                try acknowledge(run)
+                AgentLog.debug(.network, "[ChatVM] recovery attempt=\(pending.retryCount + 1)")
+                switch run.normalizedStatus {
+                case "succeeded", "completed", "failed", "cancelled", "timed_out":
+                    try applyRecoveredRun(run)
+                    return
+                case "waiting", "suspended":
+                    pendingRun?.waiting = true
+                    if let saved = pendingRun { try pendingStore.save(saved) }
+                    isLoading = false
+                    runState = .waiting
+                    if !messages.contains(where: { $0.type == .requiredAction }) {
+                        messages.append(Message(role: .system, content: "This run is waiting for an action before it can continue.", type: .requiredAction))
+                    }
+                    return
+                case "queued", "pending", "running", "retrying", "":
+                    // No restorable reducer/cursor pair exists. Replay all
+                    // events into the current turn, silently and idempotently.
+                    resetStreamBuffer()
+                    pendingRun?.waiting = false
+                    pendingRun?.waitingTranscript = nil
+                    messages = turnBaseMessages
+                    runState = .streaming
+                    await subscribeToEvents(runId: run.id)
+                    guard pendingRun != nil, generation == stateGeneration, !lifecyclePaused else { return }
+                    if runState == .waiting { return }
+                    if let failure = streamFailure, !isRetryableDeliveryError(failure) { return }
+                default: throw PendingRunFailure.invalidStatus
+                }
+            } catch {
+                guard matches(pending), generation == stateGeneration, !lifecyclePaused else { return }
+                self.error = safeDeliveryError(error)
+                isLoading = false
+                runState = .failed
+                if case APIError.httpError(statusCode: 410) = error {
+                    self.error = PendingRunFailure.expired.localizedDescription
+                    clearPendingRun()
+                    runState = .failed
+                    return
+                }
+                if case APIError.notFound = error {
+                    self.error = PendingRunFailure.unavailable.localizedDescription
+                    clearPendingRun()
+                    runState = .failed
+                    return
+                }
+                if case PendingRunFailure.expired = error {
+                    clearPendingRun()
+                    runState = .failed
+                    return
+                }
+                if !isRetryableDeliveryError(error) { return }
+            }
+            guard var saved = pendingRun, matches(saved), generation == stateGeneration, !lifecyclePaused else { return }
+            saved.retryCount += 1
+            saved.nextRetryAt = Date().addingTimeInterval(min(30, pow(2, Double(min(saved.retryCount, 5)))))
+            pendingRun = saved
+            do { try pendingStore.save(saved) } catch { self.error = safeDeliveryError(error); return }
+        }
+        isLoading = false
+        error = "Reply delivery is paused. Reopen the app to check the same saved run."
+    }
 
-        // Replayed deltas re-enter the voice pipeline; clear any
-        // half-spoken audio from before the suspension first.
-        voiceController?.reset()
+    private func restorePendingState() {
+        guard authenticationGeneration == apiClient.authenticationGeneration,
+              let scope = apiClient.recoveryScope(agentKey: effectiveAgentKey),
+              let pending = pendingStore.load(scope: scope) else { return }
+        if config.ephemeral, !pending.mayRetryCreation {
+            pendingStore.clear(scope: scope, matching: pending.idempotencyKey)
+            error = PendingRunFailure.expired.localizedDescription
+            runState = .failed
+            return
+        }
+        pendingRun = pending
+        currentRunId = pending.runId
+        conversationId = pending.conversationId
+        turnBaseMessages = pending.transcript.map { $0.toMessage() }
+        messages = (pending.waitingTranscript ?? pending.transcript).map { $0.toMessage() }
+        messagesOffset = pending.messagesOffset
+        nextBeforeSeq = pending.nextBeforeSeq
+        hasMoreMessages = pending.hasMore
+        firstAssistantMessageFired = messages.contains { $0.role == .assistant }
+        runState = pending.waiting ? .waiting : .sending
+    }
 
-        error = nil
-        isLoading = true
-        runState = .streaming
+    private func matches(_ pending: PendingRun) -> Bool {
+        !invalidated && pendingRun?.idempotencyKey == pending.idempotencyKey
+            && authenticationGeneration == apiClient.authenticationGeneration
+            && apiClient.recoveryScope(agentKey: effectiveAgentKey) == pending.scope
+    }
 
-        await subscribeToEvents(runId: runId)
+    private func acknowledge(_ run: AgentRun) throws {
+        guard var pending = pendingRun, matches(pending) else { throw CancellationError() }
+        if let id = pending.runId, id != run.id { throw PendingRunFailure.unavailable }
+        pending.runId = run.id
+        pending.conversationId = run.conversationId ?? pending.conversationId
+        pendingRun = pending
+        currentRunId = run.id
+        try pendingStore.save(pending)
+        conversationId = pending.conversationId
+        storage.set(config.conversationIdKey, value: conversationId)
+    }
+
+    private func applyRecoveredRun(_ run: AgentRun) throws {
+        resetStreamBuffer()
+        if let finals = run.finalMessages {
+            // Per-turn snapshot, not cumulative history. Preserve the user and
+            // earlier pages; replace all partial/replayed rows for this run.
+            messages = turnBaseMessages + finals.filter { $0.role != "user" }.flatMap { mapApiMessage($0) }
+            firstAssistantMessageFired = firstAssistantMessageFired || messages.contains { $0.role == .assistant }
+        } else if run.normalizedStatus == "succeeded" || run.normalizedStatus == "completed" {
+            throw PendingRunFailure.unavailable
+        }
+        appliedRecoverySnapshot = true
+        let type = run.normalizedStatus == "completed" ? "run.succeeded" : "run.\(run.normalizedStatus)"
+        runState = runState.applying(eventType: type)
+        handleTerminalEvent(type, ["error": run.error?.stringValue() ?? "Agent run failed"])
+    }
+
+    private func clearPendingRun() {
+        if let pending = pendingRun { pendingStore.clear(scope: pending.scope, matching: pending.idempotencyKey) }
+        pendingRun = nil
+        currentRunId = nil
+    }
+
+    private func stopStream(reason: DisconnectReason) {
+        let old = sseClient
+        sseClient = nil
+        old?.disconnect(reason: reason)
+        resumeStreamContinuation()
+    }
+
+    /// Backgrounding releases sockets/timers, but retains the secure request.
+    public func pauseForBackground() {
+        lifecyclePaused = true
+        if pendingRun == nil, isLoading, runState != .sending { hasRestoredConversation = false }
+        // Invalidate suspended HTTP/auth continuations as well as SSE. An
+        // acknowledgement arriving later is recoverable by its original key.
+        stateGeneration = UUID()
+        reconciling = false
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        stopStream(reason: .lifecycle)
+        if authenticationGeneration == apiClient.authenticationGeneration {
+            flushStreamBuffer()
+        } else {
+            resetStreamBuffer()
+        }
+        voiceController?.stop()
+        isLoading = false
+        loadingMoreMessages = false
+    }
+
+    /// Explicit conversation abandonment/cancel, not ordinary backgrounding.
+    public func discardPendingRun() {
+        stateGeneration = UUID()
+        reconciling = false
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        stopStream(reason: .explicit)
+        clearPendingRun()
+        resetStreamBuffer()
+        currentStreamingMessageId = nil
+        finalizedMessageId = nil
+        subAgentActivity = SubAgentActivityState()
+        voiceController?.stop()
+        isLoading = false
+        loadingMoreMessages = false
+        turnBaseMessages = []
+    }
+
+    /// A replaced VM must never accept late auth, HTTP or SSE callbacks.
+    public func invalidateForReplacement() {
+        pauseForBackground()
+        stateGeneration = UUID()
+        invalidated = true
+    }
+
+    private func isRetryableDeliveryError(_ error: Error) -> Bool {
+        if let failure = error as? SSEFailure { return failure.isRetryable }
+        if let urlError = error as? URLError { return urlError.code != .cancelled && urlError.code != .userAuthenticationRequired }
+        if case APIError.httpError(let status) = error { return status == 408 || status == 429 || status >= 500 }
+        return false
+    }
+
+    private func isDefinitiveCreateRejection(_ error: Error) -> Bool {
+        if case APIError.httpError(let status) = error { return (400..<500).contains(status) && status != 408 && status != 429 }
+        return false
+    }
+
+    private func safeDeliveryError(_ error: Error) -> String {
+        if let failure = error as? SSEFailure { return failure.localizedDescription }
+        if let failure = error as? PendingRunFailure { return failure.localizedDescription }
+        if case APIError.unauthorized = error { return "Sign in again to recover this reply." }
+        if case APIError.httpError(let status) = error { return "Reply request failed (HTTP \(status))." }
+        return "Reply delivery was interrupted. The saved send can be recovered."
     }
 
     /// Clear all messages and start fresh.
     /// Does NOT delete the conversation from local storage — it just
     /// starts a new in-memory conversation.
     public func clearMessages() {
+        discardPendingRun()
         messages = []
         conversationId = nil
         localConversationCreatedAt = nil
         error = nil
         hasMoreMessages = false
         messagesOffset = 0
+        nextBeforeSeq = nil
         // Extended-thinking is a per-conversation choice — starting a
         // new chat resets it to the safer (cheaper, faster) default.
         extendedThinking = false
         runState = .idle
-        pendingPersistAfterDrain = false
         subAgentActivity = SubAgentActivityState()
         firstAssistantMessageFired = false
         // Reset context-usage state — the previous conversation's
@@ -882,12 +1135,15 @@ public class ChatViewModel: ObservableObject {
         // dashes survive the reveal exactly as written.
         let tokens = Self.revealTokens(for: trimmed)
 
-        Task { @MainActor in
+        let generation = stateGeneration
+        Task { @MainActor [weak self] in
             var accumulated = ""
             for token in tokens {
+                guard let self, generation == self.stateGeneration, !self.invalidated,
+                      self.currentStreamingMessageId == id else { return }
                 accumulated += token
-                if let idx = messages.firstIndex(where: { $0.id == id }) {
-                    messages[idx].content = accumulated
+                if let idx = self.messages.firstIndex(where: { $0.id == id }) {
+                    self.messages[idx].content = accumulated
                 }
                 // Whitespace-only tokens don't add visible characters,
                 // so skip the dwell on them — pacing is driven by
@@ -896,13 +1152,15 @@ public class ChatViewModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: perWordNanos)
                 }
             }
+            guard let self, generation == self.stateGeneration, !self.invalidated,
+                  self.currentStreamingMessageId == id else { return }
             // Make sure the final content matches the source exactly,
             // even if a token splitter edge case lost a character.
-            if let idx = messages.firstIndex(where: { $0.id == id }),
-               messages[idx].content != trimmed {
-                messages[idx].content = trimmed
+            if let idx = self.messages.firstIndex(where: { $0.id == id }),
+               self.messages[idx].content != trimmed {
+                self.messages[idx].content = trimmed
             }
-            currentStreamingMessageId = nil
+            self.currentStreamingMessageId = nil
             completion?()
         }
 
@@ -982,14 +1240,17 @@ public class ChatViewModel: ObservableObject {
     /// Returns `true` if the conversation was found and loaded.
     @discardableResult
     public func loadLocalConversation(id: String) -> Bool {
-        guard let store = localHistoryStore,
+        guard !invalidated, let store = localHistoryStore,
               let conv = store.load(id) else { return false }
+        discardPendingRun()
         messages = conv.messages.map { $0.toMessage() }
         conversationId = id
         localConversationCreatedAt = conv.createdAt
         storage.set(config.conversationIdKey, value: id)
         hasMoreMessages = false
         messagesOffset = 0
+        nextBeforeSeq = nil
+        runState = .idle
         error = nil
         // Restored history already contains earlier assistant turns —
         // the first-assistant lifecycle hook fires only for *new*
@@ -1010,8 +1271,12 @@ public class ChatViewModel: ObservableObject {
 
     /// Purge all locally-persisted conversations for this agent.
     public func purgeLocalHistory() {
+        discardPendingRun()
         localHistoryStore?.purgeAll()
         localConversations = []
+        messages = []
+        conversationId = nil
+        storage.set(config.conversationIdKey, value: nil)
     }
 
     /// Wipe all on-device data for this agent — call on logout / sign-out so a
@@ -1020,21 +1285,26 @@ public class ChatViewModel: ObservableObject {
     /// stored auth/anonymous token (removed from the Keychain when the secure
     /// store is in use).
     public func clearAllLocalData() {
+        if let owner = apiClient.recoveryOwnerScope { pendingStore.clearAll(owner: owner) }
+        discardPendingRun()
+        invalidated = true
         purgeLocalHistory()
         storage.set(Self.memoriesStorageKey, value: nil)
         clientMemories = []
         messages = []
         conversationId = nil
+        storage.set(config.conversationIdKey, value: nil)
         apiClient.clearSession()
     }
 
     /// Persist the current conversation to the on-device store.
     /// No-op outside ephemeral mode or when there's nothing to save.
-    private func persistToLocalHistory() {
-        guard config.ephemeral,
-              let store = localHistoryStore,
+    @discardableResult
+    private func persistToLocalHistory() -> Bool {
+        guard config.ephemeral else { return true }
+        guard let store = localHistoryStore,
               let convId = conversationId,
-              !messages.isEmpty else { return }
+              !messages.isEmpty else { return false }
 
         let now = Date()
         let title = deriveConversationTitle()
@@ -1048,6 +1318,12 @@ public class ChatViewModel: ObservableObject {
         )
         store.upsert(conv)
         localConversations = store.loadIndex()
+        // The legacy SQLite API has no throwing writes. Keep the pending key
+        // if disk/lock errors prevented the full text transcript being saved.
+        guard let saved = store.load(convId), saved.messages.count == localMsgs.count else { return false }
+        return zip(saved.messages, localMsgs).allSatisfy {
+            $0.0.id == $0.1.id && $0.0.role == $0.1.role && $0.0.content == $0.1.content && $0.0.type == $0.1.type
+        }
     }
 
     /// Derive a title from the first user message, capped to 60 chars.
@@ -1171,15 +1447,11 @@ public class ChatViewModel: ObservableObject {
         selectedModelId = modelId
     }
 
-    /// Load a specific conversation, in full.
-    ///
-    /// Fetches the entire message history in one request (no `limit`) —
-    /// safe because conversations are capped, and required by the
-    /// transcript: a plain (non-lazy) `VStack` can only place scroll
-    /// targets exactly if every message is present. Paging in tens left
-    /// the list guessing at the height of rows it hadn't fetched, which
-    /// is what every jump-scroll bug ultimately traced back to.
+    /// Load the recent page. Ephemeral history is always client-owned and
+    /// must never be replaced with a paginated server window.
     public func loadConversation(_ convId: String) async {
+        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration else { return }
+        if pendingRun != nil, conversationId == convId { await reconcilePendingRun(); return }
         // Ephemeral mode: conversation is local-only, nothing to fetch.
         if config.ephemeral {
             conversationId = convId
@@ -1187,6 +1459,9 @@ public class ChatViewModel: ObservableObject {
             return
         }
 
+        discardPendingRun()
+        let generation = stateGeneration
+        let scope = apiClient.recoveryScope(agentKey: effectiveAgentKey)
         isLoading = true
         messages = []
         conversationId = convId
@@ -1194,18 +1469,15 @@ public class ChatViewModel: ObservableObject {
 
         do {
             let conversation = try await apiClient.loadConversation(id: convId)
+            guard generation == stateGeneration, !invalidated, conversationId == convId,
+                  scope == apiClient.recoveryScope(agentKey: effectiveAgentKey) else { return }
 
             if let apiMessages = conversation.messages {
                 messages = apiMessages.flatMap { mapApiMessage($0) }
             }
 
-            // Whole-thread fetch: nothing is left to page in, so the
-            // "Load earlier messages" button never renders. The server
-            // answers `has_more: false` for an unpaginated request; we
-            // don't trust it into `true` here, since a stale/proxied
-            // response saying otherwise would put a button on screen
-            // that can only re-fetch what we already hold.
-            hasMoreMessages = false
+            hasMoreMessages = conversation.hasMore ?? (conversation.nextBeforeSeq != nil)
+            nextBeforeSeq = conversation.nextBeforeSeq
             // Server-side count (API messages, not the mapped rows —
             // one API message can expand into several).
             messagesOffset = conversation.messages?.count ?? 0
@@ -1233,41 +1505,61 @@ public class ChatViewModel: ObservableObject {
             }
 
         } catch APIError.notFound {
+            guard generation == stateGeneration, !invalidated else { return }
             conversationId = nil
             storage.set(config.conversationIdKey, value: nil)
         } catch {
-            AgentLog.error("[ChatVM] Failed to load conversation: \(error)")
+            guard generation == stateGeneration, !invalidated else { return }
+            self.error = "Conversation history could not be loaded."
         }
 
         isLoading = false
     }
     
-    /// Load more messages (pagination).
-    ///
-    /// Vestigial since `loadConversation` started fetching whole
-    /// threads: `hasMoreMessages` is now permanently false, so the guard
-    /// below returns immediately and the "Load earlier messages" button
-    /// that calls this never renders. Kept working (rather than deleted)
-    /// because it is public API, and because a host that wants windowed
-    /// loading back only has to set `hasMoreMessages` itself.
+    /// Prepend an earlier page without replacing live rows or their identities.
     public func loadMoreMessages() async {
-        guard let convId = conversationId, !loadingMoreMessages, hasMoreMessages else { return }
+        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration,
+              !config.ephemeral, let convId = conversationId,
+              !loadingMoreMessages, hasMoreMessages else { return }
+        let generation = stateGeneration
+        let scope = apiClient.recoveryScope(agentKey: effectiveAgentKey)
+        let cursor = nextBeforeSeq
         
         loadingMoreMessages = true
         
         do {
-            let conversation = try await apiClient.loadConversation(id: convId, limit: 10, offset: messagesOffset)
+            let conversation = try await apiClient.loadConversation(id: convId, limit: 50, offset: messagesOffset, beforeSeq: cursor)
+            guard generation == stateGeneration, !invalidated, conversationId == convId,
+                  scope == apiClient.recoveryScope(agentKey: effectiveAgentKey) else { return }
             
             if let apiMessages = conversation.messages, !apiMessages.isEmpty {
-                let olderMessages = apiMessages.flatMap { mapApiMessage($0) }
+                var existingIds = Set(messages.map(\.id))
+                let olderMessages = apiMessages.flatMap { mapApiMessage($0) }.filter { existingIds.insert($0.id).inserted }
                 messages.insert(contentsOf: olderMessages, at: 0)
+                // The recovery base and pending snapshot own the earlier page
+                // too; a reconnect must not remove what the reader just loaded.
+                if pendingRun != nil {
+                    turnBaseMessages.insert(contentsOf: olderMessages, at: 0)
+                }
                 messagesOffset += apiMessages.count
-                hasMoreMessages = conversation.hasMore ?? false
+                hasMoreMessages = conversation.hasMore ?? (conversation.nextBeforeSeq != nil)
+                nextBeforeSeq = conversation.nextBeforeSeq
+                if let cursor, nextBeforeSeq == cursor { hasMoreMessages = false }
+                if var pending = pendingRun {
+                    pending.transcript = turnBaseMessages.map { PendingMessage(from: $0) }
+                    if pending.waiting { pending.waitingTranscript = messages.map { PendingMessage(from: $0) } }
+                    pending.messagesOffset = messagesOffset
+                    pending.nextBeforeSeq = nextBeforeSeq
+                    pending.hasMore = hasMoreMessages
+                    try pendingStore.save(pending)
+                    pendingRun = pending
+                }
             } else {
                 hasMoreMessages = false
             }
         } catch {
-            AgentLog.error("[ChatVM] Failed to load more messages: \(error)")
+            guard generation == stateGeneration, !invalidated else { return }
+            self.error = "Earlier messages could not be loaded."
         }
         
         loadingMoreMessages = false
@@ -1275,7 +1567,11 @@ public class ChatViewModel: ObservableObject {
 
     /// Edit a message and resend from that point
     public func editMessage(at index: Int, newContent: String, model: String? = nil, thinking: Bool = false) async {
-        guard !isLoading, index < messages.count else { return }
+        guard !invalidated, !isLoading, messages.indices.contains(index) else { return }
+        guard !hasMoreMessages, pendingRun == nil else {
+            error = "Load earlier messages and finish the pending reply before editing."
+            return
+        }
 
         let messageToEdit = messages[index]
         guard messageToEdit.role == .user else { return }
@@ -1302,7 +1598,11 @@ public class ChatViewModel: ObservableObject {
 
     /// Retry from a specific message
     public func retryMessage(at index: Int, model: String? = nil, thinking: Bool = false) async {
-        guard !isLoading, index < messages.count else { return }
+        guard !invalidated, !isLoading, messages.indices.contains(index) else { return }
+        guard !hasMoreMessages, pendingRun == nil else {
+            error = "Load earlier messages and finish the pending reply before retrying."
+            return
+        }
 
         let messageAtIndex = messages[index]
         var userMessageIndex = index
@@ -1347,41 +1647,55 @@ public class ChatViewModel: ObservableObject {
         // surface `.explicit`; the host can disambiguate "user
         // cancelled" from "new run started" by tracking the runId
         // they passed to `cancelRun`.
-        sseClient?.disconnect(reason: .explicit)
+        stopStream(reason: .explicit)
+        let generation = stateGeneration
+        guard let pending = pendingRun, matches(pending), currentRunId == runId, !lifecyclePaused else { return }
 
         let eventPath = config.apiPaths.runEventsUrl(for: runId)
-        var urlString = "\(config.backendUrl)\(eventPath)"
-
-        // Add token for anonymous auth
-        if let token = try? await apiClient.getOrCreateSession() {
-            urlString += "?anonymous_token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)"
+        // Native authentication belongs in headers, never in logged URLs.
+        let token: String?
+        do { token = try await apiClient.getOrCreateSession() }
+        catch {
+            guard generation == stateGeneration, matches(pending), !lifecyclePaused else { return }
+            handleStreamFailure(error)
+            return
         }
-
-        guard let url = URL(string: urlString) else { return }
+        guard generation == stateGeneration, matches(pending), currentRunId == runId, !lifecyclePaused else { return }
+        guard let url = URL(string: "\(config.backendUrl)\(eventPath)") else {
+            handleStreamFailure(SSEFailure.invalidResponse)
+            return
+        }
 
         assistantContent = ""
         currentStreamingMessageId = nil
+        finalizedMessageId = nil
         turnFinalized = false
         resetStreamBuffer()
         clearPendingEcho()
+        seenSequences = []
+        streamFailure = nil
+        voiceReceivedDelta = false
+        receivedAuthoritativeMessage = false
+        appliedRecoverySnapshot = false
         // Drop any sub-agent activity left over from a previous run —
         // shouldn't happen on the happy path (terminal events drain it)
         // but a transport error mid-bracket would otherwise leave a
         // stale pill hovering on the next send.
         subAgentActivity = SubAgentActivityState()
 
-        // Everything appended from here on belongs to this run's turn —
-        // remember where it starts so `reconcilePendingRun()` can trim
-        // and replay it without duplication.
-        turnStartIndex = messages.count
-
         let client = SSEClient()
         sseClient = client
 
-        client.onEvent = { [weak self] event in
-            Task { @MainActor in
-                self?.handleSSEEvent(event)
+        client.onEvent = { [weak self, weak client] event in
+            guard let self, client === self.sseClient, generation == self.stateGeneration,
+                  self.currentRunId == runId else { return }
+            guard self.matches(pending) else {
+                // An auth change can invalidate the API without a host-driven
+                // VM replacement. Release the awaiter as well as dropping data.
+                self.invalidateForReplacement()
+                return
             }
+            self.handleSSEEvent(event)
         }
 
         // Forward the host-configured onDisconnect through the SSE
@@ -1407,30 +1721,21 @@ public class ChatViewModel: ObservableObject {
             self.streamContinuation = continuation
 
             client.onError = { [weak self, weak client] error in
-                Task { @MainActor in
-                    guard let self = self else { return }
-                    // Ignore callbacks from a superseded client (e.g. a
-                    // dead socket replaced by `reconcilePendingRun()`) —
-                    // only the live stream may mutate loading state or
-                    // resume the awaiter.
-                    guard client === self.sseClient else { return }
-                    self.isLoading = false
-                    self.error = error.localizedDescription
-                    self.resumeStreamContinuation()
+                guard let self, client === self.sseClient, generation == self.stateGeneration,
+                      self.currentRunId == runId else { return }
+                guard self.matches(pending) else {
+                    self.invalidateForReplacement()
+                    return
                 }
+                self.handleStreamFailure(error)
             }
 
             client.onComplete = { [weak self, weak client] in
-                Task { @MainActor in
-                    guard let self = self else { return }
-                    guard client === self.sseClient else { return }
-                    self.isLoading = false
-                    self.resumeStreamContinuation()
-                }
+                guard let self, client === self.sseClient, generation == self.stateGeneration else { return }
+                self.resumeStreamContinuation()
             }
 
-            AgentLog.debug(.network, "[ChatVM] subscribing runId=\(runId) url=\(redactURLForLogging(url))")
-            client.connect(url: url, headers: apiClient.authHeaders(), runId: runId)
+            client.connect(url: url, headers: apiClient.authHeaders(token: token), runId: runId)
         }
     }
 
@@ -1443,18 +1748,26 @@ public class ChatViewModel: ObservableObject {
         continuation.resume()
     }
 
+    private func handleStreamFailure(_ failure: Error) {
+        streamFailure = failure
+        stopStream(reason: .network)
+        flushStreamBuffer()
+        isLoading = false
+        runState = .failed
+        error = safeDeliveryError(failure)
+        guard !invalidated, !lifecyclePaused, !reconciling, isRetryableDeliveryError(failure) else { return }
+        recoveryTask?.cancel()
+        recoveryTask = Task { [weak self] in await self?.reconcilePendingRun() }
+    }
+
     private func handleSSEEvent(_ event: SSEEvent) {
         guard let json = event.json(), let payload = json["payload"] as? [String: Any] else {
-            #if DEBUG
-            AgentLog.debug(.sse, "[ChatVM] dropping event type=\(event.type) — no payload")
-            #endif
+            handleStreamFailure(SSEFailure.malformedEvent)
             return
         }
-
-        #if DEBUG
-        let payloadKeys = Array(payload.keys).sorted().joined(separator: ",")
-        AgentLog.debug(.sse, "[ChatVM] dispatch type=\(event.type) payload_keys=[\(payloadKeys)]")
-        #endif
+        if let runId = json["run_id"] as? String ?? json["runId"] as? String, runId != currentRunId { return }
+        if let seq = json["seq"] as? Int, !seenSequences.insert(seq).inserted { return }
+        let generation = stateGeneration
 
         // TEMP diagnostics (see HangDiagnostics): the freeze signature in
         // the logs is main-thread dispatch stopping right after the FIRST
@@ -1462,7 +1775,12 @@ public class ChatViewModel: ObservableObject {
         // background thread. Time each phase of that path so whichever one
         // wedges names itself.
         HangDiagnostics.measure("onEvent callback (\(event.type))") {
-            config.onEvent?(event.type, payload)
+            if !reconstructing { config.onEvent?(event.type, payload) }
+        }
+        guard generation == stateGeneration, !invalidated else { return }
+        guard authenticationGeneration == apiClient.authenticationGeneration else {
+            invalidateForReplacement()
+            return
         }
         runState = runState.applying(eventType: event.type)
 
@@ -1474,6 +1792,11 @@ public class ChatViewModel: ObservableObject {
 
         case "assistant.message":
             handleAssistantMessage(payload)
+
+        case "error":
+            // An error event may precede a separately retained failed result.
+            // Reconcile rather than letting an eventual EOF masquerade as success.
+            handleStreamFailure(SSEFailure.unexpectedEOF)
 
         case "tool.call":
             handleToolCall(payload)
@@ -1521,6 +1844,10 @@ public class ChatViewModel: ObservableObject {
     /// streaming assistant message for a typewriter effect.
     private func handleAssistantDelta(_ payload: [String: Any]) {
         guard let delta = payload["delta"] as? String else { return }
+        if !delta.isEmpty, !firstUsefulTokenSeen {
+            firstUsefulTokenSeen = true
+            AgentLog.debug(.sse, "[ChatVM] first_useful_token elapsed_ms=\(Int(Date().timeIntervalSince(sendStartedAt ?? Date()) * 1000))")
+        }
 
         // Pill mode: while a sub-agent bracket is active the deltas are
         // narration from a sub-agent (or its own deltas, since we don't
@@ -1540,6 +1867,7 @@ public class ChatViewModel: ObservableObject {
         // shown in full. A new turn is signalled by a non-streaming
         // event (tool/video/sub-agent), which resets `turnFinalized`.
         if turnFinalized { return }
+        receivedAuthoritativeMessage = false
 
         // Sub-agent echo suppression. After a sub-agent finishes streaming
         // its final answer, the parent typically re-streams the exact same
@@ -1610,7 +1938,8 @@ public class ChatViewModel: ObservableObject {
         // what keeps the conversation moving. Otherwise replies stay
         // silent and playback happens only when the user taps a message's
         // speaker button, which drives the controller from `ChatWidgetView`.
-        if let vc = voiceController, vc.autoSpeakReplies {
+        if !reconstructing, let vc = voiceController, vc.autoSpeakReplies {
+            voiceReceivedDelta = true
             vc.pushDelta(delta, emotion: Emotion.from(payload["emotion"]))
         }
     }
@@ -1620,7 +1949,15 @@ public class ChatViewModel: ObservableObject {
     /// We *replace* the accumulator with the full content so the message is
     /// correct whether or not the client received every delta.
     private func handleAssistantMessage(_ payload: [String: Any]) {
-        guard let content = payload["content"] as? String else { return }
+        let generation = stateGeneration
+        var content: String
+        if let text = payload["content"] as? String { content = text }
+        else if let parts = payload["content"] as? [[String: Any]] {
+            content = parts.compactMap { $0["text"] as? String }.joined()
+        } else {
+            handleStreamFailure(SSEFailure.malformedEvent)
+            return
+        }
 
         // Pill mode: while a sub-agent bracket is active the
         // authoritative final message belongs to the sub-agent, not to
@@ -1632,6 +1969,8 @@ public class ChatViewModel: ObservableObject {
             subAgentActivity.setFinal(content)
             return
         }
+        receivedAuthoritativeMessage = true
+        let previousFinalId = turnFinalized ? finalizedMessageId : nil
 
         // Mark the turn finalised *unconditionally* — this is the server's
         // authoritative "this turn is done" signal. Any `assistant.delta`
@@ -1641,22 +1980,6 @@ public class ChatViewModel: ObservableObject {
         // via a sub-agent tool result) must be dropped to avoid a second
         // typewriter bubble below the one we're about to finalise.
         turnFinalized = true
-
-        // Voice: when the run streamed, the chunker has been fed
-        // throughout and `finishTurn(finalText: nil)` only flushes the
-        // trailing fragment — the chunker emits on sentence boundaries, so
-        // a reply's last few words would otherwise sit in its buffer
-        // unspoken. When it didn't stream (non-streaming run, or an SSE
-        // that emits only the authoritative message) pass `content` so the
-        // reply is still heard.
-        //
-        // Placed after the pill-mode return above: sub-agent narration is
-        // deliberately never spoken, only the parent's synthesis.
-        if let vc = voiceController, vc.autoSpeakReplies {
-            let needsFallbackText = streamBuffer.isEmpty && drainTimer == nil
-            vc.finishTurn(finalText: needsFallbackText ? content : nil,
-                          emotion: Emotion.from(payload["emotion"]))
-        }
 
         // Sub-agent echo resolution. If we were still comparing the parent's
         // stream against a sub-agent snapshot when the final message lands,
@@ -1672,24 +1995,21 @@ public class ChatViewModel: ObservableObject {
             if content.hasPrefix(reference) {
                 // Parent extended the answer. Render only the novel suffix
                 // as a fresh bubble below the sub-agent's one.
-                let suffix = String(content.dropFirst(reference.count))
-                if suffix.isEmpty { return }
-                assistantContent = suffix
-                upsertStreamingMessage(content: assistantContent)
-                closeStreamingSession()
-                turnFinalized = true
-                return
+                content = String(content.dropFirst(reference.count))
             }
             // Parent said something genuinely different — fall through to
             // the normal finalisation path so the full content is rendered.
         }
 
-        // If deltas are still draining, the same content is already queued
-        // in streamBuffer; snapping here would produce a visible leap to the
-        // end. Let the drain finish smoothly — the turn-finalised flag is
-        // already set so any post-drain stragglers will be dropped.
-        if drainTimer != nil || !streamBuffer.isEmpty {
-            return
+        // Finals replace partial data even while the renderer is draining.
+        // Drop, don't flush, the partial buffer. Speech pacing is independent.
+        resetStreamBuffer()
+        if let previousFinalId { currentStreamingMessageId = previousFinalId }
+        // Duplicate/corrected finals and reconstructed turns never re-speak.
+        // Resolve sub-agent echoes before sending fallback text to TTS.
+        if previousFinalId == nil, !reconstructing, let vc = voiceController, vc.autoSpeakReplies {
+            vc.finishTurn(finalText: voiceReceivedDelta ? nil : content,
+                          emotion: Emotion.from(payload["emotion"]))
         }
 
         // No drain active — either non-streaming mode, replay, or the
@@ -1699,9 +2019,12 @@ public class ChatViewModel: ObservableObject {
         // or tool.result insertion), upsert creates a fresh bubble below.
         assistantContent = content
         upsertStreamingMessage(content: assistantContent)
+        guard generation == stateGeneration, !invalidated else { return }
+        let finalId = currentStreamingMessageId
         // Preserve `turnFinalized` across the close — a non-streaming
         // event (tool/video/sub-agent) is what resets it for the next turn.
         closeStreamingSession()
+        finalizedMessageId = finalId
         turnFinalized = true
     }
 
@@ -1726,7 +2049,7 @@ public class ChatViewModel: ObservableObject {
             // conversation. Latch so it only fires once per conv.
             if !firstAssistantMessageFired {
                 firstAssistantMessageFired = true
-                config.onFirstAssistantMessage?(id)
+                if !reconstructing { config.onFirstAssistantMessage?(id) }
             }
         }
     }
@@ -1754,14 +2077,16 @@ public class ChatViewModel: ObservableObject {
             flushStreamBuffer()
         }
         currentStreamingMessageId = nil
+        finalizedMessageId = nil
         assistantContent = ""
-        streamingDone = false
         // A non-streaming event marks a turn boundary — subsequent deltas
         // belong to a new turn and must flow into a fresh bubble.
         turnFinalized = false
+        voiceReceivedDelta = false
     }
 
     private func handleToolCall(_ payload: [String: Any]) {
+        receivedAuthoritativeMessage = false
         let name = payload["name"] as? String ?? payload["tool_name"] as? String ?? "tool"
 
         // Pill mode: tool calls from inside a sub-agent bracket are part
@@ -1838,6 +2163,7 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleSubAgentStart(_ payload: [String: Any]) {
+        receivedAuthoritativeMessage = false
         closeStreamingSession()
         // A new sub-agent invocation supersedes any pending echo reference
         // from a previous one.
@@ -2002,11 +2328,17 @@ public class ChatViewModel: ObservableObject {
         // The run continues server-side; we're dropping the socket
         // because the user is no longer actively watching. This is a
         // lifecycle teardown from the backend's perspective.
-        sseClient?.disconnect(reason: .lifecycle)
-        sseClient = nil
-        currentRunId = nil
         runState = .waiting
-        resumeStreamContinuation()
+        pendingRun?.waiting = true
+        pendingRun?.waitingTranscript = messages.map { PendingMessage(from: $0) }
+        if let pending = pendingRun {
+            do { try pendingStore.save(pending) } catch { self.error = safeDeliveryError(error) }
+        }
+        // A run that is now running may replay an *older* suspension before
+        // its resumed events. Don't truncate reconstruction at that event.
+        // A still-waiting run is confirmed by detail lookup after EOF (or
+        // continues to listen here until resume/background/timeout).
+        if !reconstructing { stopStream(reason: .lifecycle) }
         persistToLocalHistory()
     }
 
@@ -2079,57 +2411,20 @@ public class ChatViewModel: ObservableObject {
         drainTimer = timer
     }
 
-    /// Move a slice of buffered chars into the visible message.
-    /// Rate is adaptive: small buffer reveals slowly (readable), large buffer
-    /// drains faster so a long response never lags far behind the server.
-    /// A short word-boundary lookahead lets short words land as a unit
-    /// instead of being cut into 2-char pulses, which reads as much
-    /// smoother at the same effective char-per-second rate.
+    /// Batch everything available at the existing 20 Hz UI cadence.
     private func drainTick() {
+        guard !invalidated else { resetStreamBuffer(); return }
+        guard authenticationGeneration == apiClient.authenticationGeneration else {
+            invalidateForReplacement()
+            return
+        }
         guard !streamBuffer.isEmpty else {
             drainTimer?.invalidate()
             drainTimer = nil
-            streamingDone = false
-            // The previous tick committed the final chars to the bubble
-            // via upsertStreamingMessage; safe to persist now.
-            if pendingPersistAfterDrain {
-                pendingPersistAfterDrain = false
-                persistToLocalHistory()
-            }
             return
         }
-        let pending = streamBuffer.count
-        // Steady readable typewriter pace (~33 chars/sec) when in sync with
-        // the stream; accelerate only when the buffer grows large or the
-        // server has finished and we need to catch up without a tail lag.
-        let cap = streamingDone ? 6 : 2
-        var take = max(1, min(pending / 120, cap))
-
-        // Word-boundary preference: if the slice would end mid-word, look
-        // ahead a few chars and extend through the next whitespace so the
-        // word lands whole. Long words (no space within the lookahead
-        // window) still reveal at the base rate, preserving the
-        // typewriter feel for them.
-        if take < pending {
-            let lastIdx = streamBuffer.index(streamBuffer.startIndex, offsetBy: take - 1)
-            if !streamBuffer[lastIdx].isWhitespace {
-                let lookahead = min(pending - take, 5)
-                var probe = take
-                for _ in 0..<lookahead {
-                    let idx = streamBuffer.index(streamBuffer.startIndex, offsetBy: probe)
-                    probe += 1
-                    if streamBuffer[idx].isWhitespace {
-                        take = probe
-                        break
-                    }
-                }
-            }
-        }
-
-        let endIdx = streamBuffer.index(streamBuffer.startIndex, offsetBy: take)
-        let slice = String(streamBuffer[..<endIdx])
-        streamBuffer.removeFirst(take)
-        assistantContent.append(slice)
+        assistantContent.append(streamBuffer)
+        streamBuffer.removeAll(keepingCapacity: true)
         upsertStreamingMessage(content: assistantContent)
     }
 
@@ -2149,7 +2444,6 @@ public class ChatViewModel: ObservableObject {
         streamBuffer.removeAll(keepingCapacity: false)
         drainTimer?.invalidate()
         drainTimer = nil
-        streamingDone = false
     }
 
     /// Reset the sub-agent echo-suppression state. Called at turn
@@ -2175,6 +2469,12 @@ public class ChatViewModel: ObservableObject {
     }
 
     private func handleTerminalEvent(_ type: String, _ payload: [String: Any]) {
+        if type == "run.succeeded", !receivedAuthoritativeMessage, !appliedRecoverySnapshot {
+            handleStreamFailure(SSEFailure.unexpectedEOF)
+            return
+        }
+        flushStreamBuffer()
+        runState = runState.applying(eventType: type)
         AgentLog.debug(.chat, "[ChatVM] terminal type=\(type) runId=\(currentRunId ?? "nil")")
         if type == "run.failed" {
             // Close out the stream so the error message doesn't orphan a
@@ -2193,11 +2493,8 @@ public class ChatViewModel: ObservableObject {
                 type: .error
             ))
         } else {
-            // Success / cancelled / timed-out: let the drain timer finish
-            // smoothly at its elevated catch-up rate; flushing all remaining
-            // chars would produce a visible end-of-reply leap. The timer
-            // self-invalidates when the buffer empties.
-            streamingDone = true
+            // All received text has already been committed, independently of
+            // the voice pipeline's sentence/audio pacing.
             // The run is over — any still-pending echo reference can't be
             // resolved by another event and would only leak into the next
             // turn if not cleared.
@@ -2206,14 +2503,6 @@ public class ChatViewModel: ObservableObject {
             // from a speaker-button tap.
             if type == "run.cancelled" || type == "run.timed_out" {
                 voiceController?.stop()
-            } else if let vc = voiceController, vc.autoSpeakReplies {
-                // Belt and braces for a run that ended without a clean
-                // `assistant.message`: flush whatever the chunker still
-                // holds so the reply doesn't end mid-sentence, and — since
-                // `finishTurn` closes the turn — release anything waiting
-                // on the end-of-turn signal. A no-op when the message
-                // handler already flushed.
-                vc.finishTurn()
             }
         }
 
@@ -2226,31 +2515,30 @@ public class ChatViewModel: ObservableObject {
         // from "the server finished" can track which runId they
         // passed to `cancelRun` and ignore the callback for
         // unrecognised ids.
-        sseClient?.disconnect(reason: .lifecycle)
-        sseClient = nil
-        currentRunId = nil
-
-        // Persist to local history store (ephemeral mode).
-        // On the success path the drain timer may still be revealing the
-        // final assistant chars into the bubble; defer until it empties so
-        // the persisted snapshot includes the full assistant message. The
-        // error path closes the streaming session up-front (above) so the
-        // buffer is already drained.
-        if drainTimer != nil || !streamBuffer.isEmpty {
-            pendingPersistAfterDrain = true
+        stopStream(reason: .lifecycle)
+        subAgentActivity = SubAgentActivityState()
+        currentStreamingMessageId = nil
+        // The terminal path is synchronous: retain recovery identity until
+        // after the complete local transcript has been written.
+        if persistToLocalHistory() {
+            clearPendingRun()
         } else {
-            persistToLocalHistory()
+            error = "The reply is visible but could not be saved locally. Its recovery key has been retained."
         }
     }
 
     private func mapApiMessage(_ m: APIMessage) -> [Message] {
         let timestamp = m.timestamp ?? Date()
+        let identity = m.id.map { "message-\($0)" }
+            ?? m.seq.map { "message-seq-\(conversationId ?? "")-\($0)" }
+            ?? UUID().uuidString
 
         // Tool result messages (role: "tool"). If the backend persisted
         // contentBlocks on the tool message we synthesise an extra bubble so
         // the rich UI (videos, cards, etc.) re-renders on conversation reload.
         if m.role == "tool" {
             var out: [Message] = [Message(
+                id: identity,
                 role: .system,
                 content: "✓ Done",
                 timestamp: timestamp,
@@ -2263,6 +2551,7 @@ public class ChatViewModel: ObservableObject {
             )]
             if let blocks = m.metadata?.contentBlocks, !blocks.isEmpty {
                 out.append(Message(
+                    id: "\(identity)-blocks",
                     role: .assistant,
                     content: "",
                     timestamp: timestamp,
@@ -2279,9 +2568,14 @@ public class ChatViewModel: ObservableObject {
 
         // Assistant messages with tool calls
         if m.role == "assistant", let toolCalls = m.toolCalls, !toolCalls.isEmpty {
-            return toolCalls.map { tc in
+            var rows: [Message] = []
+            if let content = m.content, !content.isEmpty {
+                rows.append(Message(id: identity, role: .assistant, content: content, timestamp: timestamp))
+            }
+            rows += toolCalls.enumerated().map { index, tc in
                 let name = tc.function?.name ?? tc.name ?? "tool"
                 return Message(
+                    id: "\(identity)-tool-\(tc.id ?? String(index))",
                     role: .assistant,
                     content: "🔧 \(name)",
                     timestamp: timestamp,
@@ -2293,21 +2587,25 @@ public class ChatViewModel: ObservableObject {
                     )
                 )
             }
+            if let blocks = m.metadata?.contentBlocks, !blocks.isEmpty {
+                rows.append(Message(id: "\(identity)-blocks", role: .assistant, content: "",
+                    timestamp: timestamp, type: .contentBlocks, metadata: MessageMetadata(contentBlocks: blocks)))
+            }
+            return rows
         }
 
         // Skip empty assistant messages
         let content = m.content ?? ""
-        if m.role == "assistant" && content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return []
+        var rows: [Message] = []
+        if m.role != "assistant" || !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            rows.append(Message(id: identity, role: MessageRole(rawValue: m.role) ?? .system,
+                                content: content, timestamp: timestamp))
         }
-
-        // Regular messages
-        return [Message(
-            role: MessageRole(rawValue: m.role) ?? .user,
-            content: content,
-            timestamp: timestamp,
-            type: .message
-        )]
+        if let blocks = m.metadata?.contentBlocks, !blocks.isEmpty {
+            rows.append(Message(id: "\(identity)-blocks", role: .assistant, content: "",
+                timestamp: timestamp, type: .contentBlocks, metadata: MessageMetadata(contentBlocks: blocks)))
+        }
+        return rows
     }
 
     /// Tear down any in-flight SSE stream when the VM is deinit'd. The
@@ -2316,6 +2614,9 @@ public class ChatViewModel: ObservableObject {
     /// `disconnect(reason:)` is no-op if no client is attached, so
     /// this is safe to call unconditionally.
     deinit {
+        recoveryTask?.cancel()
+        drainTimer?.invalidate()
+        streamContinuation?.resume()
         sseClient?.disconnect(reason: .lifecycle)
     }
 }

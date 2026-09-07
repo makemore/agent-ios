@@ -1,0 +1,13 @@
+{
+  "name": "run_failed",
+  "description": "Synthetic provider failure terminates a partial stream without certifying it as an authoritative answer.",
+  "run_id": "test-run-failed-001",
+  "conversation_id": "test-conv-failed-001",
+  "status": "failed",
+  "error": {"type": "ProviderUnavailable", "message": "Upstream provider unavailable", "retriable": false},
+  "events": [
+    {"event": "run.started", "payload": {"agent_key": "test-agent", "attempt": 1}},
+    {"event": "assistant.delta", "payload": {"delta": "Let me check"}},
+    {"event": "run.failed", "payload": {"error": "Upstream provider unavailable", "error_details": {"type": "ProviderUnavailable", "message": "Upstream provider unavailable", "retriable": false}}}
+  ]
+}

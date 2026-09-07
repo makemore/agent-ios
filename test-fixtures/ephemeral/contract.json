@@ -1,0 +1,57 @@
+{
+  "description": "Synthetic shared wire oracle: every ephemeral turn sends full local history, reuses the server conversation id, and never fetches server history. Covers default and private-only egress, including a repeated user turn.",
+  "scenarios": [
+    {
+      "name": "ephemeral_full_history_default_egress",
+      "agentKey": "ephemeral-contract-default",
+      "fixture": "simple_streaming",
+      "assistantReply": "Hello there! How can I help you today?",
+      "serverConversationId": "test-conv-simple-001",
+      "turns": ["Hi", "What can you help with?", "Hi"],
+      "expect": {
+        "everyRequestEphemeralTrue": true,
+        "messageCountPerTurn": [1, 3, 5],
+        "expectedMessagesPerTurn": [
+          [{"role": "user", "content": "Hi"}],
+          [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello there! How can I help you today?"},
+            {"role": "user", "content": "What can you help with?"}
+          ],
+          [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello there! How can I help you today?"},
+            {"role": "user", "content": "What can you help with?"},
+            {"role": "assistant", "content": "Hello there! How can I help you today?"},
+            {"role": "user", "content": "Hi"}
+          ]
+        ],
+        "conversationIdSentPerTurn": [null, "test-conv-simple-001", "test-conv-simple-001"],
+        "forbiddenPathSubstring": "/conversations/"
+      }
+    },
+    {
+      "name": "ephemeral_full_history_private_only",
+      "agentKey": "ephemeral-contract-private",
+      "fixture": "simple_streaming",
+      "assistantReply": "Hello there! How can I help you today?",
+      "serverConversationId": "test-conv-simple-001",
+      "privateOnly": true,
+      "turns": ["Hello", "Keep this private"],
+      "expect": {
+        "everyRequestEphemeralTrue": true,
+        "messageCountPerTurn": [1, 3],
+        "expectedMessagesPerTurn": [
+          [{"role": "user", "content": "Hello"}],
+          [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hello there! How can I help you today?"},
+            {"role": "user", "content": "Keep this private"}
+          ]
+        ],
+        "conversationIdSentPerTurn": [null, "test-conv-simple-001"],
+        "forbiddenPathSubstring": "/conversations/"
+      }
+    }
+  ]
+}

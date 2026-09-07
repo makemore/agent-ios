@@ -72,8 +72,12 @@ final class MockURLProtocol: URLProtocol {
     }
 
     private static func response(for request: URLRequest) -> Response? {
-        lock.lock(); defer { lock.unlock() }
-        for handler in handlers.reversed() {
+        lock.lock()
+        let snapshot = handlers
+        lock.unlock()
+        // A handler may inspect recorded requests or arrange the next response.
+        // Never invoke arbitrary test code while holding the registry lock.
+        for handler in snapshot.reversed() {
             if let response = handler(request) { return response }
         }
         return nil

@@ -6,11 +6,14 @@ extension APIClient {
     
     /// Load conversations list
     public func loadConversations() async throws -> [Conversation] {
+        let generation = authenticationGeneration
         let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
         let path = "\(config.apiPaths.conversations)?agent_key=\(config.agentKey.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? config.agentKey)"
         let request = buildRequest(path: path, method: "GET", token: token)
         
         let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -32,27 +35,21 @@ extension APIClient {
         return try decoder.decode([Conversation].self, from: data)
     }
     
-    /// Load a specific conversation.
-    ///
-    /// `limit == nil` (the default) omits the pagination params entirely,
-    /// which the runtime's `AgentConversationDetailSerializer` reads as
-    /// "send the whole message history" and answers with `has_more: false`.
-    /// That is what the client wants now that conversations are capped —
-    /// a whole-thread load is what lets the transcript render eagerly
-    /// instead of guessing at the geometry of rows it hasn't fetched.
-    ///
-    /// Pass a `limit` to opt back into windowed paging (see
-    /// `ChatViewModel.loadMoreMessages`); `offset` counts back from the
-    /// newest message, matching the server's slicing.
-    public func loadConversation(id: String, limit: Int? = nil, offset: Int = 0) async throws -> Conversation {
+    /// Recent bounded page; explicit nil retains the legacy unpaginated API.
+    /// Keyset cursors take precedence over offsets when supplied by the server.
+    public func loadConversation(id: String, limit: Int? = 50, offset: Int = 0, beforeSeq: Int? = nil) async throws -> Conversation {
+        let generation = authenticationGeneration
         let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
         var path = "\(config.apiPaths.conversations)\(id)/"
         if let limit {
-            path += "?limit=\(limit)&offset=\(offset)"
+            path += "?limit=\(max(1, min(limit, 100)))"
+            path += beforeSeq.map { "&before_seq=\($0)" } ?? "&offset=\(max(0, offset))"
         }
         let request = buildRequest(path: path, method: "GET", token: token)
         
         let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -80,7 +77,7 @@ extension APIClient {
     /// how we ship behaviour knobs (response_style, tool_access,
     /// research, web_search, etc.) without breaking the wire format
     /// every time a new toggle is added.
-    public func createRun(
+    @MainActor public func createRun(
         conversationId: String?,
         messages: [[String: Any]],
         model: String? = nil,
@@ -93,11 +90,12 @@ extension APIClient {
         ephemeral: Bool = false,
         privateOnly: Bool = false,
         memories: [[String: String]]? = nil,
-        params: [String: Any]? = nil
+        params: [String: Any]? = nil,
+        idempotencyKey: String = UUID().uuidString,
+        beforePost: (@MainActor (Data) throws -> Void)? = nil
     ) async throws -> AgentRun {
-        let token = try await getOrCreateSession()
-
         var body: [String: Any] = [
+            "idempotency_key": idempotencyKey,
             "agentKey": agentKeyOverride ?? config.agentKey,
             "messages": messages,
             "metadata": config.metadata.merging(["journeyType": config.defaultJourneyType]) { _, new in new }
@@ -150,49 +148,78 @@ extension APIClient {
             body["params"] = params
         }
 
-        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let jsonData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        return try await postRun(body: jsonData, beforePost: beforePost)
+    }
+
+    /// Transport retry only: never reconstruct a request from current UI settings.
+    @MainActor public func postRun(body jsonData: Data, beforePost: (@MainActor (Data) throws -> Void)? = nil) async throws -> AgentRun {
+        let generation = authenticationGeneration
+        let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
+        try Task.checkCancellation()
+        // No actor suspension between the host's identity/lifecycle fence,
+        // durable save, and submitting the original bytes to URLSession.
+        try beforePost?(jsonData)
+        try validateAuthenticationGeneration(generation)
         let request = buildRequest(path: config.apiPaths.runs, method: "POST", body: jsonData, token: token)
         
         let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
         
         if httpResponse.statusCode == 401 {
-            // Try refreshing token
-            clearSession()
-            if let newToken = try await getOrCreateSession(forceRefresh: true) {
-                let retryRequest = buildRequest(path: config.apiPaths.runs, method: "POST", body: jsonData, token: newToken)
-                let (retryData, retryResponse) = try await session.data(for: retryRequest)
-                
-                guard let retryHttpResponse = retryResponse as? HTTPURLResponse, retryHttpResponse.statusCode == 200 || retryHttpResponse.statusCode == 201 else {
-                    throw APIError.unauthorized
-                }
-                
-                return try decoder.decode(AgentRun.self, from: retryData)
-            }
+            // Minting a different anonymous identity cannot recover this send.
+            // Let the host restore authentication; never retry as another owner.
             throw APIError.unauthorized
         }
         
         guard httpResponse.statusCode == 200 || httpResponse.statusCode == 201 else {
-            if let errorData = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let error = errorData["error"] as? String ?? errorData["detail"] as? String {
-                throw APIError.serverError(message: error)
-            }
             throw APIError.httpError(statusCode: httpResponse.statusCode)
         }
         
         return try decoder.decode(AgentRun.self, from: data)
     }
+
+    public func loadRun(id: String) async throws -> AgentRun {
+        try await getRun(path: "\(config.apiPaths.runs)\(id)/")
+    }
+
+    /// 404 means unknown key (safe to retry identical creation while retained);
+    /// 410 means expired/deleted, and must never cause another POST.
+    public func loadRun(idempotencyKey: String) async throws -> AgentRun {
+        var query = URLComponents()
+        query.queryItems = [URLQueryItem(name: "idempotency_key", value: idempotencyKey)]
+        return try await getRun(path: "\(config.apiPaths.runs)by-idempotency-key/?\(query.percentEncodedQuery ?? "")")
+    }
+
+    private func getRun(path: String) async throws -> AgentRun {
+        let generation = authenticationGeneration
+        let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
+        let request = buildRequest(path: path, method: "GET", token: token)
+        let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
+        if http.statusCode == 404 { throw APIError.notFound }
+        guard http.statusCode == 200 else { throw APIError.httpError(statusCode: http.statusCode) }
+        return try decoder.decode(AgentRun.self, from: data)
+    }
     
     /// Cancel a run
     public func cancelRun(id: String) async throws {
+        let generation = authenticationGeneration
         let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
         let path = config.apiPaths.cancelRunUrl(for: id)
         let request = buildRequest(path: path, method: "POST", token: token)
         
         let (_, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
         
         guard let httpResponse = response as? HTTPURLResponse,
               (200...204).contains(httpResponse.statusCode) else {

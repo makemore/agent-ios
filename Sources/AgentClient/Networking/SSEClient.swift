@@ -36,198 +36,258 @@ public enum DisconnectReason: String, Sendable {
     case error
 }
 
-/// Server-Sent Events client for streaming responses
-public class SSEClient {
+public enum SSEFailure: Error, LocalizedError, Equatable {
+    case httpStatus(Int), invalidContentType, invalidResponse, invalidUTF8
+    case frameTooLarge, malformedEvent, unexpectedEOF
+    case connectionTimeout, idleTimeout, overallTimeout, network(Int)
+
+    public var isRetryable: Bool {
+        switch self {
+        case .unexpectedEOF, .connectionTimeout, .idleTimeout, .overallTimeout, .network: return true
+        case .httpStatus(let status): return status == 408 || status == 429 || status >= 500
+        default: return false
+        }
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .httpStatus(let status): return "Stream request rejected (HTTP \(status))."
+        case .invalidContentType, .invalidResponse: return "The server did not return an event stream."
+        case .invalidUTF8, .frameTooLarge, .malformedEvent: return "The server returned an invalid stream."
+        case .unexpectedEOF: return "The stream ended before the run finished."
+        case .connectionTimeout, .idleTimeout, .overallTimeout: return "The stream timed out. Checking the saved run."
+        case .network: return "The stream connection was interrupted."
+        }
+    }
+}
+
+/// Incremental byte parser: decode only complete lines, never individual packets.
+/// Limits cover both unfinished lines and accumulated multiline event data.
+struct SSEParser {
+    let maxLineBytes: Int
+    let maxFrameBytes: Int
+    private var line = Data()
+    private var dataLines: [String] = []
+    private var type = "message"
+    private var id: String?
+    private var frameBytes = 0
+    private var afterCR = false
+    private var firstLine = true
+
+    init(maxLineBytes: Int = 256 * 1024, maxFrameBytes: Int = 1024 * 1024) {
+        self.maxLineBytes = maxLineBytes
+        self.maxFrameBytes = maxFrameBytes
+    }
+
+    mutating func append(_ bytes: Data) throws -> [SSEEvent] {
+        var events: [SSEEvent] = []
+        for byte in bytes {
+            if afterCR {
+                afterCR = false
+                if byte == 10 { continue }
+            }
+            if byte == 10 || byte == 13 {
+                if let event = try finishLine() { events.append(event) }
+                afterCR = byte == 13
+            } else {
+                guard line.count < maxLineBytes, frameBytes + line.count < maxFrameBytes else {
+                    throw SSEFailure.frameTooLarge
+                }
+                line.append(byte)
+            }
+        }
+        return events
+    }
+
+    private mutating func finishLine() throws -> SSEEvent? {
+        guard var text = String(data: line, encoding: .utf8) else { throw SSEFailure.invalidUTF8 }
+        frameBytes += line.count + 1
+        line.removeAll(keepingCapacity: true)
+        guard frameBytes <= maxFrameBytes else { throw SSEFailure.frameTooLarge }
+        if firstLine {
+            firstLine = false
+            if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+        }
+        if text.isEmpty {
+            let event = dataLines.isEmpty ? nil : SSEEvent(type: type, data: dataLines.joined(separator: "\n"), id: id)
+            dataLines.removeAll(keepingCapacity: true)
+            type = "message"
+            frameBytes = 0
+            return event
+        }
+        if text.hasPrefix(":") { return nil }
+        let parts = text.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let field = String(parts[0])
+        var value = parts.count == 2 ? String(parts[1]) : ""
+        if value.hasPrefix(" ") { value.removeFirst() }
+        switch field {
+        case "data": dataLines.append(value)
+        case "event": type = value.isEmpty ? "message" : value
+        case "id": if !value.contains("\0") { id = value }
+        default: break
+        }
+        return nil
+    }
+}
+
+/// All connection state and callbacks are serialized on the main queue. Each
+/// delegate is fenced by connection identity, including already queued callbacks.
+public final class SSEClient {
     private var task: URLSessionDataTask?
-    private var buffer = ""
-    /// Run ID of the active stream, set inside `connect(url:headers:runId:)`.
-    /// Captured here so `disconnect(reason:)` can pass it to the
-    /// `onDisconnect` callback without callers having to remember to
-    /// supply it. Cleared on disconnect.
+    private var session: URLSession?
+    private var connection: UUID?
     private var lastRunId: String?
-    /// Set by `disconnect()` so the URLSession completion callback can tell
-    /// "we asked for this" (NSURLErrorCancelled is expected, surface as
-    /// `onComplete`) from a genuine network failure (surface as `onError`).
-    /// Without this, calling `disconnect()` after a terminal SSE event
-    /// produces a "cancelled" banner flash before the next run starts.
-    private var expectingDisconnect = false
-    /// Set true after the onDisconnect callback has fired for the
-    /// current run. Prevents double-firing if both an explicit
-    /// disconnect and a late error callback race on the same run.
-    private var hasFiredDisconnect = false
-    /// Retained reference to the active stream delegate so `parseEvent`
-    /// can bump the event counter the delegate reports at completion.
-    private var streamDelegate: SSEStreamDelegate?
-
-    public var onEvent: ((SSEEvent) -> Void)?
-    public var onError: ((Error) -> Void)?
-    public var onComplete: (() -> Void)?
-    /// Fired exactly once when the SSE stream is torn down. The first
-    /// argument is the runId of the stream that just closed; the
-    /// second classifies the teardown so the host can distinguish
-    /// a user cancel from a network failure or a lifecycle event.
-    public var onDisconnect: ((String, DisconnectReason) -> Void)?
-
-    /// Hook for tests to inject a `URLProtocol` (or otherwise mutate the
-    /// session configuration) into every `URLSession` this client builds
-    /// internally. No-op by default in production.
+    private var parser = SSEParser()
+    private var watchdog: Timer?
+    private var started = Date()
+    private var lastActivity = Date()
+    private var receivedResponse = false
+    public struct Timeouts {
+        public var connection: TimeInterval = 30
+        // The worker has a 900s budget. Allow cleanup headroom, even if a
+        // deployment temporarily fails to emit heartbeat bytes during work.
+        public var idle: TimeInterval = 960
+        public var overall: TimeInterval = 1080
+        public init() {}
+    }
+    private let timeouts: Timeouts
+    // Hosts may install callbacks off-main before connecting. Synchronize
+    // access independently of the main-queue connection/reducer state.
+    private let callbackLock = NSLock()
+    private var eventCallback: ((SSEEvent) -> Void)?
+    private var errorCallback: ((Error) -> Void)?
+    private var completeCallback: (() -> Void)?
+    private var disconnectCallback: ((String, DisconnectReason) -> Void)?
+    private func withCallbackLock<T>(_ operation: () -> T) -> T {
+        callbackLock.lock(); defer { callbackLock.unlock() }
+        return operation()
+    }
+    public var onEvent: ((SSEEvent) -> Void)? {
+        get { withCallbackLock { eventCallback } }
+        set { withCallbackLock { eventCallback = newValue } }
+    }
+    public var onError: ((Error) -> Void)? {
+        get { withCallbackLock { errorCallback } }
+        set { withCallbackLock { errorCallback = newValue } }
+    }
+    /// Deliberate close only. Socket EOF is always `unexpectedEOF`.
+    public var onComplete: (() -> Void)? {
+        get { withCallbackLock { completeCallback } }
+        set { withCallbackLock { completeCallback = newValue } }
+    }
+    public var onDisconnect: ((String, DisconnectReason) -> Void)? {
+        get { withCallbackLock { disconnectCallback } }
+        set { withCallbackLock { disconnectCallback = newValue } }
+    }
     public static var sessionConfigurator: ((URLSessionConfiguration) -> Void)?
+    public init(timeouts: Timeouts = Timeouts()) { self.timeouts = timeouts }
 
-    public init() {}
-
-    /// Connect to an SSE endpoint.
-    /// - Parameter runId: The run ID for the stream; captured so the
-    ///   `onDisconnect` callback can report it without the caller
-    ///   having to thread it through `disconnect()`. Pass `nil` if
-    ///   the client is being used outside of an agent-runtime run
-    ///   (e.g. ad-hoc SSE in tests); in that case `disconnect()`
-    ///   will not fire `onDisconnect` because there is no runId to
-    ///   report.
     public func connect(url: URL, headers: [String: String] = [:], runId: String? = nil) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.connect(url: url, headers: headers, runId: runId) }
+            return
+        }
+        close(reason: .explicit, notifyComplete: false)
+        // A host disconnect callback can synchronously connect a replacement.
+        // Never overwrite its retained session without closing it.
+        guard connection == nil else { return }
+        let identity = UUID()
+        connection = identity
         lastRunId = runId
-        hasFiredDisconnect = false
+        parser = SSEParser()
+        started = Date()
+        lastActivity = started
+        receivedResponse = false
         var request = URLRequest(url: url)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
+        for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+        let delegate = SSEStreamDelegate()
+        delegate.onResponse = { [weak self] response in
+            guard let self, self.connection == identity else { return false }
+            if let failure = Self.validate(response) { self.fail(failure); return false }
+            self.receivedResponse = true
+            self.lastActivity = Date()
+            return true
         }
-
-        AgentLog.debug(.sse, "[SSE] connect url=\(redactURLForLogging(url))")
-
-        // Reset on every connect — a previous run may have set the flag
-        // during teardown.
-        expectingDisconnect = false
-
-        let delegate = SSEStreamDelegate { [weak self] data in
-            if let text = String(data: data, encoding: .utf8) {
-                self?.processData(text)
-            }
-        } onComplete: { [weak self] in
-            DispatchQueue.main.async {
-                self?.onComplete?()
-            }
-        } onError: { [weak self] error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                // Deliberate teardown after a terminal event (`disconnect()`
-                // sets `expectingDisconnect`) — URLSession reports this as
-                // NSURLErrorCancelled. Surface as a clean completion so the
-                // awaiter wakes but no error banner appears.
-                if self.expectingDisconnect ||
-                   (error as? URLError)?.code == .cancelled {
-                    self.onComplete?()
-                    return
+        delegate.onData = { [weak self] data in
+            guard let self, self.connection == identity else { return }
+            self.lastActivity = Date()
+            do {
+                for event in try self.parser.append(data) {
+                    guard self.connection == identity else { break }
+                    self.onEvent?(event)
                 }
-                self.onError?(error)
+            } catch { self.fail(error as? SSEFailure ?? .malformedEvent) }
+        }
+        delegate.onEnd = { [weak self] error in
+            guard let self, self.connection == identity else { return }
+            self.fail(error.map { .network(($0 as NSError).code) } ?? .unexpectedEOF)
+        }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = timeouts.idle
+        cfg.timeoutIntervalForResource = timeouts.overall
+        Self.sessionConfigurator?(cfg)
+        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: .main)
+        self.session = session
+        task = session.dataTask(with: request)
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, self.connection == identity else { return }
+            let now = Date()
+            if now.timeIntervalSince(self.started) >= self.timeouts.overall {
+                self.fail(.overallTimeout)
+            } else if !self.receivedResponse && now.timeIntervalSince(self.started) >= self.timeouts.connection {
+                self.fail(.connectionTimeout)
+            } else if now.timeIntervalSince(self.lastActivity) >= self.timeouts.idle {
+                self.fail(.idleTimeout)
             }
         }
-
-        let streamConfig = URLSessionConfiguration.default
-        streamConfig.timeoutIntervalForRequest = 300 // 5 minutes
-        streamConfig.timeoutIntervalForResource = 300
-        Self.sessionConfigurator?(streamConfig)
-        let streamSession = URLSession(configuration: streamConfig, delegate: delegate, delegateQueue: nil)
-        streamDelegate = delegate
-        task = streamSession.dataTask(with: request)
+        watchdog = timer
+        RunLoop.main.add(timer, forMode: .common)
         task?.resume()
     }
 
-    /// Disconnect from the SSE endpoint.
-    /// - Parameter reason: Why the stream is being torn down. The
-    ///   caller (the view model) is responsible for choosing the
-    ///   correct reason — the SSE owner no longer has enough context
-    ///   to distinguish "user cancelled" from "view disappeared".
-    ///   `disconnect()` only fires the `onDisconnect` callback when a
-    ///   run was associated with this client (i.e. `connect(...,
-    ///   runId:)` was called first); for clients created in tests
-    ///   without a runId the callback is a no-op.
+    static func validate(_ response: URLResponse) -> SSEFailure? {
+        guard let http = response as? HTTPURLResponse else { return .invalidResponse }
+        guard http.statusCode == 200 else { return .httpStatus(http.statusCode) }
+        let mime = http.value(forHTTPHeaderField: "Content-Type")?
+            .split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return mime == "text/event-stream" ? nil : .invalidContentType
+    }
+
     public func disconnect(reason: DisconnectReason = .explicit) {
-        guard let runId = lastRunId else {
-            // Never connected, or already cleaned up — nothing to report.
-            expectingDisconnect = true
-            task?.cancel()
-            task = nil
-            buffer = ""
-            streamDelegate = nil
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [self] in disconnect(reason: reason) }
             return
         }
-        expectingDisconnect = true
+        close(reason: reason, notifyComplete: true)
+    }
+
+    private func fail(_ failure: SSEFailure) {
+        let callback = onError
+        close(reason: .network, notifyComplete: false)
+        if connection == nil { callback?(failure) }
+    }
+
+    private func close(reason: DisconnectReason, notifyComplete: Bool) {
+        guard connection != nil else { return }
+        connection = nil
+        let runId = lastRunId
+        lastRunId = nil
+        watchdog?.invalidate()
+        watchdog = nil
         task?.cancel()
         task = nil
-        buffer = ""
-        streamDelegate = nil
-        if !hasFiredDisconnect {
-            hasFiredDisconnect = true
-            let captured = runId
-            DispatchQueue.main.async { [weak self] in
-                self?.onDisconnect?(captured, reason)
-            }
-        }
-        lastRunId = nil
+        session?.invalidateAndCancel()
+        session = nil
+        parser = SSEParser()
+        AgentLog.debug(.sse, "[SSE] closed duration_ms=\(Int(Date().timeIntervalSince(started) * 1000))")
+        if let runId { onDisconnect?(runId, reason) }
+        if notifyComplete, connection == nil { onComplete?() }
     }
-    
-    private func processData(_ text: String) {
-        buffer += text
-        
-        // Process complete events (separated by double newlines)
-        let events = buffer.components(separatedBy: "\n\n")
-        
-        // Keep the last incomplete event in the buffer
-        if !buffer.hasSuffix("\n\n") {
-            buffer = events.last ?? ""
-        } else {
-            buffer = ""
-        }
-        
-        // Process all complete events
-        for eventText in events.dropLast(buffer.isEmpty ? 0 : 1) {
-            if let event = parseEvent(eventText) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.onEvent?(event)
-                }
-            }
-        }
-    }
-    
-    private func parseEvent(_ text: String) -> SSEEvent? {
-        var eventType: String?
-        var data: String?
-        var id: String?
-        
-        for line in text.components(separatedBy: "\n") {
-            if line.hasPrefix("event:") {
-                eventType = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            } else if line.hasPrefix("data:") {
-                let dataLine = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                if data == nil {
-                    data = dataLine
-                } else {
-                    data! += "\n" + dataLine
-                }
-            } else if line.hasPrefix("id:") {
-                id = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-            }
-        }
-        
-        guard let eventData = data else { return nil }
-        
-        let ev = SSEEvent(
-            type: eventType ?? "message",
-            data: eventData,
-            id: id
-        )
-        streamDelegate?.totalEvents += 1
-        let preview: String
-        if eventData.count > 60 {
-            preview = String(eventData.prefix(60)) + "…"
-        } else {
-            preview = eventData
-        }
-        AgentLog.debug(.sse, "[SSE] event type=\(ev.type) bytes=\(eventData.count) data=\(preview)")
-        return ev
-    }
+
+    deinit { watchdog?.invalidate(); session?.invalidateAndCancel() }
 }
 
 /// SSE Event
@@ -245,43 +305,21 @@ public struct SSEEvent {
 
 /// Stream delegate for handling SSE data
 private class SSEStreamDelegate: NSObject, URLSessionDataDelegate {
-    let onData: (Data) -> Void
-    let onComplete: () -> Void
-    let onError: (Error) -> Void
+    var onResponse: ((URLResponse) -> Bool)?
+    var onData: ((Data) -> Void)?
+    var onEnd: ((Error?) -> Void)?
 
-    /// Wall-clock timestamps + counters used to produce the
-    /// `[AgentClient][SSE]` narrative logs (first-byte latency,
-    /// total bytes / events at completion).
-    let connectStartedAt: Date = Date()
-    var firstByteAt: Date?
-    var totalBytes: Int = 0
-    var totalEvents: Int = 0
-
-    init(onData: @escaping (Data) -> Void, onComplete: @escaping () -> Void, onError: @escaping (Error) -> Void) {
-        self.onData = onData
-        self.onComplete = onComplete
-        self.onError = onError
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        completionHandler(onResponse?(response) == true ? .allow : .cancel)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        if firstByteAt == nil {
-            firstByteAt = Date()
-            let ms = Int(firstByteAt!.timeIntervalSince(connectStartedAt) * 1000)
-            AgentLog.debug(.sse, "[SSE] first bytes received: \(data.count)B after \(ms)ms")
-        }
-        totalBytes += data.count
-        onData(data)
+        onData?(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        let durationMs = Int(Date().timeIntervalSince(connectStartedAt) * 1000)
-        let errDesc = error?.localizedDescription ?? "nil"
-        AgentLog.debug(.sse, "[SSE] complete error=\(errDesc) totalBytes=\(totalBytes) totalEvents=\(totalEvents) duration=\(durationMs)ms")
-        if let error = error {
-            onError(error)
-        } else {
-            onComplete()
-        }
+        onEnd?(error)
     }
 }
 

@@ -40,10 +40,8 @@ import UIKit
 ///     than `nearBottomThresholdPt` from the newest message.
 ///
 /// Pagination ("Load earlier") prepends older messages and restores the
-/// previously-first-visible message to the top of the viewport. It is
-/// vestigial: once the data layer fetches whole conversations (safe
-/// under the message cap), `hasMoreMessages` is permanently false and
-/// the button never renders.
+/// previously-first-visible message to the top of the viewport. Persistent
+/// history is fetched in bounded pages; client-owned history remains whole.
 public struct MessageListView: View {
     let messages: [Message]
     let isLoading: Bool
@@ -124,12 +122,10 @@ public struct MessageListView: View {
 
     /// Anchor message id used by the "Load earlier" pagination path.
     /// Set by the tap handler on the load-more button; consumed by
-    /// ``handleCountChange`` after the next render to scroll the
+    /// the pagination identity observer after a prepend to scroll the
     /// previously-first-visible message back to the top of the viewport.
     @State private var paginationAnchorId: String?
-    /// Message count snapshot used to detect that a pagination commit
-    /// actually grew the list. A failed pagination doesn't change the
-    /// count and we leave the anchor in place for the next attempt.
+    /// Message count snapshot used for initial-load scrolling on older OSes.
     @State private var previousMessageCount: Int = 0
     /// Identity of the most recently seen tail message. The user-
     /// submit scroll path watches this instead of `messages.count`
@@ -240,6 +236,18 @@ public struct MessageListView: View {
                 .onChange(of: messages.count) { newCount in
                     handleCountChange(newCount: newCount, proxy: proxy)
                 }
+                .onChange(of: paginationObservation) { observation in
+                    // Carry post-change identity in the observed value itself;
+                    // `messages` in a captured View may still be the old page.
+                    if let anchor = observation.anchorToRestore {
+                        paginationAnchorId = nil
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) { proxy.scrollTo(anchor, anchor: .top) }
+                    } else if !observation.loading {
+                        paginationAnchorId = nil
+                    }
+                }
                 .onChange(of: tailKey) { newTailKey in
                     handleTailChange(newTailKey: newTailKey, proxy: proxy)
                 }
@@ -339,6 +347,11 @@ public struct MessageListView: View {
         messages.last.map { "\($0.role.rawValue)|\($0.id)" }
     }
 
+    private var paginationObservation: PaginationObservation {
+        PaginationObservation(firstID: messages.first?.id, anchorID: paginationAnchorId,
+            anchorExists: messages.contains { $0.id == paginationAnchorId }, loading: loadingMoreMessages)
+    }
+
     /// Tail watcher callback. Fires whenever the tail message changes
     /// (i.e. a new message was appended). If the new tail is a user
     /// message, pins the list to the bottom so the just-sent bubble
@@ -389,8 +402,7 @@ public struct MessageListView: View {
         }
     }
 
-    /// Count-change handler: initial conversation load (pre-18) and
-    /// pagination anchor restoration.
+    /// Count-change handler for initial conversation load (pre-18).
     private func handleCountChange(newCount: Int, proxy: ScrollViewProxy) {
         let countBeforeThisChange = previousMessageCount
         previousMessageCount = newCount
@@ -406,19 +418,8 @@ public struct MessageListView: View {
             return
         }
 
-        // Pagination commit: restore the previously-first-visible
-        // message to the top of the viewport so the reading position
-        // doesn't jump. The anchor was set on the load-more button tap
-        // (one user gesture ago), so the prepended rows have already
-        // been fetched and measured by the time this runs.
-        if let anchorToRestore = paginationAnchorId {
-            paginationAnchorId = nil
-            var tx = Transaction()
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                proxy.scrollTo(anchorToRestore, anchor: .top)
-            }
-        }
+        // Pagination is identity-driven, not count-driven: live appends and
+        // replay replacements can also change this count while a page loads.
     }
 
     @ViewBuilder
@@ -430,6 +431,7 @@ public struct MessageListView: View {
             VStack(spacing: 12) {
                 if hasMoreMessages {
                     Button {
+                        followBottom = false
                         if let firstMsg = messages.first {
                             paginationAnchorId = firstMsg.id
                         }
@@ -710,6 +712,24 @@ struct EmptyStateView: View {
 ///   * streaming keeps the bottom pinned while the user is at the
 ///     bottom, and leaves them alone once they've scrolled up
 ///     (`.sizeChanges`) — the derived follow behaviour.
+struct PaginationObservation: Equatable {
+    let firstID: String?
+    let anchorID: String?
+    let anchorExists: Bool
+    let loading: Bool
+
+    // Arming the anchor is not a data-layer update. In particular, don't
+    // immediately clear a newly armed anchor before the async load starts.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.firstID == rhs.firstID && lhs.loading == rhs.loading
+    }
+
+    var anchorToRestore: String? {
+        guard anchorExists, firstID != anchorID else { return nil }
+        return anchorID
+    }
+}
+
 private struct NativeBottomAnchorModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {

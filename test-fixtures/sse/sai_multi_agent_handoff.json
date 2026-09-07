@@ -1,0 +1,30 @@
+{
+  "name": "sai_multi_agent_handoff",
+  "description": "Synthetic parent introduction, therapist bracket, and identical parent echo. Both agents emit authoritative messages; retained finals contain the answer once.",
+  "run_id": "test-run-handoff-001",
+  "conversation_id": "test-conv-handoff-001",
+  "status": "succeeded",
+  "output": {
+    "final_output": {"response": "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"},
+    "final_messages": [
+      {"role": "assistant", "content": "I hear you; let me bring in our therapist."},
+      {"role": "assistant", "content": "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"}
+    ],
+    "usage": {},
+    "artifacts": []
+  },
+  "events": [
+    {"event": "run.started", "payload": {"agent_key": "sai-triage", "attempt": 1}},
+    {"event": "assistant.delta", "payload": {"delta": "I hear you; let me bring in our therapist."}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "I hear you; let me bring in our therapist."}},
+    {"event": "sub_agent.start", "payload": {"sub_agent_key": "sai-therapist", "agent_key": "sai-therapist", "agent_name": "S'Ai Therapist", "tool_name": "consult_therapist", "invocation_mode": "handoff", "mode": "handoff", "context_mode": "full"}},
+    {"event": "assistant.delta", "payload": {"delta": "Hi, I'm here to listen. "}},
+    {"event": "assistant.delta", "payload": {"delta": "Could you tell me a little about what's on your mind?"}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"}},
+    {"event": "sub_agent.end", "payload": {"sub_agent_key": "sai-therapist", "agent_key": "sai-therapist", "agent_name": "S'Ai Therapist", "tool_name": "consult_therapist", "invocation_mode": "handoff", "mode": "handoff", "duration_ms": 4000, "success": true, "handoff": true, "handback": null}},
+    {"event": "assistant.delta", "payload": {"delta": "Hi, I'm here to listen. "}},
+    {"event": "assistant.delta", "payload": {"delta": "Could you tell me a little about what's on your mind?"}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"}},
+    {"event": "run.succeeded", "payload": {"output": {"response": "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"}, "usage": {}}}
+  ]
+}

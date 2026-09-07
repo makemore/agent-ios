@@ -1,0 +1,13 @@
+{
+  "name": "required_action_lifecycle",
+  "description": "Suspension and generic action updates preserve waiting state.",
+  "run_id": "test-run-action-lifecycle-001",
+  "conversation_id": "test-conv-action-lifecycle-001",
+  "events": [
+    {"event": "client.action.required", "payload": {"action_id": "act-approval-001", "action_type": "approval", "title": "Approve"}},
+    {"event": "run.suspended", "payload": {}},
+    {"event": "client.action.submitted", "payload": {"action_id": "act-approval-001"}},
+    {"event": "client.action.resolved", "payload": {"action_id": "act-approval-001"}},
+    {"event": "run.succeeded", "payload": {}}
+  ]
+}

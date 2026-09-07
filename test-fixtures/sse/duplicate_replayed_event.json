@@ -1,0 +1,12 @@
+{
+  "name": "duplicate_replayed_event",
+  "description": "Identical replay identities must not append text twice.",
+  "run_id": "test-run-duplicate-001",
+  "conversation_id": "test-conv-duplicate-001",
+  "events": [
+    {"event": "assistant.delta", "seq_override": 0, "payload": {"delta": "Hello "}},
+    {"event": "assistant.delta", "seq_override": 0, "payload": {"delta": "Hello "}},
+    {"event": "assistant.delta", "seq_override": 1, "payload": {"delta": "world"}},
+    {"event": "run.succeeded", "seq_override": 2, "payload": {}}
+  ]
+}

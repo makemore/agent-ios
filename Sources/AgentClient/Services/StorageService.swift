@@ -37,14 +37,17 @@ public class UserDefaultsStorage: StorageService {
 /// In-memory storage for testing
 public class InMemoryStorage: StorageService {
     private var storage: [String: String] = [:]
+    private let lock = NSLock()
     
     public init() {}
     
     public func get(_ key: String) -> String? {
-        storage[key]
+        lock.lock(); defer { lock.unlock() }
+        return storage[key]
     }
     
     public func set(_ key: String, value: String?) {
+        lock.lock(); defer { lock.unlock() }
         if let value = value {
             storage[key] = value
         } else {

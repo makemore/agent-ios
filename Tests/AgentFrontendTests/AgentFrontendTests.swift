@@ -4,6 +4,24 @@ import XCTest
 
 final class AgentFrontendTests: XCTestCase {
 
+    func testPaginationRestoresOnlyOnPrependNotLiveAppendOrFailure() {
+        XCTAssertNil(PaginationObservation(firstID: "anchor", anchorID: "anchor", anchorExists: true, loading: true).anchorToRestore)
+        XCTAssertNil(PaginationObservation(firstID: "anchor", anchorID: "anchor", anchorExists: true, loading: false).anchorToRestore)
+        XCTAssertNil(PaginationObservation(firstID: "new-thread", anchorID: "anchor", anchorExists: false, loading: false).anchorToRestore)
+        XCTAssertEqual(PaginationObservation(firstID: "older", anchorID: "anchor", anchorExists: true, loading: false).anchorToRestore, "anchor")
+    }
+
+    func testArmingPaginationDoesNotTriggerObserverBeforeLoadStarts() {
+        let idle = PaginationObservation(firstID: "anchor", anchorID: nil, anchorExists: false, loading: false)
+        let armed = PaginationObservation(firstID: "anchor", anchorID: "anchor", anchorExists: true, loading: false)
+        let loading = PaginationObservation(firstID: "anchor", anchorID: "anchor", anchorExists: true, loading: true)
+        let prepended = PaginationObservation(firstID: "older", anchorID: "anchor", anchorExists: true, loading: true)
+        XCTAssertEqual(idle, armed)
+        XCTAssertNotEqual(armed, loading)
+        XCTAssertNotEqual(loading, prepended)
+        XCTAssertEqual(prepended.anchorToRestore, "anchor")
+    }
+
     // MARK: - AgentFrontend convenience API (requires both modules)
 
     func testConfigurationMake() {

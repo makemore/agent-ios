@@ -1,0 +1,36 @@
+{
+  "name": "tool_call_with_content_blocks",
+  "description": "Synthetic listing search with a prelude, tool call/result, card and table, then authoritative final text. Root output is the retained recovery snapshot.",
+  "run_id": "test-run-tool-blocks-001",
+  "conversation_id": "test-conv-tool-blocks-001",
+  "status": "succeeded",
+  "output": {
+    "final_output": {"response": "I found 2 options that match."},
+    "final_messages": [
+      {"role": "assistant", "content": "I'll look for a beach house for you."},
+      {"role": "assistant", "content": "", "tool_calls": [{"id": "call-listings-001", "type": "function", "function": {"name": "search_listings", "arguments": "{\"query\":\"beach house\"}"}}]},
+      {"role": "tool", "tool_call_id": "call-listings-001", "content": "{\"summary\":\"Found 2 listings\"}", "metadata": {"toolName": "search_listings", "contentBlocks": [
+        {"type": "card", "title": "Beach House", "metadata": [{"label": "Price", "value": "$200/night"}, {"label": "Sleeps", "value": "4"}]},
+        {"type": "table", "headers": ["Listing", "Price", "Sleeps"], "rows": [["Beach House", "$200/night", "4"], ["Mountain Cabin", "$150/night", "2"]]}
+      ]}},
+      {"role": "assistant", "content": "I found 2 options that match."}
+    ],
+    "usage": {},
+    "artifacts": []
+  },
+  "events": [
+    {"event": "run.started", "payload": {"agent_key": "test-agent", "attempt": 1}},
+    {"event": "assistant.delta", "payload": {"delta": "I'll look for a beach house for you."}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "I'll look for a beach house for you."}},
+    {"event": "tool.call", "payload": {"id": "call-listings-001", "name": "search_listings", "arguments": {"query": "beach house"}}},
+    {"event": "tool.result", "payload": {"tool_call_id": "call-listings-001", "name": "search_listings", "result": {"summary": "Found 2 listings"}}},
+    {"event": "content.blocks", "payload": {"tool_call_id": "call-listings-001", "tool_name": "search_listings", "blocks": [
+      {"type": "card", "title": "Beach House", "metadata": [{"label": "Price", "value": "$200/night"}, {"label": "Sleeps", "value": "4"}]},
+      {"type": "table", "headers": ["Listing", "Price", "Sleeps"], "rows": [["Beach House", "$200/night", "4"], ["Mountain Cabin", "$150/night", "2"]]}
+    ]}},
+    {"event": "assistant.delta", "payload": {"delta": "I found 2 options "}},
+    {"event": "assistant.delta", "payload": {"delta": "that match."}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "I found 2 options that match."}},
+    {"event": "run.succeeded", "payload": {"output": {"response": "I found 2 options that match."}, "usage": {}}}
+  ]
+}

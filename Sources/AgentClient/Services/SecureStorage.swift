@@ -92,7 +92,7 @@ public final class SecureStorageService: StorageService {
         if explicitSecureKeys.contains(key) { return true }
         let k = key.lowercased()
         return k.contains("token") || k.contains("memor")
-            || k.contains("secret") || k.contains("auth")
+            || k.contains("secret") || k.contains("auth") || k.contains("pending_run")
     }
 
     public func get(_ key: String) -> String? {

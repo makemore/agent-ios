@@ -83,8 +83,8 @@ final class SSEClientDisconnectTests: XCTestCase {
 
         let client = makeClient(runId: "run-explicit")
         client.connect(url: streamURL, headers: [:], runId: "run-explicit")
-        // Yield so the run.succeeded event has time to flow through.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Explicitly close before the delegate can deliver EOF. EOF itself
+        // now correctly reports a network disconnect, not completion.
         client.disconnect(reason: .explicit)
         try? await Task.sleep(nanoseconds: 50_000_000)
 
@@ -178,8 +178,6 @@ final class SSEClientDisconnectTests: XCTestCase {
         let client = makeClient(runId: "run-once")
         client.onError = { _ in }
         client.connect(url: streamURL, headers: [:], runId: "run-once")
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
         client.disconnect(reason: .explicit)
         client.disconnect(reason: .lifecycle) // should be a no-op
         client.disconnect(reason: .network)   // should be a no-op

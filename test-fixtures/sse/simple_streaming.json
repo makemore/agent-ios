@@ -1,0 +1,21 @@
+{
+  "name": "simple_streaming",
+  "description": "Synthetic delta-to-final stream. Live run.succeeded.output is final_output; retained output.final_messages below is the recovery snapshot.",
+  "run_id": "test-run-simple-001",
+  "conversation_id": "test-conv-simple-001",
+  "status": "succeeded",
+  "output": {
+    "final_output": {"response": "Hello there! How can I help you today?"},
+    "final_messages": [{"role": "assistant", "content": "Hello there! How can I help you today?"}],
+    "usage": {},
+    "artifacts": []
+  },
+  "events": [
+    {"event": "run.started", "payload": {"agent_key": "test-agent", "attempt": 1}},
+    {"event": "assistant.delta", "payload": {"delta": "Hello there! "}},
+    {"event": "assistant.delta", "payload": {"delta": "How can I help "}},
+    {"event": "assistant.delta", "payload": {"delta": "you today?"}},
+    {"event": "assistant.message", "payload": {"role": "assistant", "content": "Hello there! How can I help you today?"}},
+    {"event": "run.succeeded", "payload": {"output": {"response": "Hello there! How can I help you today?"}, "usage": {}}}
+  ]
+}

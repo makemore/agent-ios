@@ -145,7 +145,7 @@ public struct MessageMetadata: Equatable {
 }
 
 /// File attachment
-public struct FileAttachment: Identifiable, Equatable {
+public struct FileAttachment: Identifiable, Equatable, Codable {
     public let id: String
     public let name: String
     public let size: Int

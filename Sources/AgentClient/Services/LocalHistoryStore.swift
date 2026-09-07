@@ -38,7 +38,7 @@ public struct LocalConversation {
 }
 
 /// Lightweight message for local persistence (subset of Message fields).
-public struct LocalMessage {
+public struct LocalMessage: Codable {
     public let id: String
     public let role: String
     public var content: String

@@ -5,6 +5,63 @@ public class APIClient {
     let config: ChatWidgetConfig
     let storage: StorageService
     private var authToken: String?
+    private var sessionCleared = false
+    private let authLock = NSRecursiveLock()
+    private var authGeneration = UUID()
+
+    private func withAuthLock<T>(_ operation: () throws -> T) rethrows -> T {
+        authLock.lock()
+        defer { authLock.unlock() }
+        return try operation()
+    }
+
+    var authenticationGeneration: UUID { withAuthLock { authGeneration } }
+
+    func validateAuthenticationGeneration(_ generation: UUID) throws {
+        try withAuthLock {
+            guard !sessionCleared, authGeneration == generation else { throw CancellationError() }
+        }
+    }
+
+    /// A one-way scope fingerprint; never persist credentials in a pending
+    /// request or emit them in diagnostics. A changed credential fails closed.
+    func recoveryScope(agentKey: String) -> String? {
+        authLock.lock(); defer { authLock.unlock() }
+        guard !sessionCleared,
+              let principal = authToken ?? config.authToken ?? storage.get(config.anonymousTokenKey),
+              !principal.isEmpty else { return nil }
+        return PendingRunStore.scope(backend: config.backendUrl, agent: "\(agentKey):\(config.defaultJourneyType)", principal: principal)
+    }
+
+    var recoveryOwnerScope: String? {
+        authLock.lock(); defer { authLock.unlock() }
+        guard !sessionCleared, let principal = authToken ?? config.authToken ?? storage.get(config.anonymousTokenKey) else { return nil }
+        return PendingRunStore.scope(backend: config.backendUrl, agent: "", principal: principal)
+    }
+
+    /// Opaque account/backend/agent/surface namespace for host-owned storage.
+    public static func storageNamespace(config: ChatWidgetConfig) -> String? {
+        guard let principal = config.authToken else { return nil }
+        return PendingRunStore.scope(backend: config.backendUrl,
+                                    agent: "\(config.agentKey):\(config.defaultJourneyType)", principal: principal)
+    }
+
+    /// Clears all pending agent/surface scopes, including VMs not instantiated
+    /// this launch. Call before clearing the authenticated session.
+    public func clearPendingRunData() {
+        if let owner = recoveryOwnerScope { pendingRunStore.clearAll(owner: owner) }
+    }
+
+    /// Explicitly abandon only this agent/surface, leaving other chats intact.
+    public func discardPendingRunData() {
+        if let scope = recoveryScope(agentKey: config.agentKey) { pendingRunStore.clear(scope: scope) }
+    }
+
+    private var pendingRunStore: PendingRunStore {
+        let pendingStorage: StorageService = storage is InMemoryStorage
+            ? storage : KeychainStorage(service: "com.makemore.agent.pending-runs")
+        return PendingRunStore(storage: pendingStorage)
+    }
 
     /// Hook for tests to inject a `URLProtocol` (or otherwise mutate the
     /// session configuration) into the `URLSession` this client uses for
@@ -19,18 +76,6 @@ public class APIClient {
     /// don't need to know this exists — setting `sessionConfigurator`
     /// before constructing the client is enough.
     let session: URLSession
-
-    private lazy var decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }()
-
-    private lazy var encoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }()
 
     public init(config: ChatWidgetConfig, storage: StorageService) {
         self.config = config
@@ -83,21 +128,13 @@ public class APIClient {
     public func getOrCreateSession(forceRefresh: Bool = false) async throws -> String? {
         try validateTransport()
         let strategy = authStrategy
-
-        if strategy != .anonymous {
-            return authToken ?? config.authToken
+        let (generation, existing): (UUID, String?) = try withAuthLock {
+            guard !sessionCleared else { throw APIError.unauthorized }
+            let existing = authToken ?? (strategy == .anonymous ? storage.get(config.anonymousTokenKey) : config.authToken)
+            if let existing { authToken = existing }
+            return (authGeneration, existing)
         }
-        
-        // Check existing token
-        if !forceRefresh {
-            if let token = authToken {
-                return token
-            }
-            if let stored = storage.get(config.anonymousTokenKey) {
-                authToken = stored
-                return stored
-            }
-        }
+        if strategy != .anonymous || (!forceRefresh && existing != nil) { return existing }
         
         // Fetch new token
         let url = URL(string: "\(config.backendUrl)\(config.apiPaths.anonymousSession)")!
@@ -116,21 +153,37 @@ public class APIClient {
             let token: String
         }
         
-        let tokenResponse = try decoder.decode(TokenResponse.self, from: data)
-        authToken = tokenResponse.token
-        storage.set(config.anonymousTokenKey, value: tokenResponse.token)
-        
-        return tokenResponse.token
+        // Session creation may race across callers; keep decoding state local.
+        let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
+        return try withAuthLock {
+            try validateAuthenticationGeneration(generation)
+            // Concurrent anonymous-session requests adopt the first accepted
+            // identity instead of replacing an identity already used by a send.
+            if !forceRefresh, let authToken { return authToken }
+            authToken = tokenResponse.token
+            storage.set(config.anonymousTokenKey, value: tokenResponse.token)
+            return tokenResponse.token
+        }
     }
     
     /// Clear the stored session
     public func clearSession() {
+        authLock.lock(); defer { authLock.unlock() }
+        clearPendingRunData()
+        authGeneration = UUID()
+        sessionCleared = true
         authToken = nil
         storage.set(config.anonymousTokenKey, value: nil)
     }
     
     /// Update auth token
     public func setAuthToken(_ token: String?) {
+        authLock.lock(); defer { authLock.unlock() }
+        if authToken != token {
+            clearPendingRunData()
+            authGeneration = UUID()
+        }
+        sessionCleared = token == nil
         authToken = token
     }
     
@@ -138,6 +191,8 @@ public class APIClient {
     
     /// Build auth headers for a request
     public func authHeaders(token: String? = nil) -> [String: String] {
+        authLock.lock(); defer { authLock.unlock() }
+        guard !sessionCleared else { return [:] }
         var headers: [String: String] = [:]
         let strategy = authStrategy
         let effectiveToken = token ?? authToken ?? config.authToken
