@@ -269,4 +269,104 @@ public struct ChatAppearance {
     /// `ChatAppearance()` with no arguments; exposed as a named
     /// constant for clarity when assigning at the call site.
     public static let anthropic: ChatAppearance = ChatAppearance()
+
+    /// Resilient Minds house style — a pinned snapshot derived from the
+    /// warm-dark anthropic look. Intentional departures from that base:
+    ///
+    /// • Brand gold (`#D8A762`) replaces the coral accent, so the send
+    ///   button and accent chrome read as RM rather than Claude coral.
+    /// • `textOnAccent` is the charcoal background rather than white.
+    ///   Gold is a light accent: white on it measures ~2.2:1, which
+    ///   fails WCAG for both body text and UI components, so on-gold
+    ///   chrome takes charcoal (~7.7:1).
+    /// • The transcript is asymmetric on purpose: user turns are grey
+    ///   bubbles with white text, and assistant replies are plain text
+    ///   on the background rather than bubbles from a second
+    ///   participant. Gold is reserved for chrome — it no longer fills
+    ///   the user bubble — so `userBubbleText` carries white
+    ///   independently of `textOnAccent`.
+    /// • Assistant prose is set in the system serif with editorial
+    ///   leading, which is what makes a bubble-less transcript read as
+    ///   a page rather than unstyled chat text. Sizes stay on
+    ///   `Font.TextStyle` so Dynamic Type still scales everything.
+    ///
+    /// Every token — including those matching today's defaults — is
+    /// passed explicitly, so future changes to the initializer defaults
+    /// can never alter this preset.
+    public static let resilientGold: ChatAppearance = ChatAppearance(
+        background: Color(hex: "#262624"),
+        surface: Color(hex: "#2F2F2D"),
+        surfaceElevated: Color(hex: "#3A3A37"),
+        divider: Color.white.opacity(0.08),
+        textPrimary: Color(red: 0.961, green: 0.961, blue: 0.965),     // #F5F5F7
+        textSecondary: Color(red: 0.631, green: 0.631, blue: 0.651),   // #A1A1A6
+        textOnAccent: Color(hex: "#262624"),
+        accent: Color(hex: "#D8A762"),
+        userBubble: Color(hex: "#3A3A37"),
+        userBubbleText: Color.white,
+        assistantBubble: Color(hex: "#3A3A37"),
+        systemBubble: Color(hex: "#2F2F2D"),
+        link: nil,
+        greetingFontDesign: .serif,
+        greetingFontSize: 32,
+        userTextStyle: .body,
+        messageTextStyle: .body,
+        messageFontDesign: .serif,
+        messageLineSpacing: 6,
+        messageBlockSpacing: 16,
+        composerStyle: .anthropic,
+        brandMark: .none,
+        composerCornerRadius: 28,
+        bubbleCornerRadius: 18,
+        assistantMessageStyle: .plain,
+        modelPillLabel: nil,
+        subAgentActivityStyle: .pill
+    )
+
+    /// Generic, unbranded starting point for new host apps — the
+    /// recommended base to derive a house style from. Keeps the
+    /// anthropic layout (rounded composer card, current radii and
+    /// spacing) over system-adaptive colours: text follows
+    /// `Color.primary` / `Color.secondary`, the accent tracks the
+    /// host's `Color.accentColor`, bubbles fall back to the adaptive
+    /// system greys, and no brand colour ships anywhere.
+    ///
+    /// Every token — including those matching today's defaults — is
+    /// passed explicitly, so future changes to the initializer defaults
+    /// can never alter this preset.
+    public static let neutral: ChatAppearance = ChatAppearance(
+        background: Color.clear,
+        surface: Color.gray.opacity(0.1),
+        surfaceElevated: Color.gray.opacity(0.15),
+        divider: Color.gray.opacity(0.2),
+        textPrimary: Color.primary,
+        textSecondary: Color.secondary,
+        textOnAccent: Color.white,
+        accent: Color.accentColor,
+        userBubble: nil,
+        userBubbleText: nil,
+        assistantBubble: nil,
+        systemBubble: nil,
+        link: nil,
+        greetingFontDesign: .default,
+        greetingFontSize: 32,
+        userTextStyle: .body,
+        messageTextStyle: .body,
+        messageFontDesign: .default,
+        messageLineSpacing: 0,
+        messageBlockSpacing: 6,
+        composerStyle: .anthropic,
+        brandMark: .none,
+        composerCornerRadius: 28,
+        bubbleCornerRadius: 18,
+        assistantMessageStyle: .bubble,
+        modelPillLabel: nil,
+        subAgentActivityStyle: .pill
+    )
+
+    /// Entry point for new integrations. Currently `.neutral`. May be
+    /// re-pointed to a newer preset in future releases — hosts that
+    /// need a stable look should pin a named preset (`.neutral`,
+    /// `.anthropic`, `.classic`, ...) instead.
+    public static var recommended: ChatAppearance { neutral }
 }
