@@ -126,6 +126,11 @@ public struct ChatWidgetConfig {
     /// session and its echo cancellation for the duration.
     public var enableContinuousVoice: Bool
 
+    /// Show labelled “Talk to <title>” / “End voice” controls above the
+    /// composer. Opt-in; requires voice, TTS, and continuous voice enabled.
+    /// Starting is always an explicit tap, never a persisted preference.
+    public var showVoiceModeBar: Bool
+
     /// Policy for choosing remote vs local/system TTS.
     /// In `privateOnly` mode, `.automatic` resolves to `.localOnly` so
     /// assistant text is not sent to remote voice providers by default.
@@ -340,6 +345,7 @@ public struct ChatWidgetConfig {
         self.enableTTS = false
         self.enableVoice = true
         self.enableContinuousVoice = false
+        self.showVoiceModeBar = false
         self.ttsProviderPolicy = .automatic
         self.speechInputPolicy = .automatic
         self.dictationBackend = .system

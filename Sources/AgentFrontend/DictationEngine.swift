@@ -2,6 +2,54 @@ import AVFoundation
 import Speech
 import SwiftUI
 import AgentClient
+#if os(iOS)
+import UIKit
+#endif
+
+/// Main-queue permission handshake, independent of recognition-session tokens.
+/// Injected callbacks make cancellation/duplicate delivery testable without OS IO.
+final class DictationStartGate {
+    enum Failure: Equatable { case microphoneDenied, speechDenied, inactive }
+    typealias PermissionRequest = (@escaping (Bool) -> Void) -> Void
+    private enum Stage { case microphone, speech }
+    private var requestGeneration = 0
+    private var stage: Stage?
+    var isPending: Bool { stage != nil }
+
+    func cancel() {
+        requestGeneration &+= 1
+        stage = nil
+    }
+
+    func start(requiresSpeech: Bool,
+               requestMicrophone: PermissionRequest,
+               requestSpeech: @escaping PermissionRequest,
+               isActive: @escaping () -> Bool,
+               onReady: @escaping () -> Void,
+               onFailure: @escaping (Failure) -> Void) {
+        guard !isPending else { return }
+        requestGeneration &+= 1
+        let generation = requestGeneration
+        stage = .microphone
+        let finish: (Failure?) -> Void = { [weak self] failure in
+            guard let self, self.requestGeneration == generation, self.isPending else { return }
+            self.stage = nil // Consume BEFORE calling out (including reentrant starts).
+            if let failure { onFailure(failure) }
+            else if !isActive() { onFailure(.inactive) }
+            else { onReady() }
+        }
+        requestMicrophone { [weak self] granted in
+            guard let self, self.requestGeneration == generation, self.stage == .microphone else { return }
+            guard granted else { finish(.microphoneDenied); return }
+            guard requiresSpeech else { finish(nil); return }
+            self.stage = .speech
+            requestSpeech { [weak self] granted in
+                guard let self, self.requestGeneration == generation, self.stage == .speech else { return }
+                finish(granted ? nil : .speechDenied)
+            }
+        }
+    }
+}
 
 /// The dictation state machine, extracted from `InputView` so every
 /// surface that offers a mic — the composer and the edit-message card —
@@ -27,6 +75,80 @@ import AgentClient
 /// All public methods must be called on the main queue. `@Published`
 /// properties are only mutated there.
 final class DictationEngine: ObservableObject {
+
+    enum Issue: Equatable {
+        case microphoneDenied, speechDenied, simulator, disabled
+        case recognizerUnavailable, onDeviceUnavailable, audioUnavailable, inactive, interrupted
+
+        var message: String {
+            switch self {
+            case .microphoneDenied: return "Microphone access is denied. Allow it in Settings to use voice."
+            case .speechDenied: return "Speech recognition access is denied or restricted. Check Settings to use voice."
+            case .simulator: return "Voice input is unavailable in the simulator. Use a physical device."
+            case .disabled: return "Voice input is disabled."
+            case .recognizerUnavailable: return "Speech recognition is currently unavailable. Try again later."
+            case .onDeviceUnavailable: return "On-device speech recognition is unavailable for this language."
+            case .audioUnavailable: return "Voice input could not continue. Check your microphone and try again."
+            case .inactive: return "Voice stopped because the app is not active. Tap to start again."
+            case .interrupted: return "Voice stopped after an audio interruption. Tap to start again."
+            }
+        }
+
+        var offersSettings: Bool { self == .microphoneDenied || self == .speechDenied }
+    }
+
+    enum Status: Equatable {
+        case idle, starting, listening, transcribing, failed(Issue)
+    }
+
+    @Published private(set) var status: Status = .idle
+    var isStarting: Bool { status == .starting }
+    var issue: Issue? {
+        if case .failed(let issue) = status { return issue }
+        return nil
+    }
+    /// Synchronous teardown notification (timers/playback must not wait for a render).
+    var onEnded: (() -> Void)?
+    private let startGate = DictationStartGate()
+    private var lifecycleObservers: [NSObjectProtocol] = []
+
+    init() {
+        #if os(iOS)
+        let center = NotificationCenter.default
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.willResignActiveNotification,
+                                                       object: nil, queue: .main) { [weak self] _ in
+            // Permission sheets temporarily deactivate the app. Do not cancel
+            // their handshake here; background always cancels, and the gate
+            // checks active state only at the actual audio-start boundary.
+            guard let self, !self.isStarting else { return }
+            self.interrupt(.inactive)
+        })
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                                       object: nil, queue: .main) { [weak self] _ in
+            self?.interrupt(.inactive)
+        })
+        lifecycleObservers.append(center.addObserver(forName: AVAudioSession.interruptionNotification,
+                                                       object: nil, queue: .main) { [weak self] note in
+            guard let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  type == AVAudioSession.InterruptionType.began.rawValue else { return }
+            self?.interrupt(.interrupted)
+        })
+        #endif
+    }
+
+    deinit {
+        lifecycleObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    private func interrupt(_ issue: Issue) {
+        guard isStarting || isRecording || isTranscribing else { return }
+        fail(issue)
+    }
+
+    private func fail(_ issue: Issue) {
+        cancel()
+        status = .failed(issue)
+    }
 
     @Published private(set) var isRecording = false
     /// True between a Whisper-backend `stop()` and its final transcript
@@ -142,6 +264,8 @@ final class DictationEngine: ObservableObject {
     private var mainConsumer: ((AVAudioPCMBuffer) -> Void)?
     private var monitorConsumer: ((AVAudioPCMBuffer) -> Void)?
     private var tapInstalled = false
+    private var audioGeneration = 0
+    private var ownsAudioSession = false
 
     // MARK: - Availability
 
@@ -156,50 +280,50 @@ final class DictationEngine: ObservableObject {
 
     /// Whether a mic affordance should render at all.
     func isAvailable(config: ChatWidgetConfig) -> Bool {
-        guard config.enableVoice else { return false }
-        guard config.effectiveSpeechInputPolicy != .disabled else { return false }
-        // A mic the user has switched off in Settings is a mic that does
-        // not exist for this app: showing the button would only lead to a
-        // dead tap. `.undetermined` still shows it — the permission
-        // prompt fires on first use and that is how the user grants it
-        // in the first place.
-        #if os(iOS) && !targetEnvironment(simulator)
-        if #available(iOS 17.0, *) {
-            guard AVAudioApplication.shared.recordPermission != .denied else { return false }
-        } else {
-            guard AVAudioSession.sharedInstance().recordPermission != .denied else { return false }
-        }
+        unavailableReason(config: config) == nil
+    }
+
+    /// Read-only checks: never request permissions merely to render a control.
+    func unavailableReason(config: ChatWidgetConfig, continuous: Bool = false) -> Issue? {
+        guard config.enableVoice, config.effectiveSpeechInputPolicy != .disabled else { return .disabled }
+        #if targetEnvironment(simulator)
+        if case .system = config.dictationBackend { return .simulator }
         #endif
+        #if os(iOS)
+        if #available(iOS 17.0, *) {
+            if AVAudioApplication.shared.recordPermission == .denied { return .microphoneDenied }
+        } else {
+            if AVAudioSession.sharedInstance().recordPermission == .denied { return .microphoneDenied }
+        }
+        #else
+        let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
+        if microphone == .denied || microphone == .restricted { return .microphoneDenied }
+        #endif
+        if Self.requiresSpeechPermission(backend: config.dictationBackend, continuous: continuous) {
+            let speech = SFSpeechRecognizer.authorizationStatus()
+            if speech == .denied || speech == .restricted { return .speechDenied }
+        }
         switch config.dictationBackend {
         case .whisper:
-            // Whisper needs no speech-recognition permission and no
-            // recognizer service — only the mic. It is fully on-device,
-            // so every non-disabled SpeechInputPolicy (localOnly
-            // included) is inherently satisfied. Works on the simulator
-            // too (CoreML on CPU — slow, but real).
-            return true
+            return nil
         case .system:
-            #if targetEnvironment(simulator)
-            // The simulator's SFSpeechRecognizer reports available=true
-            // and then fails every recognition task it is asked to
-            // start. No pre-check catches this — every health signal the
-            // API exposes says yes — so system dictation is
-            // simulator-off wholesale. Test it on hardware.
-            return false
-            #else
-            #if os(iOS)
-            let speechAuth = SFSpeechRecognizer.authorizationStatus()
-            guard speechAuth != .denied, speechAuth != .restricted else { return false }
-            #endif
-            switch config.effectiveSpeechInputPolicy {
-            case .disabled: return false
-            case .localOnly:
-                return recognizer?.supportsOnDeviceRecognition == true
-            case .automatic, .remote:
-                return recognizer?.isAvailable == true
+            if config.effectiveSpeechInputPolicy == .localOnly,
+               recognizer?.supportsOnDeviceRecognition != true {
+                return .onDeviceUnavailable
             }
-            #endif
+            return recognizer?.isAvailable == true ? nil : .recognizerUnavailable
         }
+    }
+
+    static func requiresSpeechPermission(backend: DictationBackend, continuous: Bool) -> Bool {
+        if case .system = backend { return true }
+        // Whisper itself is local, but continuous mode's barge-in monitor
+        // uses Apple's speech recognizer too (unavailable on the simulator).
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return continuous
+        #endif
     }
 
     // MARK: - Session control
@@ -212,32 +336,47 @@ final class DictationEngine: ObservableObject {
     func start(policy: SpeechInputPolicy,
                backend: DictationBackend = .system,
                continuous: Bool = false) {
-        guard !isRecording else { return }
+        guard !isRecording, !isStarting else { return }
+        guard policy != .disabled else { fail(.disabled); return }
+        #if targetEnvironment(simulator)
+        if case .system = backend { fail(.simulator); return }
+        #endif
+        cancel() // Also invalidates a detached Whisper final pass.
         self.policy = policy
         self.backend = backend
         self.continuous = continuous
         failures = 0
-        // A previous session's pending final pass no longer owns the
-        // "transcribing" state once a new recording begins.
-        isTranscribing = false
-
-        switch backend {
-        case .whisper(let model):
-            requestMicPermission { granted in
-                guard granted else { return }
-                DispatchQueue.main.async {
-                    self.beginWhisperSession(model: model)
+        status = .starting
+        startGate.start(
+            requiresSpeech: Self.requiresSpeechPermission(backend: backend, continuous: continuous),
+            requestMicrophone: requestMicPermission,
+            requestSpeech: { completion in
+                SFSpeechRecognizer.requestAuthorization { status in
+                    DispatchQueue.main.async { completion(status == .authorized) }
+                }
+            },
+            isActive: {
+                #if os(iOS)
+                return UIApplication.shared.applicationState == .active
+                #else
+                return true
+                #endif
+            },
+            onReady: { [weak self] in
+                guard let self else { return }
+                switch backend {
+                case .whisper(let model): self.beginWhisperSession(model: model)
+                case .system: self.beginSession()
+                }
+            },
+            onFailure: { [weak self] failure in
+                switch failure {
+                case .microphoneDenied: self?.fail(.microphoneDenied)
+                case .speechDenied: self?.fail(.speechDenied)
+                case .inactive: self?.fail(.inactive)
                 }
             }
-        case .system:
-            guard let recognizer = recognizer, recognizer.isAvailable else { return }
-            SFSpeechRecognizer.requestAuthorization { status in
-                guard status == .authorized else { return }
-                DispatchQueue.main.async {
-                    self.beginSession()
-                }
-            }
-        }
+        )
     }
 
     /// Ends the session, keeping the transcript. For the Whisper backend
@@ -245,6 +384,7 @@ final class DictationEngine: ObservableObject {
     /// after this returns — callers whose state must not change after
     /// stopping (send, discard, dismiss) use ``cancel()`` instead.
     func stop() {
+        startGate.cancel()
         if case .whisper = backend, let session = whisperSession, isRecording {
             whisperSession = nil
             teardownAudio()
@@ -252,6 +392,7 @@ final class DictationEngine: ObservableObject {
             // delivered. The session outlives the engine's reference
             // until its delivery completes; `onFinished` clears this.
             isTranscribing = true
+            status = .transcribing
             session.finish()
             return
         }
@@ -260,17 +401,21 @@ final class DictationEngine: ObservableObject {
 
     /// Ends the session and guarantees nothing further is delivered.
     func cancel() {
+        startGate.cancel()
         // Bump first so any callback that fires between cancel() and the
         // next runloop tick is filtered out by the token guard.
         sessionToken &+= 1
         whisperSession?.cancel()
         whisperSession = nil
-        isTranscribing = false
         teardownAudio()
     }
 
     private func teardownAudio() {
-        audioEngine.stop()
+        audioGeneration &+= 1
+        let hadSession = isStarting || isRecording || isTranscribing
+        let hadAudio = ownsAudioSession || tapInstalled || isRecording
+        ownsAudioSession = false
+        if audioEngine.isRunning { audioEngine.stop() }
         removeSharedTap()
         teardownMonitorRecognition()
         recognitionRequest?.endAudio()
@@ -278,12 +423,20 @@ final class DictationEngine: ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
         isRecording = false
+        isTranscribing = false
+        status = .idle
         continuous = false
         phase = .idle
         audioLevel = 0
         // Release the session so the next playback can restore media-level
         // loudness and repair the route this recording leaves behind.
-        AudioSessionCoordinator.owner = .unclaimed
+        if hadAudio {
+            AudioSessionCoordinator.owner = .unclaimed
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            #endif
+        }
+        if hadSession { onEnded?() }
     }
 
     // MARK: - Shared input tap
@@ -307,7 +460,7 @@ final class DictationEngine: ObservableObject {
             AgentLog.error("[Dictation] tap: invalid input format (sampleRate=\(format.sampleRate) channels=\(format.channelCount))")
             return false
         }
-        inputNode.removeTap(onBus: 0)
+        let generation = audioGeneration
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self = self else { return }
             self.mainConsumer?(buffer)
@@ -316,6 +469,7 @@ final class DictationEngine: ObservableObject {
             // to main: this closure runs on a realtime audio thread.
             let level = DictationEngine.normalisedLevel(from: buffer)
             DispatchQueue.main.async {
+                guard self.isRecording, self.audioGeneration == generation else { return }
                 self.audioLevel = level
                 self.noteLevelForVoiceActivity(level)
             }
@@ -338,9 +492,10 @@ final class DictationEngine: ObservableObject {
     }
 
     private func removeSharedTap() {
-        audioEngine.inputNode.removeTap(onBus: 0)
         mainConsumer = nil
         monitorConsumer = nil
+        guard tapInstalled else { return }
+        audioEngine.inputNode.removeTap(onBus: 0)
         tapInstalled = false
     }
 
@@ -361,6 +516,7 @@ final class DictationEngine: ObservableObject {
     /// rather than a `SetActiveOptions` — the type can't appear in a
     /// signature that has to compile for macOS.
     private func configureAudioSession(notifyOthersOnDeactivation: Bool = true) throws {
+        ownsAudioSession = true
         // Claim the session for the duration of a hands-free conversation so
         // playback doesn't switch the category out from under the live mic
         // between sentences.
@@ -386,16 +542,17 @@ final class DictationEngine: ObservableObject {
             // connection exists at start time, and merely accessing
             // `inputNode` isn't enough on some iOS versions.
             guard installRecognitionRequest() else {
-                stop()
+                fail(.audioUnavailable)
                 return
             }
             audioEngine.prepare()
             try audioEngine.start()
             isRecording = true
             phase = .listening
+            status = .listening
         } catch {
             AgentLog.error("[Dictation] start failed: \(error)")
-            stop()
+            fail(.audioUnavailable)
         }
     }
 
@@ -405,15 +562,16 @@ final class DictationEngine: ObservableObject {
         do {
             try configureAudioSession()
 
-            guard installWhisperConsumer(model: model) else { return }
+            guard installWhisperConsumer(model: model) else { fail(.audioUnavailable); return }
 
             audioEngine.prepare()
             try audioEngine.start()
             isRecording = true
             phase = .listening
+            status = .listening
         } catch {
             AgentLog.error("[Whisper] start failed: \(error)")
-            cancel()
+            fail(.audioUnavailable)
         }
     }
 
@@ -426,10 +584,17 @@ final class DictationEngine: ObservableObject {
         // starts while this one's final pass is still running, the
         // late delivery goes to the closure (and prefix) it was
         // started with, not the new session's.
+        sessionToken &+= 1
+        let token = sessionToken
         let handler = onTranscript
-        session.onTranscript = { text in handler?(text) }
+        session.onTranscript = { [weak self] text in
+            guard let self, self.sessionToken == token else { return }
+            handler?(text)
+        }
         session.onFinished = { [weak self] in
-            self?.isTranscribing = false
+            guard let self, self.sessionToken == token else { return }
+            self.isTranscribing = false
+            if !self.isRecording { self.status = .idle }
         }
 
         mainConsumer = { buffer in session.append(buffer) }
@@ -447,15 +612,17 @@ final class DictationEngine: ObservableObject {
         #if os(iOS)
         if #available(iOS 17.0, *) {
             AVAudioApplication.requestRecordPermission { granted in
-                completion(granted)
+                DispatchQueue.main.async { completion(granted) }
             }
         } else {
             AVAudioSession.sharedInstance().requestRecordPermission { granted in
-                completion(granted)
+                DispatchQueue.main.async { completion(granted) }
             }
         }
         #else
-        completion(true)
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            DispatchQueue.main.async { completion(granted) }
+        }
         #endif
     }
 
@@ -540,7 +707,7 @@ final class DictationEngine: ObservableObject {
                     // recognizer error — recycle and keep going.
                     if self.failures >= self.maxConsecutiveFailures {
                         AgentLog.error("[Dictation] recognition error: \(error.localizedDescription) — giving up after \(self.failures) attempts")
-                        self.stop()
+                        self.fail(.recognizerUnavailable)
                     } else {
                         AgentLog.debug(.input, "[Dictation] recognition error: \(error.localizedDescription) — recycling (\(self.failures)/\(self.maxConsecutiveFailures))")
                         self.recycleRecognitionRequest()
@@ -551,37 +718,17 @@ final class DictationEngine: ObservableObject {
         return true
     }
 
-    /// Cycles to a fresh recognition request. Restarts the engine if it
-    /// got stopped by an audio session interruption (e.g. a phone call).
+    /// Recycles only recognition, never audio after an interruption.
     private func recycleRecognitionRequest() {
         guard isRecording else {
             AgentLog.debug(.input, "[Dictation] recycle: not recording, skipping")
             return
         }
         if !audioEngine.isRunning {
-            AgentLog.debug(.input, "[Dictation] recycle: engine stopped, restarting")
-            do {
-                try configureAudioSession(notifyOthersOnDeactivation: false)
-            } catch {
-                AgentLog.error("[Dictation] recycle: session reactivate failed: \(error)")
-            }
-            // The engine stopping means the tap went with it.
-            removeSharedTap()
-            // Install request first so the engine has a tap before start().
-            guard installRecognitionRequest() else {
-                AgentLog.error("[Dictation] recycle: install failed before engine start")
-                return
-            }
-            do {
-                audioEngine.prepare()
-                try audioEngine.start()
-                AgentLog.debug(.input, "[Dictation] recycle: engine restarted ok")
-            } catch {
-                AgentLog.error("[Dictation] recycle: engine start failed: \(error)")
-            }
+            fail(.interrupted)
             return
         }
-        installRecognitionRequest()
+        if !installRecognitionRequest() { fail(.recognizerUnavailable) }
     }
 
     // MARK: - Continuous-mode turn control
@@ -603,13 +750,13 @@ final class DictationEngine: ObservableObject {
         case .whisper(let model):
             guard installWhisperConsumer(model: model) else {
                 AgentLog.error("[Dictation] continuous: whisper consumer install failed — ending session")
-                cancel()
+                fail(.audioUnavailable)
                 return
             }
         case .system:
             guard installRecognitionRequest() else {
                 AgentLog.error("[Dictation] continuous: request install failed — ending session")
-                cancel()
+                fail(.recognizerUnavailable)
                 return
             }
         }
@@ -678,6 +825,11 @@ final class DictationEngine: ObservableObject {
         teardownMonitorRecognition()
         bargeInFired = false
 
+        #if targetEnvironment(simulator)
+        // Whisper still works here, but Apple's recognizer does not. The
+        // user can always stop playback explicitly instead of barging in.
+        return
+        #else
         guard audioEngine.isRunning else {
             AgentLog.debug(.input, "[Dictation] monitor: engine not running — barge-in off this turn")
             return
@@ -735,6 +887,7 @@ final class DictationEngine: ObservableObject {
                 }
             }
         }
+        #endif
     }
 
     /// Number of words in `transcript` absent from `agentText`. Both are
