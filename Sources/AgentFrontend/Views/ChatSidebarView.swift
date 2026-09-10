@@ -73,6 +73,7 @@ public struct ChatSidebarView: View {
             HStack(spacing: 0) {
                 panel
                     .frame(width: Self.panelWidth(availableWidth: geo.size.width))
+                    .zIndex(1)
                 Button(action: onDismiss) {
                     Color.clear
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -80,10 +81,13 @@ public struct ChatSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .background(Color.black.opacity(0.35).ignoresSafeArea(.container))
+                .zIndex(0)
                 .accessibilityLabel("Dismiss sidebar")
                 .accessibilityHint("Closes the conversation sidebar")
             }
         }
+        // Keep the panel, its shadow and scrim together during host transitions.
+        .compositingGroup()
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) { onDismiss() }
@@ -108,7 +112,25 @@ public struct ChatSidebarView: View {
             footer
         }
         .frame(maxHeight: .infinity)
-        .background(config.appearance.background.ignoresSafeArea(.container))
+        .background {
+            panelBackground
+                .shadow(color: .black.opacity(0.18), radius: 12, x: 4, y: 0)
+        }
+    }
+
+    private var panelBackground: some View {
+        ZStack {
+            // Neutral/classic intentionally leave the transcript background
+            // clear. A modal sidebar cannot: its text would overlap the chat.
+            // Keep custom colours/tints, but composite them over an opaque base.
+            #if os(iOS)
+            Color(uiColor: .systemBackground)
+            #elseif os(macOS)
+            Color(nsColor: .windowBackgroundColor)
+            #endif
+            config.appearance.background
+        }
+        .ignoresSafeArea(.container)
     }
 
     private var header: some View {
