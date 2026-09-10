@@ -9,6 +9,7 @@ import AgentClient
 /// All inputs come from the config and the supplied `ChatViewModel`
 /// so host apps can embed the panel standalone (e.g. in a custom
 /// shell) without `ChatWidgetView`.
+@MainActor
 public struct ChatSidebarView: View {
     @ObservedObject var viewModel: ChatViewModel
     let config: ChatWidgetConfig
@@ -40,29 +41,54 @@ public struct ChatSidebarView: View {
         self.onSelectConversation = onSelectConversation
     }
 
-    @State private var conversations: [Conversation] = []
-    @State private var isLoading: Bool = false
+    @StateObject private var history = SidebarHistoryModel()
+    @State private var retryID = UUID()
+
+    private struct HistoryRequestID: Equatable {
+        let client: ObjectIdentifier?
+        let showRecents: Bool
+        let limit: Int
+        let retry: UUID
+    }
+
+    private var historyRequestID: HistoryRequestID {
+        HistoryRequestID(
+            client: apiClient.map { ObjectIdentifier($0) },
+            showRecents: config.sidebar.showRecents,
+            limit: SidebarHistoryModel.clampedLimit(config.sidebar.recentsLimit),
+            retry: retryID
+        )
+    }
+
+    static func panelWidth(availableWidth: CGFloat) -> CGFloat {
+        // Keep a usable dismiss target, even in a narrow split view.
+        let width = max(0, availableWidth)
+        return min(360, min(max(280, width * 0.8), max(0, width - 44)))
+    }
 
     public var body: some View {
-        // Panel takes ~80% of the screen width so the open sidebar
-        // feels like the primary surface (matches the reference
-        // design); the remaining ~20% is the dim backdrop that the
-        // user can tap to dismiss. `GeometryReader` is used so we
-        // adapt to phones and iPad split views without hard-coding a
-        // fixed width.
+        // The host can place this directly in its root ZStack. Only
+        // backgrounds extend under system chrome, never panel controls.
         GeometryReader { geo in
-            let panelWidth = max(280, geo.size.width * 0.8)
             HStack(spacing: 0) {
                 panel
-                    .frame(width: panelWidth)
-                Color.black.opacity(0.35)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture { onDismiss() }
+                    .frame(width: Self.panelWidth(availableWidth: geo.size.width))
+                Button(action: onDismiss) {
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(Color.black.opacity(0.35).ignoresSafeArea(.container))
+                .accessibilityLabel("Dismiss sidebar")
+                .accessibilityHint("Closes the conversation sidebar")
             }
         }
-        .ignoresSafeArea(.container, edges: .vertical)
-        .task { await reloadConversations() }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityAction(.escape) { onDismiss() }
+        .task(id: historyRequestID) { await reloadConversations() }
+        .onDisappear { history.reset() }
     }
 
     private var panel: some View {
@@ -72,7 +98,7 @@ public struct ChatSidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     navItems
-                    if config.sidebar.showRecents {
+                    if config.sidebar.showRecents && config.sidebar.recentsLimit > 0 {
                         recentsSection
                     }
                 }
@@ -82,7 +108,7 @@ public struct ChatSidebarView: View {
             footer
         }
         .frame(maxHeight: .infinity)
-        .background(config.appearance.background.ignoresSafeArea())
+        .background(config.appearance.background.ignoresSafeArea(.container))
     }
 
     private var header: some View {
@@ -93,6 +119,16 @@ public struct ChatSidebarView: View {
                     .foregroundColor(config.appearance.textPrimary)
             }
             Spacer()
+            Button(action: onDismiss) {
+                Label("Close", systemImage: "xmark")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(config.appearance.textPrimary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close sidebar")
+            .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20)
         .padding(.top, 20)
@@ -126,6 +162,7 @@ public struct ChatSidebarView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
+                    .frame(minHeight: 44)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -143,42 +180,79 @@ public struct ChatSidebarView: View {
                 .padding(.top, 20)
                 .padding(.bottom, 6)
         }
-        if isLoading && conversations.isEmpty {
+        switch history.phase {
+        case .loading:
             HStack {
                 ProgressView()
                     .tint(config.appearance.textSecondary)
+                    .accessibilityHidden(true)
                 Text("Loading…")
                     .font(.caption)
                     .foregroundColor(config.appearance.textSecondary)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
-        } else if conversations.isEmpty {
-            Text("No conversations yet")
-                .font(.caption)
-                .foregroundColor(config.appearance.textSecondary)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-        } else {
-            ForEach(conversations) { conv in
+        case .idle:
+            historyMessage("Conversation history not loaded")
+            retryButton
+        case .failed:
+            historyMessage("Couldn't load conversations")
+            retryButton
+        case .unavailable:
+            historyMessage("Conversation history is unavailable")
+        case .loaded:
+            if history.conversations.isEmpty {
+                historyMessage("No conversations yet")
+            }
+            ForEach(history.conversations) { conv in
+                let isSelected = conv.id == viewModel.conversationId
                 Button {
                     onSelectConversation(conv)
                 } label: {
                     HStack {
-                        Text(conv.title ?? "Untitled conversation")
-                            .font(.body)
+                        Text(SidebarHistoryModel.displayTitle(for: conv))
+                            .font(.body.weight(isSelected ? .semibold : .regular))
                             .foregroundColor(config.appearance.textPrimary)
                             .lineLimit(1)
                             .truncationMode(.tail)
                         Spacer()
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(config.appearance.textPrimary)
+                                .accessibilityHidden(true)
+                        }
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
+                    .frame(minHeight: 44)
+                    .background(isSelected ? config.appearance.surfaceElevated : Color.clear)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
+    }
+
+    private func historyMessage(_ message: String) -> some View {
+        Text(message)
+            .font(.caption)
+            .foregroundColor(config.appearance.textSecondary)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+    }
+
+    private var retryButton: some View {
+        Button { retryID = UUID() } label: {
+            Label("Retry", systemImage: "arrow.clockwise")
+                .font(.body)
+                .foregroundColor(config.appearance.textPrimary)
+                .padding(.horizontal, 20)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Retry loading conversations")
     }
 
     private var footer: some View {
@@ -208,6 +282,7 @@ public struct ChatSidebarView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
+                    .frame(minWidth: 44, minHeight: 44)
                     .background(config.appearance.surface)
                     .foregroundColor(config.appearance.textPrimary)
                     .clipShape(Capsule())
@@ -221,21 +296,14 @@ public struct ChatSidebarView: View {
 
     @MainActor
     private func reloadConversations() async {
-        guard config.sidebar.showRecents, let api = apiClient else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let fetched = try await api.loadConversations()
-            conversations = Array(fetched.prefix(config.sidebar.recentsLimit))
-        } catch {
-            // Network errors are silently swallowed — the panel
-            // shows "No conversations yet" so the user can still
-            // start a new chat. The host's error banner handles
-            // the broader failure surface.
-            #if DEBUG
-            AgentLog.error("[ChatSidebarView] loadConversations failed: \(error)")
-            #endif
-            conversations = []
+        guard !Task.isCancelled else { return }
+        guard config.sidebar.showRecents else {
+            history.reset()
+            return
         }
+        let loader: SidebarHistoryModel.Loader? = apiClient.map { api in
+            { try await api.loadConversations() }
+        }
+        await history.load(recentsLimit: config.sidebar.recentsLimit, using: loader)
     }
 }

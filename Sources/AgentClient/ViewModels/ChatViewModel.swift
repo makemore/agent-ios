@@ -14,6 +14,9 @@ public class ChatViewModel: ObservableObject {
     @Published public var hasMoreMessages: Bool = false
     @Published public var loadingMoreMessages: Bool = false
     @Published public var runState: RunState = .idle
+    /// Waiting or interrupted replies still own their conversation even when
+    /// `isLoading` is false. Hosts must not switch away from a retained send.
+    public var hasPendingRun: Bool { pendingRun != nil }
     /// In-flight sub-agent activity, surfaced by the UI as a quiet pill
     /// in place of per-event bubbles when the effective
     /// `subAgentActivityStyle` is `.pill`. Stays empty in `.bubbles`
@@ -1449,32 +1452,66 @@ public class ChatViewModel: ObservableObject {
 
     /// Load the recent page. Ephemeral history is always client-owned and
     /// must never be replaced with a paginated server window.
-    public func loadConversation(_ convId: String) async {
-        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration else { return }
-        if pendingRun != nil, conversationId == convId { await reconcilePendingRun(); return }
+    /// Returns true only when the requested history was applied (or the same
+    /// conversation's pending reply reconciled). Stale/cancelled loads fail.
+    @discardableResult
+    public func loadConversation(_ convId: String) async -> Bool {
+        guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration else { return false }
+        if pendingRun != nil, conversationId == convId {
+            await reconcilePendingRun()
+            return !invalidated && !Task.isCancelled && conversationId == convId && error == nil
+        }
+        guard pendingRun == nil, !(isLoading && runState == .sending) else {
+            error = "Recover or cancel the pending reply before changing conversations."
+            return false
+        }
         // Ephemeral mode: conversation is local-only, nothing to fetch.
         if config.ephemeral {
             conversationId = convId
             isLoading = false
-            return
+            return true
         }
 
-        discardPendingRun()
+        // Invalidate earlier history/page callbacks without abandoning the
+        // visible conversation. Its transcript, cursor and preferences remain
+        // usable if the requested conversation cannot be loaded.
+        stateGeneration = UUID()
         let generation = stateGeneration
-        let scope = apiClient.recoveryScope(agentKey: effectiveAgentKey)
+        let agentKey = effectiveAgentKey
+        // Anonymous restoration may acquire its first scope during the fetch;
+        // authenticationGeneration still rejects logout/account replacement.
+        let scope = apiClient.recoveryScope(agentKey: agentKey)
         isLoading = true
-        messages = []
-        conversationId = convId
-        storage.set(config.conversationIdKey, value: convId)
+        loadingMoreMessages = false
+        error = nil
+        defer { if generation == stateGeneration { isLoading = false } }
 
         do {
             let conversation = try await apiClient.loadConversation(id: convId)
-            guard generation == stateGeneration, !invalidated, conversationId == convId,
-                  scope == apiClient.recoveryScope(agentKey: effectiveAgentKey) else { return }
+            guard generation == stateGeneration, !invalidated, !Task.isCancelled,
+                  authenticationGeneration == apiClient.authenticationGeneration, agentKey == effectiveAgentKey,
+                  scope == nil || scope == apiClient.recoveryScope(agentKey: agentKey) else { return false }
 
-            if let apiMessages = conversation.messages {
-                messages = apiMessages.flatMap { mapApiMessage($0) }
-            }
+            // Commit only after a successful, still-owned response. Mapping
+            // sequence-only messages uses the newly committed conversation ID.
+            discardPendingRun()
+            conversationId = convId
+            messages = (conversation.messages ?? []).flatMap { mapApiMessage($0) }
+            storage.set(config.conversationIdKey, value: convId)
+            hasRestoredConversation = true
+            error = nil
+            runState = .idle
+            extendedThinking = false
+            localConversationCreatedAt = nil
+            reconstructing = false
+            assistantContent = ""
+            turnFinalized = false
+            clearPendingEcho()
+            seenSequences = []
+            streamFailure = nil
+            appliedRecoverySnapshot = false
+            voiceReceivedDelta = false
+            receivedAuthoritativeMessage = false
 
             hasMoreMessages = conversation.hasMore ?? (conversation.nextBeforeSeq != nil)
             nextBeforeSeq = conversation.nextBeforeSeq
@@ -1503,17 +1540,18 @@ public class ChatViewModel: ObservableObject {
                 contextWindow = nil
                 contextModelId = nil
             }
-
-        } catch APIError.notFound {
-            guard generation == stateGeneration, !invalidated else { return }
-            conversationId = nil
-            storage.set(config.conversationIdKey, value: nil)
+            return true
         } catch {
-            guard generation == stateGeneration, !invalidated else { return }
-            self.error = "Conversation history could not be loaded."
+            guard generation == stateGeneration, !invalidated, !Task.isCancelled,
+                  authenticationGeneration == apiClient.authenticationGeneration, agentKey == effectiveAgentKey,
+                  scope == nil || scope == apiClient.recoveryScope(agentKey: agentKey) else { return false }
+            if case APIError.notFound = error {
+                self.error = "Conversation not found."
+            } else {
+                self.error = "Conversation history could not be loaded."
+            }
+            return false
         }
-
-        isLoading = false
     }
     
     /// Prepend an earlier page without replacing live rows or their identities.
