@@ -44,9 +44,9 @@ public struct LiveVoiceView: View {
                     Text("An AI conversation, at your pace")
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.75))
-                    LiveAudioOrb(level: session.outputLevel, reduceMotion: reduceMotion)
-                        .frame(width: 230, height: 230)
-                        .padding(.vertical, 20)
+                    LiveAudioOrb(level: session.outputLevel, reduceMotion: reduceMotion,
+                                 diameter: canStart ? 160 : 230)
+                        .padding(.vertical, canStart ? 12 : 20)
                         .accessibilityHidden(true)
                     status
                     if session.finalizationIncomplete {
@@ -59,14 +59,6 @@ public struct LiveVoiceView: View {
                             .font(.callout)
                             .foregroundStyle(.white.opacity(0.85))
                             .fixedSize(horizontal: false, vertical: true)
-                        Button(action: session.start) {
-                            Label("Start live voice", systemImage: "mic.fill")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity, minHeight: 56)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.indigo)
-                        .accessibilityHint("Requests microphone permission and connects to the AI voice service")
                     }
                     Toggle("Show captions", isOn: $showsCaptions)
                         .tint(.purple)
@@ -79,8 +71,8 @@ public struct LiveVoiceView: View {
                 .frame(maxWidth: .infinity)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                // Keep mute and immediate teardown reachable while captions
-                // grow, including at accessibility Dynamic Type sizes.
+                // Starting, retrying and leaving Live never require scrolling
+                // disclosures or captions, even at accessibility text sizes.
                 controls
                     .padding(.horizontal, 28)
                     .padding(.vertical, 12)
@@ -147,28 +139,52 @@ public struct LiveVoiceView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 16) {
-            if session.state == .active {
-                Button { session.setMuted(!session.isMuted) } label: {
-                    Label(session.isMuted ? "Unmute" : "Mute", systemImage: session.isMuted ? "mic.slash.fill" : "mic.fill")
+        VStack(spacing: 12) {
+            if canStart {
+                Button(action: session.start) {
+                    Label("Start live voice", systemImage: "mic.fill")
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, minHeight: 56)
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+                .accessibilityHint("Requests microphone permission and connects to the AI voice service")
+
+                Button(action: endFromButton) {
+                    Label("Done", systemImage: "xmark")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
                 .buttonStyle(.bordered)
-                .accessibilityValue(session.isMuted ? "Microphone off" : "Microphone on")
+                .tint(.white.opacity(0.75))
+                .accessibilityHint("Returns to chat without starting live voice")
+            } else {
+                HStack(spacing: 16) {
+                    if session.state == .active {
+                        Button { session.setMuted(!session.isMuted) } label: {
+                            Label(session.isMuted ? "Unmute" : "Mute", systemImage: session.isMuted ? "mic.slash.fill" : "mic.fill")
+                                .frame(maxWidth: .infinity, minHeight: 56)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityValue(session.isMuted ? "Microphone off" : "Microphone on")
+                    }
+                    Button(role: .destructive, action: endFromButton) {
+                        Label("End", systemImage: "xmark")
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.72, green: 0.12, blue: 0.24))
+                    .disabled(session.state == .ending)
+                    .accessibilityHint("Immediately stops your microphone and AI audio")
+                }
             }
-            Button(role: .destructive) {
-                endingFromButton = true
-                session.end()
-                finishIfNeeded()
-            } label: {
-                Label(canStart ? "Done" : "End", systemImage: "xmark")
-                    .frame(maxWidth: .infinity, minHeight: 56)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Color(red: 0.72, green: 0.12, blue: 0.24))
-            .disabled(session.state == .ending)
-            .accessibilityHint("Immediately stops your microphone and AI audio")
         }
+    }
+
+    private func endFromButton() {
+        endingFromButton = true
+        session.end()
+        finishIfNeeded()
     }
 
     private var captions: some View {
@@ -220,6 +236,7 @@ public struct LiveVoiceView: View {
 private struct LiveAudioOrb: View {
     let level: Double
     let reduceMotion: Bool
+    let diameter: CGFloat
     private var energy: Double { sqrt(max(0, min(1, level))) }
 
     var body: some View {
@@ -241,6 +258,11 @@ private struct LiveAudioOrb: View {
             .clipShape(Circle())
             Circle().stroke(.white.opacity(0.25), lineWidth: 1)
         }
+        // Scale the entire reference artwork, including gradients, offsets and
+        // blur, then report its actual size to the surrounding layout.
+        .frame(width: 230, height: 230)
+        .scaleEffect(diameter / 230)
+        .frame(width: diameter, height: diameter)
         .scaleEffect(reduceMotion ? 1 : 1 + energy * 0.13)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: energy)
     }
