@@ -188,6 +188,7 @@ public struct ChatSidebarView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("chat-sidebar-item-\(item.id)")
             }
         }
     }

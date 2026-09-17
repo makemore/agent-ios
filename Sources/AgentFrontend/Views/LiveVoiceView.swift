@@ -68,7 +68,6 @@ public struct LiveVoiceView: View {
                         .tint(.indigo)
                         .accessibilityHint("Requests microphone permission and connects to the AI voice service")
                     }
-                    controls
                     Toggle("Show captions", isOn: $showsCaptions)
                         .tint(.purple)
                         .frame(minHeight: 48)
@@ -78,6 +77,16 @@ public struct LiveVoiceView: View {
                 .padding(28)
                 .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Keep mute and immediate teardown reachable while captions
+                // grow, including at accessibility Dynamic Type sizes.
+                controls
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 560)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(red: 0.055, green: 0.04, blue: 0.15))
             }
         }
         .foregroundStyle(.white)

@@ -968,6 +968,7 @@ public struct InputView: View {
                 ZStack(alignment: .leading) {
                     TextField(config.placeholder, text: composerTextBinding, axis: .vertical)
                         .id(composerGeneration)
+                        .accessibilityIdentifier("chat-composer-input")
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
                         .font(.system(config.appearance.userTextStyle))
@@ -1065,6 +1066,7 @@ public struct InputView: View {
                             axis: .vertical
                         )
                             .id(composerGeneration)
+                            .accessibilityIdentifier("chat-composer-input")
                             .textFieldStyle(.plain)
                             .lineLimit(1...6)
                             .font(.system(config.appearance.userTextStyle))
