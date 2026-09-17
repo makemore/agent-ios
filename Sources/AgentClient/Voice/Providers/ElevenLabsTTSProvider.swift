@@ -135,6 +135,8 @@ public final class ElevenLabsTTSProvider: NSObject, TTSProvider, AVAudioPlayerDe
 
     @MainActor
     private func play(audioData: Data) async throws {
+        // A TTS request may finish after the host has opened live voice.
+        guard AudioSessionCoordinator.owner != .liveVoice else { throw CancellationError() }
         configurePlaybackSession()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             do {

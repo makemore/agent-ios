@@ -221,6 +221,10 @@ public final class VoiceController: ObservableObject {
 
     private func runDrainLoop() async {
         while !queue.isEmpty {
+            guard AudioSessionCoordinator.owner != .liveVoice else {
+                queue.removeAll()
+                break
+            }
             let text = queue.removeFirst()
             setSpeaking(true)
             // Append to leak-back filter buffer *before* play starts so

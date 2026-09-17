@@ -61,6 +61,8 @@ public enum AudioSessionOwner {
     case unclaimed
     /// A hands-free conversation owns the session for its duration.
     case continuousVoice
+    /// Native full-duplex WebRTC; ordinary TTS must not start playback.
+    case liveVoice
 }
 
 public enum AudioSessionCoordinator {

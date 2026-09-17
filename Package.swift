@@ -24,11 +24,14 @@ let package = Package(
         // backend. Model weights are fetched from Hugging Face on first
         // use, not bundled.
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
+        .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
     ],
     targets: [
         .target(
             name: "AgentClient",
-            dependencies: [],
+            dependencies: [
+                .product(name: "WebRTC", package: "WebRTC"),
+            ],
             path: "Sources/AgentClient"
         ),
         .target(
