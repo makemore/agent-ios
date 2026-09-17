@@ -13,20 +13,31 @@ public struct LiveVoiceView: View {
     @State private var didEnd = false
     @State private var showsFinalizationWarning = false
     private let onEnd: (String?) -> Void
+    private let endsOnBackground: Bool
+    private let endsOnDisappear: Bool
     /// Optional authoritative host/sideband activity, never inferred from text
     /// or silence. Kept separate from listening and measured audio output.
     private let backendActivity: String?
 
     public init(apiClient: APIClient, conversationId: String? = nil,
-                backendActivity: String? = nil, onEnd: @escaping (String?) -> Void) {
+                backendActivity: String? = nil, endsOnBackground: Bool = true,
+                endsOnDisappear: Bool = true, onEnd: @escaping (String?) -> Void) {
         _session = StateObject(wrappedValue: LiveVoiceSession(apiClient: apiClient, conversationId: conversationId))
         self.backendActivity = backendActivity
+        self.endsOnBackground = endsOnBackground
+        self.endsOnDisappear = endsOnDisappear
         self.onEnd = onEnd
     }
 
-    public init(session: LiveVoiceSession, backendActivity: String? = nil, onEnd: @escaping (String?) -> Void) {
+    /// Set both lifetime options to false when a service, rather than this
+    /// screen, owns an incoming call. Presentation never starts the session.
+    public init(session: LiveVoiceSession, backendActivity: String? = nil,
+                endsOnBackground: Bool = true, endsOnDisappear: Bool = true,
+                onEnd: @escaping (String?) -> Void) {
         _session = StateObject(wrappedValue: session)
         self.backendActivity = backendActivity
+        self.endsOnBackground = endsOnBackground
+        self.endsOnDisappear = endsOnDisappear
         self.onEnd = onEnd
     }
 
@@ -90,12 +101,13 @@ public struct LiveVoiceView: View {
         } message: {
             Text("Audio has stopped, but the server could not confirm that this conversation finished saving. Some spoken messages may be missing. Reopen the conversation later to check.")
         }
+        .onAppear { finishIfNeeded() }
         .onChange(of: session.state) { _ in finishIfNeeded() }
         .onChange(of: scenePhase) { phase in
-            if phase == .background { session.end() }
+            if endsOnBackground, phase == .background { session.end() }
         }
         // No auto-start or auto-resume, including after interruptions.
-        .onDisappear { session.end() }
+        .onDisappear { if endsOnDisappear { session.end() } }
     }
 
     private var canStart: Bool {
@@ -210,10 +222,14 @@ public struct LiveVoiceView: View {
     }
 
     private func finishIfNeeded() {
-        guard endingFromButton, !didEnd else { return }
+        guard !didEnd else { return }
+        // A service-owned call can finish before the screen even mounts. Its
+        // host owns finalization warnings as well as CallKit teardown.
+        let externallyManaged = !endsOnBackground && !endsOnDisappear
+        guard endingFromButton || externallyManaged else { return }
         switch session.state {
         case .ended, .failed:
-            if session.finalizationIncomplete {
+            if session.finalizationIncomplete && !externallyManaged {
                 // onEnd dismisses the screen immediately. Keep the warning on
                 // screen until acknowledged rather than flashing it and losing it.
                 showsFinalizationWarning = true

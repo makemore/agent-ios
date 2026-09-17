@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-/// A single full-duplex GPT-Live conversation, explicitly started by a user tap.
+/// A single full-duplex GPT-Live conversation, explicitly started by a tap or system answer.
 /// No DictationEngine, TTS, audio proxy, or frontend tool execution is involved.
 @MainActor
 public final class LiveVoiceSession: ObservableObject {
@@ -43,7 +43,12 @@ public final class LiveVoiceSession: ObservableObject {
     private var providerSessionId: String?
 
     public convenience init(apiClient: APIClient, conversationId: String? = nil) {
-        self.init(signaling: apiClient, conversationId: conversationId,
+        self.init(signaling: apiClient, conversationId: conversationId)
+    }
+
+    /// Host-owned signaling with the native permission and WebRTC transport.
+    public convenience init(signaling: any LiveVoiceSignaling, conversationId: String? = nil) {
+        self.init(signaling: signaling, conversationId: conversationId,
                   permission: { await LiveVoicePlatform.requestPermission() },
                   makeTransport: { try LiveVoicePlatform.makeTransport() })
     }

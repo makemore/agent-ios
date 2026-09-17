@@ -32,6 +32,51 @@ final class LiveVoiceTests: XCTestCase {
         XCTAssertEqual(session.state, .active)
     }
 
+    func testNativeSignalingConvenienceInitializerDoesNotStart() {
+        let signaling = LiveSignalingMock()
+        let session = LiveVoiceSession(signaling: signaling, conversationId: "incoming-conversation")
+        XCTAssertEqual(session.state, .idle)
+        XCTAssertEqual(session.conversationId, "incoming-conversation")
+        XCTAssertNil(LiveVoiceSession(signaling: signaling).conversationId)
+        XCTAssertTrue(signaling.offers.isEmpty)
+        XCTAssertTrue(signaling.closedIds.isEmpty)
+    }
+
+    func testCallKitPreparedSessionBecomesActiveWithoutAudioActivation() async throws {
+        LiveVoiceCallKitAudio.prepare()
+        defer { LiveVoiceCallKitAudio.reset() }
+        let signaling = LiveSignalingMock(), peer = LivePeerMock()
+        let session = model(signaling, peer)
+        XCTAssertEqual(session.state, .idle)
+        XCTAssertEqual(peer.offerCount, 0, "Preparation must not implicitly start the session")
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioActive)
+        try await connect(session, peer)
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioActive)
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+        XCTAssertEqual(session.state, .active, "session.started must not wait on CallKit audio")
+        session.end()
+        peer.message(["type": "session.closed"])
+        try await eventually { session.state == .ended }
+    }
+
+    func testAttemptLatchesCallKitLifecyclePolicyWithoutChangingLaterOutgoingAttempts() {
+        let signaling = LiveSignalingMock()
+        @MainActor func attempt() -> LiveVoiceAttempt {
+            LiveVoiceAttempt(signaling: signaling, closeTimeout: 1_000_000,
+                             finalizationTimeout: 1_000_000, finalizationPollInterval: 1_000_000)
+        }
+        let outgoing = attempt()
+        XCTAssertFalse(outgoing.usesCallKitAudio)
+        LiveVoiceCallKitAudio.prepare()
+        defer { LiveVoiceCallKitAudio.reset() }
+        let incoming = attempt()
+        XCTAssertTrue(incoming.usesCallKitAudio)
+        XCTAssertFalse(outgoing.usesCallKitAudio)
+        LiveVoiceCallKitAudio.reset()
+        XCTAssertTrue(incoming.usesCallKitAudio)
+        XCTAssertFalse(attempt().usesCallKitAudio)
+    }
+
     func testDeniedPermissionNeverCreatesPeerOrSignals() async throws {
         let signaling = LiveSignalingMock(), peer = LivePeerMock()
         let session = model(signaling, peer, permission: { false })

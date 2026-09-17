@@ -17,6 +17,7 @@ final class NativeLiveVoiceTransport: LiveVoiceTransport {
     private var mediaStopped = false
     private var ownsAudio = false
     private var activatedAudio = false
+    private var callKitAudioLease: UUID?
     private var previousManualAudio = false
     private var previousAudioEnabled = false
     private var previousPreferredErrorsIgnored = false
@@ -102,7 +103,13 @@ final class NativeLiveVoiceTransport: LiveVoiceTransport {
         try await setDescription(RTCSessionDescription(type: .answer, sdp: sdp), local: false)
         try checkOpen()
         guard !mediaStopped, ownsAudio else { throw CancellationError() }
-        RTCAudioSession.sharedInstance().isAudioEnabled = true
+        if let callKitAudioLease {
+            // Activation can precede or follow SDP. Never wait for audio here:
+            // session.started arrives over the independently running data channel.
+            LiveVoiceCallKitAudio.setMediaReady(true, for: callKitAudioLease)
+        } else {
+            RTCAudioSession.sharedInstance().isAudioEnabled = true
+        }
         startStats()
     }
 
@@ -129,7 +136,11 @@ final class NativeLiveVoiceTransport: LiveVoiceTransport {
         if ownsAudio {
             // Stops and uninitializes both capture and playout immediately,
             // while SCTP/DTLS can continue receiving the final usage event.
-            RTCAudioSession.sharedInstance().isAudioEnabled = false
+            if let callKitAudioLease {
+                LiveVoiceCallKitAudio.setMediaReady(false, for: callKitAudioLease)
+            } else {
+                RTCAudioSession.sharedInstance().isAudioEnabled = false
+            }
         }
         onEvent?(.levels(input: 0, output: 0))
     }
@@ -181,12 +192,19 @@ final class NativeLiveVoiceTransport: LiveVoiceTransport {
     }
 
     private func claimAudio() throws {
-        guard AudioSessionCoordinator.owner == .unclaimed else { throw LiveVoiceError.unavailable }
-        AudioSessionCoordinator.owner = .liveVoice
+        if LiveVoiceCallKitAudio.isPrepared {
+            guard let lease = LiveVoiceCallKitAudio.claim() else { throw LiveVoiceError.unavailable }
+            callKitAudioLease = lease
+        } else {
+            guard AudioSessionCoordinator.owner == .unclaimed else { throw LiveVoiceError.unavailable }
+            AudioSessionCoordinator.owner = .liveVoice
+        }
         ownsAudio = true
         let audio = RTCAudioSession.sharedInstance()
-        previousManualAudio = audio.useManualAudio
-        previousAudioEnabled = audio.isAudioEnabled
+        if callKitAudioLease == nil {
+            previousManualAudio = audio.useManualAudio
+            previousAudioEnabled = audio.isAudioEnabled
+        }
         previousPreferredErrorsIgnored = audio.ignoresPreferredAttributeConfigurationErrors
         previousRTCConfiguration = RTCAudioSessionConfiguration.webRTC()
         audio.useManualAudio = true
@@ -202,8 +220,10 @@ final class NativeLiveVoiceTransport: LiveVoiceTransport {
         RTCAudioSessionConfiguration.setWebRTC(configuration)
         audio.ignoresPreferredAttributeConfigurationErrors = true
         try audio.setConfiguration(configuration)
-        try audio.setActive(true)
-        activatedAudio = true
+        if callKitAudioLease == nil {
+            try audio.setActive(true)
+            activatedAudio = true
+        }
     }
 
     private func releaseAudio() {
@@ -217,10 +237,17 @@ final class NativeLiveVoiceTransport: LiveVoiceTransport {
         previousRTCConfiguration = nil
         audio.ignoresPreferredAttributeConfigurationErrors = previousPreferredErrorsIgnored
         // All of our peers/tracks are gone before restoring the manual gate.
-        audio.isAudioEnabled = previousAudioEnabled
-        audio.useManualAudio = previousManualAudio
+        if callKitAudioLease == nil {
+            audio.isAudioEnabled = previousAudioEnabled
+            audio.useManualAudio = previousManualAudio
+        }
         audio.unlockForConfiguration()
-        if AudioSessionCoordinator.owner == .liveVoice { AudioSessionCoordinator.owner = .unclaimed }
+        if let callKitAudioLease {
+            LiveVoiceCallKitAudio.release(callKitAudioLease)
+            self.callKitAudioLease = nil
+        } else if AudioSessionCoordinator.owner == .liveVoice {
+            AudioSessionCoordinator.owner = .unclaimed
+        }
     }
 
     private func startStats() {

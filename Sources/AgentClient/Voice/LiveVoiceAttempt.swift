@@ -19,6 +19,8 @@ final class LiveVoiceAttempt {
     private let closeTimeout: UInt64
     private let finalizationTimeout: UInt64
     private let finalizationPollInterval: UInt64
+    // Latch per attempt: a later host reset must not change this call's policy.
+    let usesCallKitAudio: Bool
     private(set) var transport: (any LiveVoiceTransport)?
     private var backendId: String?
     private var started = false
@@ -40,6 +42,7 @@ final class LiveVoiceAttempt {
         self.closeTimeout = closeTimeout
         self.finalizationTimeout = finalizationTimeout
         self.finalizationPollInterval = finalizationPollInterval
+        usesCallKitAudio = LiveVoiceCallKitAudio.isPrepared
     }
 
     func begin(conversationId: String?, connectionTimeout: UInt64,
@@ -206,13 +209,15 @@ final class LiveVoiceAttempt {
 
     private func observeSafetyEvents() {
         #if os(iOS)
-        guard UIApplication.shared.applicationState == .active else {
+        guard usesCallKitAudio || UIApplication.shared.applicationState == .active else {
             fail("Return to the app and tap Start to use live voice.")
             return
         }
         let center = NotificationCenter.default
-        for name in [UIApplication.didEnterBackgroundNotification, AVAudioSession.mediaServicesWereLostNotification,
-                     AVAudioSession.mediaServicesWereResetNotification] {
+        var terminalEvents = [AVAudioSession.mediaServicesWereLostNotification,
+                              AVAudioSession.mediaServicesWereResetNotification]
+        if !usesCallKitAudio { terminalEvents.append(UIApplication.didEnterBackgroundNotification) }
+        for name in terminalEvents {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.fail("Live voice stopped. Tap Start to reconnect.") }
             })
@@ -220,7 +225,13 @@ final class LiveVoiceAttempt {
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
-            MainActor.assumeIsolated { self?.fail("Audio was interrupted. Tap Start to reconnect.") }
+            MainActor.assumeIsolated {
+                // System calls may hold/deactivate and later reactivate CallKit
+                // audio. WebRTC and the provider callbacks suspend the audio unit;
+                // keep signaling alive rather than treating the hold as hangup.
+                guard let self, !self.usesCallKitAudio else { return }
+                self.fail("Audio was interrupted. Tap Start to reconnect.")
+            }
         })
         observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
             guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
