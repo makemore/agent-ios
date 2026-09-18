@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AgentClient
 
 /// Quiet activity indicator shown in the message list while a sub-agent

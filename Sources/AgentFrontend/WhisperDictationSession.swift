@@ -23,7 +23,11 @@ import AgentClient
 /// `append(_:)` is called on the realtime audio thread; everything else
 /// must be called on the main queue. Transcripts are delivered on the
 /// main queue.
-final class WhisperDictationSession {
+///
+/// `@unchecked Sendable`: its tasks capture `self`, and the threading above
+/// is enforced by hand (`samplesLock` for the buffer, main-queue hops for
+/// everything else), not by the compiler.
+final class WhisperDictationSession: @unchecked Sendable {
 
     /// Cumulative transcript callback, main queue. Set before ``begin()``.
     var onTranscript: ((String) -> Void)?

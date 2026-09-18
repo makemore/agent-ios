@@ -9,7 +9,12 @@ import AVFoundation
 ///
 /// Implements the same surface as ``ElevenLabsTTSProvider`` so the
 /// controller can swap them transparently.
-public final class AVSpeechTTSProvider: NSObject, TTSProvider, AVSpeechSynthesizerDelegate {
+///
+/// `@unchecked Sendable`: the SDK's delegate protocol makes the class
+/// Sendable, but `AVSpeechSynthesizer` isn't. The synthesizer is only
+/// driven from the voice controller's speak/cancel calls and its own
+/// delegate callbacks, as before; this states that rather than changes it.
+public final class AVSpeechTTSProvider: NSObject, TTSProvider, AVSpeechSynthesizerDelegate, @unchecked Sendable {
     public let name = "av-speech"
 
     private let synthesizer = AVSpeechSynthesizer()
