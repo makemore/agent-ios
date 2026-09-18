@@ -4,7 +4,7 @@ import XCTest
 /// End-to-end Level-A streaming tests. These wire the *real*
 /// `ChatViewModel`, `APIClient` and `SSEClient` together but route every
 /// HTTP request through `MockURLProtocol` so each scenario plays back a
-/// JSON fixture from `clients/test-fixtures/sse/`. No network, no real
+/// JSON fixture from `test-harness/fixtures/sse/`. No network, no real
 /// `agent_studio` instance — but the same code paths the production app
 /// exercises.
 @MainActor

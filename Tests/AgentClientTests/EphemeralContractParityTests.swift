@@ -2,7 +2,7 @@ import XCTest
 @testable import AgentClient
 
 /// Layer B — cross-platform parity. Drives the shared
-/// `clients/test-fixtures/ephemeral/contract.json` scenarios through a real
+/// `test-harness/fixtures/ephemeral/contract.json` scenarios through a real
 /// `ChatViewModel` + `APIClient` + `SSEClient` and asserts exactly what the
 /// client puts on the wire in ephemeral mode. The Android
 /// `EphemeralContractParityTest` asserts the same contract — that shared
@@ -177,19 +177,11 @@ struct EphemeralContract: Decodable {
     let scenarios: [Scenario]
 
     static func load(file: StaticString = #filePath) throws -> EphemeralContract {
-        var url = URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
-        for _ in 0..<10 {
-            for candidate in [
-                url.appendingPathComponent("clients/test-fixtures/ephemeral/contract.json"),
-                url.appendingPathComponent("test-fixtures/ephemeral/contract.json"),
-            ] where FileManager.default.fileExists(atPath: candidate.path) {
-                let data = try Data(contentsOf: candidate)
-                return try JSONDecoder().decode(EphemeralContract.self, from: data)
-            }
-            url.deleteLastPathComponent()
-        }
-        throw NSError(domain: "EphemeralContract", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "Could not locate test-fixtures/ephemeral/contract.json from \(file)",
-        ])
+        let url = try SharedFixture.locate(
+            "ephemeral/contract.json",
+            from: URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
+        )
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(EphemeralContract.self, from: data)
     }
 }
