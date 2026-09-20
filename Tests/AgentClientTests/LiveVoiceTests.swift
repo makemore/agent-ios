@@ -581,6 +581,273 @@ final class LiveVoiceTests: XCTestCase {
     }
 }
 
+extension LiveVoiceTests {
+    func testSystemCallNativeInitializerIsInert() {
+        let signaling = LiveSignalingMock()
+        let call = LiveVoiceSystemCall(signaling: signaling, conversationId: "incoming-conversation")
+        XCTAssertEqual(call.session.state, .idle)
+        XCTAssertEqual(call.session.conversationId, "incoming-conversation")
+        XCTAssertNil(LiveVoiceSystemCall(signaling: signaling).session.conversationId)
+        XCTAssertTrue(signaling.offers.isEmpty)
+        XCTAssertTrue(signaling.closedIds.isEmpty)
+        XCTAssertTrue(signaling.statusIds.isEmpty)
+    }
+
+    func testSystemCallOnlyExplicitStartCanOpenMicrophoneAndIsOneShot() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock()
+        var permissionChecks = 0
+        var transports = 0
+        let call = LiveVoiceSystemCall(signaling: signaling, conversationId: "system-conversation") { adapter, id in
+            LiveVoiceSession(signaling: adapter, conversationId: id,
+                             permission: { permissionChecks += 1; return true },
+                             makeTransport: { transports += 1; return peer },
+                             closeTimeoutNanoseconds: 1_000_000)
+        }
+        call.session.start() // The exposed model cannot bypass the accepted action.
+        await Task.yield()
+        XCTAssertEqual(call.session.state, .idle)
+        XCTAssertEqual(permissionChecks, 0)
+        XCTAssertEqual(transports, 0)
+        XCTAssertEqual(peer.offerCount, 0)
+        XCTAssertFalse(peer.microphoneEnabled)
+        XCTAssertTrue(signaling.offers.isEmpty)
+        XCTAssertTrue(call.start())
+        XCTAssertFalse(call.start())
+        try await eventually { peer.answers.count == 1 }
+        peer.message(["type": "session.started"])
+        XCTAssertEqual(call.session.state, .active)
+        XCTAssertEqual(signaling.conversations, ["system-conversation"])
+        XCTAssertEqual(permissionChecks, 1)
+        XCTAssertEqual(transports, 1)
+        call.end()
+        call.end()
+        XCTAssertFalse(peer.microphoneEnabled)
+        try await eventually { call.session.state == .ended && signaling.closedIds.count == 1 }
+        XCTAssertFalse(call.start())
+        call.session.start()
+        await Task.yield()
+        XCTAssertEqual(call.session.state, .ended)
+        XCTAssertEqual(permissionChecks, 1)
+        XCTAssertEqual(peer.offerCount, 1)
+        XCTAssertEqual(signaling.offers.count, 1)
+        XCTAssertEqual(signaling.closedIds, [LiveSignalingMock.response.id])
+        XCTAssertEqual(signaling.statusIds, [LiveSignalingMock.response.id])
+        XCTAssertEqual(peer.closeCount, 1)
+    }
+
+    func testSystemCallEndBeforeStartPermanentlyRevokesStart() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock()
+        var permissionChecks = 0
+        let call = LiveVoiceSystemCall(signaling: signaling) { adapter, _ in
+            self.model(adapter, peer, permission: { permissionChecks += 1; return true })
+        }
+        call.end()
+        call.end()
+        XCTAssertFalse(call.start())
+        call.session.start()
+        await Task.yield()
+        XCTAssertEqual(call.session.state, .ended)
+        XCTAssertEqual(permissionChecks, 0)
+        XCTAssertEqual(peer.offerCount, 0)
+        XCTAssertTrue(signaling.offers.isEmpty)
+        XCTAssertTrue(signaling.closedIds.isEmpty)
+    }
+
+    func testSystemCallFailureDoesNotPermitRetryOrPrompt() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock()
+        var permissionChecks = 0
+        let call = LiveVoiceSystemCall(signaling: signaling) { adapter, _ in
+            self.model(adapter, peer, permission: { permissionChecks += 1; return false })
+        }
+        XCTAssertTrue(call.start())
+        try await eventually { if case .failed = call.session.state { return true }; return false }
+        XCTAssertFalse(call.start())
+        call.session.start()
+        await Task.yield()
+        XCTAssertEqual(permissionChecks, 1)
+        XCTAssertEqual(peer.offerCount, 0)
+        XCTAssertFalse(peer.microphoneEnabled)
+        XCTAssertTrue(signaling.offers.isEmpty)
+    }
+
+    func testSystemCallEndDuringPermissionNeverOpensMicrophone() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock(), gate = LiveGate<Bool>()
+        let call = LiveVoiceSystemCall(signaling: signaling) { adapter, _ in
+            self.model(adapter, peer, permission: { await gate.wait() })
+        }
+        XCTAssertTrue(call.start())
+        try await eventually { gate.isWaiting }
+        call.end()
+        gate.resolve(true)
+        await Task.yield()
+        XCTAssertEqual(call.session.state, .ended)
+        XCTAssertFalse(call.start())
+        XCTAssertEqual(peer.offerCount, 0)
+        XCTAssertTrue(signaling.offers.isEmpty)
+    }
+
+    func testSystemCallLateCreationClosesOnceWithoutResurrectingSession() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock(), gate = LiveGate<LiveSessionResponse>()
+        signaling.create = { await gate.wait() }
+        let call = LiveVoiceSystemCall(signaling: signaling) { adapter, _ in self.model(adapter, peer) }
+        XCTAssertTrue(call.start())
+        try await eventually { gate.isWaiting }
+        call.end()
+        call.end()
+        XCTAssertEqual(call.session.state, .ended)
+        XCTAssertTrue(peer.closed)
+        gate.resolve(LiveSignalingMock.response)
+        try await eventually { signaling.closedIds.count == 1 }
+        call.end()
+        XCTAssertFalse(call.start())
+        call.session.start()
+        await Task.yield()
+        XCTAssertEqual(call.session.state, .ended)
+        XCTAssertEqual(call.session.conversationId, "existing-conversation")
+        XCTAssertTrue(peer.answers.isEmpty)
+        XCTAssertFalse(peer.microphoneEnabled)
+        XCTAssertEqual(peer.closeCount, 1)
+        XCTAssertEqual(signaling.offers.count, 1)
+        XCTAssertEqual(signaling.closedIds, [LiveSignalingMock.response.id])
+    }
+
+    func testSystemCallEndKeepsHistoryFinalizationAvailable() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock(), gate = LiveGate<LiveSessionStatus>()
+        signaling.status = { await gate.wait() }
+        let call = LiveVoiceSystemCall(signaling: signaling) { adapter, _ in self.model(adapter, peer) }
+        XCTAssertTrue(call.start())
+        try await eventually { peer.answers.count == 1 }
+        peer.message(["type": "session.started"])
+        call.end()
+        peer.message(["type": "session.closed"])
+        try await eventually { gate.isWaiting }
+        XCTAssertEqual(call.session.state, .ending)
+        XCTAssertTrue(peer.closed)
+        XCTAssertFalse(call.start())
+        call.end()
+        gate.resolve(LiveSignalingMock.status())
+        try await eventually { call.session.state == .ended }
+        XCTAssertTrue(call.session.finalUsageConfirmed)
+        XCTAssertFalse(call.session.finalizationIncomplete)
+        XCTAssertEqual(signaling.statusIds, [LiveSignalingMock.response.id])
+        XCTAssertTrue(signaling.closedIds.isEmpty, "A provider close needs no fallback close")
+        XCTAssertEqual(peer.closeCount, 1)
+        XCTAssertFalse(call.start(), "Remote close also must not make the owner reusable")
+    }
+
+    func testSystemCallDeinitRevokesLateCreationEvenWithRetainedSession() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock(), gate = LiveGate<LiveSessionResponse>()
+        signaling.create = { await gate.wait() }
+        var call: LiveVoiceSystemCall? = LiveVoiceSystemCall(signaling: signaling) { adapter, _ in
+            self.model(adapter, peer)
+        }
+        let session = try XCTUnwrap(call?.session)
+        XCTAssertEqual(call?.start(), true)
+        try await eventually { gate.isWaiting }
+        weak var weakCall = call
+        call = nil
+        XCTAssertNil(weakCall)
+        XCTAssertEqual(session.state, .ended)
+        XCTAssertTrue(peer.closed)
+        gate.resolve(LiveSignalingMock.response)
+        try await eventually { signaling.closedIds.count == 1 }
+        session.start()
+        XCTAssertEqual(session.state, .ended)
+        XCTAssertTrue(peer.answers.isEmpty)
+        XCTAssertEqual(peer.closeCount, 1)
+    }
+
+    func testRevocableSignalingClosesLateResultWithOriginalAdapterAndAllowsStatus() async throws {
+        let original = LiveSignalingMock(), replacement = LiveSignalingMock(), gate = LiveGate<LiveSessionResponse>()
+        original.create = { await gate.wait() }
+        var hostAdapter = original
+        let adapter = RevocableLiveVoiceSignaling(signaling: hostAdapter)
+        let pending = Task { try await adapter.createLiveSession(sdp: "offer", conversationId: "conversation") }
+        try await eventually { gate.isWaiting }
+        adapter.revoke()
+        adapter.revoke()
+        hostAdapter = replacement
+        gate.resolve(LiveSignalingMock.response)
+        do { _ = try await pending.value; XCTFail("Revoked creation must never return SDP") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await eventually { original.closedIds.count == 1 }
+        try await adapter.closeLiveSession(id: LiveSignalingMock.response.id)
+        let status = try await adapter.liveSessionStatus(id: LiveSignalingMock.response.id)
+        XCTAssertTrue(status.finalizationConfirmed)
+        XCTAssertEqual(original.closedIds, [LiveSignalingMock.response.id])
+        XCTAssertEqual(original.statusIds, [LiveSignalingMock.response.id])
+        do { _ = try await adapter.createLiveSession(sdp: "retry", conversationId: nil); XCTFail("Revoked") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(original.offers, ["offer"])
+        XCTAssertTrue(hostAdapter.offers.isEmpty)
+        XCTAssertTrue(hostAdapter.closedIds.isEmpty)
+        XCTAssertTrue(hostAdapter.statusIds.isEmpty)
+    }
+
+    func testRevocableSignalingCancellationAfterPostStillCleansUp() async throws {
+        let signaling = LiveSignalingMock(), gate = LiveGate<LiveSessionResponse>()
+        var cleanupWasCancelled = false
+        signaling.create = { await gate.wait() }
+        signaling.close = { cleanupWasCancelled = Task.isCancelled }
+        let adapter = RevocableLiveVoiceSignaling(signaling: signaling)
+        let pending = Task { try await adapter.createLiveSession(sdp: "offer", conversationId: nil) }
+        try await eventually { gate.isWaiting }
+        pending.cancel()
+        gate.resolve(LiveSignalingMock.response)
+        do { _ = try await pending.value; XCTFail("Canceled creation must never return SDP") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await eventually { signaling.closedIds.count == 1 }
+        try await adapter.closeLiveSession(id: LiveSignalingMock.response.id)
+        XCTAssertFalse(cleanupWasCancelled)
+        XCTAssertEqual(signaling.closedIds, [LiveSignalingMock.response.id])
+    }
+
+    func testRevocableSignalingRejectsPreCancelledRevokedAndDuplicateCreates() async throws {
+        let signaling = LiveSignalingMock(), gate = LiveGate<LiveSessionResponse>()
+        let adapter = RevocableLiveVoiceSignaling(signaling: signaling)
+        let cancelled = Task { try await adapter.createLiveSession(sdp: "cancelled", conversationId: nil) }
+        cancelled.cancel() // MainActor task cannot begin until this test yields.
+        do { _ = try await cancelled.value; XCTFail("Already canceled") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(signaling.offers.isEmpty)
+        signaling.create = { await gate.wait() }
+        let pending = Task { try await adapter.createLiveSession(sdp: "first", conversationId: nil) }
+        try await eventually { gate.isWaiting }
+        do { _ = try await adapter.createLiveSession(sdp: "duplicate", conversationId: nil); XCTFail("Duplicate") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        gate.resolve(LiveSignalingMock.response)
+        let response = try await pending.value
+        XCTAssertEqual(response, LiveSignalingMock.response)
+        do { _ = try await adapter.createLiveSession(sdp: "retry", conversationId: nil); XCTFail("Duplicate") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(signaling.offers, ["first"])
+        try await adapter.closeLiveSession(id: response.id)
+
+        let revoked = RevocableLiveVoiceSignaling(signaling: signaling)
+        revoked.revoke()
+        do { _ = try await revoked.createLiveSession(sdp: "revoked", conversationId: nil); XCTFail("Revoked") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(signaling.offers, ["first"])
+    }
+
+    func testRevocableSignalingFailedCreateAndCloseAreNotRetried() async throws {
+        let signaling = LiveSignalingMock()
+        signaling.create = { throw LiveVoiceError.connectionFailed }
+        signaling.close = { throw LiveVoiceError.connectionFailed }
+        let adapter = RevocableLiveVoiceSignaling(signaling: signaling)
+        do { _ = try await adapter.createLiveSession(sdp: "first", conversationId: nil); XCTFail("Failure expected") }
+        catch { XCTAssertTrue(error is LiveVoiceError) }
+        do { _ = try await adapter.createLiveSession(sdp: "retry", conversationId: nil); XCTFail("Duplicate") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        for _ in 0..<2 {
+            do { try await adapter.closeLiveSession(id: LiveSignalingMock.response.id); XCTFail("Failure expected") }
+            catch { XCTAssertTrue(error is LiveVoiceError) }
+        }
+        XCTAssertEqual(signaling.offers, ["first"])
+        XCTAssertEqual(signaling.closedIds, [LiveSignalingMock.response.id])
+    }
+}
+
 private final class LiveTTSSpy: TTSProvider {
     let name = "live-tts-test-spy"
     private let lock = NSLock()
@@ -605,6 +872,7 @@ private final class LiveSignalingMock: LiveVoiceSignaling {
     static let response = LiveSessionResponse(id: "7E2B1866-BE77-42DA-AC2B-4D159CBAF8FC",
         conversationId: "result-conversation", session: .init(id: "live_fixture"), transport: .init(sdp: "provider-answer"))
     var create: (() async throws -> LiveSessionResponse)?
+    var close: (() async throws -> Void)?
     var status: (() async throws -> LiveSessionStatus)?
     static func status(state: String = "closed", finalized: Bool? = nil) -> LiveSessionStatus {
         LiveSessionStatus(id: response.id, state: state, usageFinalized: finalized ?? (state == "closed"))
@@ -619,7 +887,10 @@ private final class LiveSignalingMock: LiveVoiceSignaling {
         if let create { return try await create() }
         return Self.response
     }
-    func closeLiveSession(id: String) async throws { closedIds.append(id) }
+    func closeLiveSession(id: String) async throws {
+        closedIds.append(id)
+        try await close?()
+    }
     func liveSessionStatus(id: String) async throws -> LiveSessionStatus {
         statusIds.append(id)
         if let status { return try await status() }
@@ -644,6 +915,7 @@ private final class LivePeerMock: LiveVoiceTransport {
     var microphoneEnabled = false
     var mediaStopped = false
     var closed = false
+    var closeCount = 0
     var canSend = true
     var onSend: ((LiveVoiceCommand) -> Void)?
     var commands: [(LiveVoiceCommand, String)] = []
@@ -661,7 +933,7 @@ private final class LivePeerMock: LiveVoiceTransport {
         return canSend
     }
     func stopMedia() { mediaStopped = true; microphoneEnabled = false }
-    func close() { closed = true; stopMedia(); onEvent = nil }
+    func close() { closeCount += 1; closed = true; stopMedia(); onEvent = nil }
     func message(_ event: [String: Any]) {
         onEvent?(.message(try! JSONSerialization.data(withJSONObject: event)))
     }

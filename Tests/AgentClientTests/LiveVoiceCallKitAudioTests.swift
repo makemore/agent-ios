@@ -4,6 +4,66 @@ import XCTest
 
 @MainActor
 final class LiveVoiceCallKitAudioTests: XCTestCase {
+    func testSystemCallPreparationReservesBeforeConfiguringAndGatesAudio() throws {
+        defer { LiveVoiceCallKitAudio.reset() }
+        var configurations = 0
+        try LiveVoiceCallKitAudio.prepareForSystemCall(configure: {
+            configurations += 1
+            XCTAssertEqual(AudioSessionCoordinator.owner, .liveVoice)
+            XCTAssertTrue(LiveVoiceCallKitAudio.isPrepared)
+            XCTAssertFalse(LiveVoiceCallKitAudio.isAudioActive)
+            XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+        })
+        XCTAssertEqual(configurations, 1)
+        XCTAssertThrowsError(try LiveVoiceCallKitAudio.prepareForSystemCall(configure: {
+            XCTFail("A second system call cannot steal the reservation")
+        }))
+        LiveVoiceCallKitAudio.prepare() // Legacy preparation remains harmless.
+        let lease = try XCTUnwrap(LiveVoiceCallKitAudio.claim())
+        defer { LiveVoiceCallKitAudio.release(lease) }
+        LiveVoiceCallKitAudio.setMediaReady(true, for: lease)
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+        LiveVoiceCallKitAudio.activationChanged(true)
+        XCTAssertTrue(LiveVoiceCallKitAudio.isAudioEnabled)
+        LiveVoiceCallKitAudio.activationChanged(false)
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+        LiveVoiceCallKitAudio.reset()
+        XCTAssertThrowsError(try LiveVoiceCallKitAudio.prepareForSystemCall(configure: {
+            XCTFail("Reset must keep ownership until the peer releases its tracks")
+        }))
+        LiveVoiceCallKitAudio.activationChanged(true)
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+    }
+
+    func testSystemCallPreparationRejectsOtherAudioOwnersWithoutConfiguring() {
+        let previousOwner = AudioSessionCoordinator.owner
+        defer { LiveVoiceCallKitAudio.reset(); AudioSessionCoordinator.owner = previousOwner }
+        for owner in [AudioSessionOwner.continuousVoice, .liveVoice] {
+            AudioSessionCoordinator.owner = owner
+            XCTAssertThrowsError(try LiveVoiceCallKitAudio.prepareForSystemCall(configure: {
+                XCTFail("An audio conflict must fail before configuration")
+            }))
+            XCTAssertEqual(AudioSessionCoordinator.owner, owner)
+            XCTAssertFalse(LiveVoiceCallKitAudio.isPrepared)
+            XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+        }
+    }
+
+    func testSystemCallConfigurationFailureReleasesReservation() throws {
+        defer { LiveVoiceCallKitAudio.reset() }
+        XCTAssertThrowsError(try LiveVoiceCallKitAudio.prepareForSystemCall(configure: {
+            throw LiveVoiceError.unavailable
+        }))
+        XCTAssertFalse(LiveVoiceCallKitAudio.isPrepared)
+        XCTAssertFalse(LiveVoiceCallKitAudio.isAudioEnabled)
+        XCTAssertEqual(AudioSessionCoordinator.owner, .unclaimed)
+        try LiveVoiceCallKitAudio.prepareForSystemCall(configure: {})
+        XCTAssertTrue(LiveVoiceCallKitAudio.isPrepared)
+        LiveVoiceCallKitAudio.reset()
+        LiveVoiceCallKitAudio.reset()
+        XCTAssertEqual(AudioSessionCoordinator.owner, .unclaimed)
+    }
+
     func testAudioRequiresAnswerAndActivationInEitherOrderAndStopsOnHold() throws {
         defer { LiveVoiceCallKitAudio.reset() }
         for activationFirst in [true, false] {
@@ -93,6 +153,14 @@ final class LiveVoiceCallKitAudioTests: XCTestCase {
         XCTAssertTrue(bridge.contains("RTCAudioSession.sharedInstance().audioSessionDidActivate(audioSession)"))
         XCTAssertTrue(bridge.contains("RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)"))
         XCTAssertFalse(bridge.contains(".setActive("))
+        XCTAssertTrue(bridge.contains("setCategory(.playAndRecord, mode: .voiceChat,"))
+        XCTAssertTrue(bridge.contains("options: [.defaultToSpeaker, .allowBluetooth]"))
+        let systemCall = try String(contentsOf: root.appendingPathComponent("LiveVoiceSystemCall.swift"), encoding: .utf8)
+        XCTAssertTrue(systemCall.contains(".recordPermission == .granted"))
+        XCTAssertFalse(systemCall.contains("requestRecordPermission"))
+        XCTAssertFalse(systemCall.contains("requestPermission("))
+        XCTAssertFalse(systemCall.contains("CXProvider("))
+        XCTAssertTrue(systemCall.contains("guard LiveVoiceCallKitAudio.isPrepared else"))
         let attempt = try String(contentsOf: root.appendingPathComponent("LiveVoiceAttempt.swift"), encoding: .utf8)
         XCTAssertTrue(attempt.contains("guard usesCallKitAudio || UIApplication.shared.applicationState == .active"))
         XCTAssertTrue(attempt.contains("if !usesCallKitAudio { terminalEvents.append(UIApplication.didEnterBackgroundNotification) }"))

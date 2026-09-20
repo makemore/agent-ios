@@ -42,6 +42,10 @@ public final class LiveVoiceSession: ObservableObject {
     private var pendingMuteId: String?
     private var providerSessionId: String?
 
+    /// System-call owners restrict the otherwise restartable public session.
+    /// Evaluated synchronously before permission, transport, or state changes.
+    var authorizeStart: (@MainActor () -> Bool)?
+
     public convenience init(apiClient: APIClient, conversationId: String? = nil) {
         self.init(signaling: apiClient, conversationId: conversationId)
     }
@@ -86,6 +90,7 @@ public final class LiveVoiceSession: ObservableObject {
         case .idle, .ended, .failed: break
         default: return
         }
+        guard authorizeStart?() ?? true else { return }
         attempt?.dispose(notify: false)
         generation = UUID()
         let token = generation

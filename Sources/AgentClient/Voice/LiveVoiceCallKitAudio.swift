@@ -23,6 +23,32 @@ public enum LiveVoiceCallKitAudio {
     private static var activeSession: AVAudioSession?
     #endif
 
+    /// Reserve the manual WebRTC gate and configure the system-call category
+    /// before fulfilling an accepted CallKit action. Only CallKit activates audio.
+    /// Unlike legacy prepare(), an existing reservation/owner is an error.
+    public static func prepareForSystemCall() throws {
+        try prepareForSystemCall(configure: {
+            #if os(iOS)
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat,
+                                                           options: [.defaultToSpeaker, .allowBluetooth])
+            #endif
+        })
+    }
+
+    /// Configuration injection avoids any real audio-session calls in tests.
+    static func prepareForSystemCall(configure: () throws -> Void) throws {
+        guard token == nil, AudioSessionCoordinator.owner == .unclaimed else {
+            throw LiveVoiceError.unavailable
+        }
+        prepare()
+        do {
+            try configure()
+        } catch {
+            reset()
+            throw error
+        }
+    }
+
     /// Reserves Live audio and closes WebRTC's capture/playout gate before the
     /// system answer. Repeated preparation never steals an existing audio owner.
     public static func prepare() {
