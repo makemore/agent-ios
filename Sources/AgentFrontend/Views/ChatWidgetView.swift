@@ -171,8 +171,8 @@ public struct ChatWidgetView: View {
             // progress bar appear when the runtime also shipped a
             // `context_window` for the active model. There is no
             // client-side estimation — the banner stays hidden until
-            // the server has something to show.
-            if let tokens = viewModel.contextTokens {
+            // the server has something to show. Hosts can turn it off.
+            if config.showContextUsage, let tokens = viewModel.contextTokens {
                 ContextUsageBanner(
                     totalTokens: tokens,
                     contextWindow: viewModel.contextWindow,

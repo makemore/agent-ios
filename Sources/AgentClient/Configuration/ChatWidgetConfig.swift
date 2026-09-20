@@ -90,6 +90,11 @@ public struct ChatWidgetConfig {
     /// When false, these events are still processed internally but not rendered as visible messages.
     public var showToolMessages: Bool
 
+    /// Show the thin token-usage banner above the message list once the runtime
+    /// has reported `context.usage`. Hosts that don't want users to see token
+    /// counts turn it off.
+    public var showContextUsage: Bool
+
     /// Render assistant messages as markdown (bold, italic, lists, headers, code blocks, links).
     /// Only applies to assistant messages — user messages are always plain text.
     public var enableMarkdown: Bool
@@ -340,6 +345,7 @@ public struct ChatWidgetConfig {
         self.showDebugButton = false
         self.enableDebugMode = false
         self.showToolMessages = false
+        self.showContextUsage = true
         self.enableMarkdown = true
         self.showTTSButton = true
         self.enableTTS = false
