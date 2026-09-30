@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.0.1` → add the **AgentFrontend** product to your app target.
+from `3.1.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.1"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.1.0"),
 ],
 targets: [
     .target(
@@ -242,7 +242,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.0.1"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.1.0"),
 ],
 targets: [
     .target(
@@ -273,6 +273,18 @@ Sources/AgentFrontend/
 
 
 ## Changelog
+
+### 3.1.0
+
+- **Fixes building from a tag.** 3.0.1's `ChatWidgetConfig` referenced `TTSProviderPolicy` and
+  `SpeechInputPolicy` without the file that defines them (`Voice/VoiceTypes.swift`), so apps
+  resolving 3.0.1 from GitHub failed to compile. Use 3.1.0 or later.
+- Voice: companion and Live voice (GPT-Live, spoken replies, hands-free with mic-level silence
+  detection, on-device WhisperKit dictation, speak-aloud toggle, TTS at media volume).
+- Calls: incoming app calls with PushKit and CallKit, a reusable system-call lifecycle and
+  revocable Live voice signalling.
+- Chat: Claude-style edit and retry with exact supersede hints, markdown pipe tables, readable
+  column layout, chat UI presets, run recovery and history hardening.
 
 ### 3.0.1
 
