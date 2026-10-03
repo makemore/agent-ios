@@ -176,6 +176,12 @@ OS cannot provide it.
 
 ### On-device neural voice (Kokoro)
 
+> **Do not ship this branch.** `AgentKokoro` links sherpa-onnx, whose prebuilt
+> xcframework statically includes espeak-ng (GPL-3.0-or-later), and downloads
+> GPL-3.0 `espeak-ng-data`. GPL-3.0/AGPL code may not ship in any of our
+> products, so this implementation must not be merged or released. It is kept
+> for reference until a GPL-free route replaces the engine.
+
 The optional **`AgentKokoro`** product adds [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
 v1.0, a small neural TTS model that sounds far more natural than the system
 voice and runs entirely on the device. Assistant text never leaves the phone,
