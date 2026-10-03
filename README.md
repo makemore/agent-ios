@@ -174,6 +174,105 @@ will not match ElevenLabs quality. Speech input also has a `speechInputPolicy`;
 protected mode defaults to on-device recognition and disables the mic when the
 OS cannot provide it.
 
+### On-device neural voice (Kokoro)
+
+The optional **`AgentKokoro`** product adds [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
+v1.0, a small neural TTS model that sounds far more natural than the system
+voice and runs entirely on the device. Assistant text never leaves the phone,
+so it is suitable for Protected AI Mode; the only network traffic is the
+one-time model download. The engine is
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (ONNX Runtime on the CPU),
+as on Android; the web widget runs the model through kokoro-js. Voice ids are
+Kokoro's own, so one id means the same voice on every platform.
+
+Add the product next to `AgentFrontend` (or `AgentClient`):
+
+```swift
+.product(name: "AgentKokoro", package: "agent-ios"),
+```
+
+**Use it as the widget's on-device voice.** Register once at launch. From then
+on, whenever the library resolves on-device speech (`.localOnly`, Protected AI
+Mode, or `.automatic` without a voice proxy) it speaks with Kokoro instead of
+`AVSpeechSynthesizer`. Policies are unchanged: `.disabled` still means no voice,
+and a configured remote voice proxy still wins under `.automatic`/`.remote`.
+
+```swift
+import AgentKokoro
+
+KokoroTTS.register()                 // e.g. in your App's init
+
+var config = ChatWidgetConfig(backendUrl: "...", agentKey: "...")
+config.enableTTS = true
+config.ttsProviderPolicy = .localOnly
+config.voiceId = "bf_emma"           // any Kokoro voice id; default "af_heart"
+```
+
+**Or build the controller yourself** and inject it:
+
+```swift
+let voice = VoiceController(provider: KokoroTTSProvider(voice: KokoroVoice(id: "am_michael")!))
+ChatWidgetView(viewModel: viewModel, config: config, voiceController: voice)
+```
+
+**Model download and cache.** The model is not bundled. The first time Kokoro is
+asked to speak without it, it starts a one-time download (that turn is spoken by
+the system voice). About **156 MB** (148 MiB): the int8 `kokoro-int8-multi-lang-v1_0`
+export, English subset — model, voice table, US and UK lexicons, and the English
+espeak-ng data. Files come from the upstream Hugging Face repository
+(`csukuangfj/kokoro-int8-multi-lang-v1_0`, pinned to a revision), are checked
+against their sizes and SHA-256, and are stored in
+`Application Support/AgentKokoro` (excluded from iCloud backup). An interrupted
+download resumes without fetching completed files again.
+
+```swift
+let model = KokoroModelManager.shared
+model.state                          // .notDownloaded / .downloading(progress:) / .ready / .failed(reason:)
+try await model.download()           // download ahead of time, e.g. from a settings screen
+try model.delete()                   // free the space; next use downloads again
+
+// Your own mirror (same files), Wi-Fi only, no download on first use:
+let mirrored = KokoroModelManager(configuration: .init(
+    baseURL: URL(string: "https://cdn.example.com/kokoro/")!,
+    allowsCellularAccess: false))
+KokoroTTS.register(modelManager: mirrored, autoDownload: false)
+```
+
+`state` is `@Published`, so a SwiftUI view can observe the manager for a
+progress bar.
+
+**Behaviour.** Each sentence chunk from `VoiceController` is synthesised on a
+background queue and starts playing as soon as its first sentence is ready;
+chunks queued behind it are synthesised while it plays, so there is no gap
+between them. `stop()` silences audio immediately (generation stops at the next
+sentence boundary). Playback follows the same `AVAudioSession` rules as the
+other providers (`.playback`/`.spokenAudio`, leaves a hands-free session alone,
+never plays during Live voice). If the model is missing, fails to load, or fails
+on a chunk, that turn is spoken by `AVSpeechTTSProvider` instead — the fallback
+stays for the rest of the turn so a reply never switches voice mid-way — and a
+content-free reason is logged and passed to `KokoroTTSProvider.onFallback`. Text
+in scripts the English voices cannot read (Chinese, Japanese, Korean) also uses
+the system voice. On an Apple M5 Mac's CPU synthesis runs at about 2× real
+time with roughly a second before the first sentence plays; it has not yet been
+measured on an iPhone.
+
+**Voices** (`KokoroVoice.all`, `KokoroTTS.voices`, or `listVoices()`):
+
+| | Female | Male |
+|---|---|---|
+| American | `af_heart` (default), `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky` | `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa` |
+| British | `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily` | `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis` |
+
+**Licences.** Kokoro-82M weights and voices: Apache-2.0. sherpa-onnx and its
+model conversion: Apache-2.0. ONNX Runtime: MIT. **sherpa-onnx's prebuilt
+xcframework statically links espeak-ng (GPL-3.0-or-later)**, which it uses to
+phonemise words missing from the lexicons, and the downloaded `espeak-ng-data`
+is GPL-3.0 as well. Have the licence reviewed before shipping `AgentKokoro` in
+a closed-source app. Apps that do not import `AgentKokoro` do not compile or
+link any of it, but SwiftPM still resolves and downloads the sherpa-onnx and
+ONNX Runtime binary packages (about 176 MB of archives, cached) for every
+consumer of this package, as it already does for WhisperKit.
+
 ### Auth Strategies
 
 | Strategy    | Description                          |
@@ -229,12 +328,14 @@ let widget = AgentFrontend.createChatWidget(
 
 ## Two Products
 
-The package ships two library products:
+The package ships two library products, plus the optional `AgentKokoro`
+voice (see [On-device neural voice](#on-device-neural-voice-kokoro)):
 
 | Product | What it contains | Depends on |
 |---------|-----------------|------------|
 | **AgentClient** | Models, networking, SSE, configuration, storage | Foundation only |
 | **AgentFrontend** | SwiftUI chat widget + view layer | AgentClient |
+| **AgentKokoro** (optional) | On-device Kokoro neural voice (`KokoroTTSProvider`, model download/cache) | AgentClient, sherpa-onnx |
 
 Existing consumers that `import AgentFrontend` continue to work unchanged — AgentFrontend re-exports AgentClient's types transitively.
 
@@ -269,10 +370,37 @@ Sources/AgentFrontend/
 ├── AgentFrontend.swift          # Public API entry point
 ├── Utilities/                   # PlatformColors
 └── Views/                       # ChatWidgetView, MessageView, InputView, etc.
+
+Sources/AgentKokoro/             # Optional on-device Kokoro voice
+├── KokoroTTSProvider.swift      # TTSProvider: streaming, prefetch, fallback
+├── KokoroModelManager.swift     # Download, progress, cache, delete
+├── KokoroModelManifest.swift    # Model files, sizes, checksums
+├── KokoroVoice.swift            # Voice catalogue (Kokoro ids)
+├── KokoroEngine.swift           # sherpa-onnx engine
+├── KokoroAudioOutput.swift      # AVAudioEngine streaming playback
+└── KokoroTTS.swift              # register() / makeProvider()
 ```
 
 
 ## Changelog
+
+### Unreleased
+
+- **On-device neural voice (`AgentKokoro`, new optional product).** `KokoroTTSProvider` speaks with
+  Kokoro-82M v1.0 through sherpa-onnx, entirely on the device: per-chunk synthesis streamed to
+  `AVAudioEngine`, chunks prefetched while earlier ones play, prompt cancel, `AudioSessionCoordinator`
+  respected. `KokoroModelManager` downloads the model (~156 MB, English voices) once on first use from
+  a configurable URL (default: upstream Hugging Face), reports progress, verifies sizes and SHA-256,
+  resumes interrupted downloads, caches in Application Support and can delete it. On any engine
+  failure or while the model is missing, the turn falls back to `AVSpeechTTSProvider` with a
+  content-free reason. 28 English voices with Kokoro ids (`af_heart` default, `bf_emma`, `bm_george`, …).
+  `KokoroTTS.register()` makes Kokoro the voice whenever on-device speech is resolved. See
+  [On-device neural voice](#on-device-neural-voice-kokoro), including the espeak-ng (GPL-3.0) licence note.
+- `VoiceFactory.onDeviceProviderFactory`: optional hook that replaces the system voice used for
+  `.localOnly`, Protected AI Mode and proxy-less `.automatic`. `nil` (default) keeps `AVSpeechTTSProvider`.
+- `TTSProvider` gains two optional members with no-op defaults (existing providers compile unchanged):
+  `prepareForNewTurn()`, called by `VoiceController.reset()`, and `prefetch(_:options:)`, called for
+  every chunk as `VoiceController` queues it.
 
 ### 3.1.0
 

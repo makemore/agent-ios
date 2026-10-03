@@ -13,6 +13,24 @@ public struct VoiceProviderResolution {
 
 /// Factory for building a default ``TTSProvider`` from the widget config.
 public enum VoiceFactory {
+    /// Builds the provider used whenever resolution chooses on-device
+    /// speech: ``TTSProviderPolicy/localOnly``, Protected AI Mode, or
+    /// ``TTSProviderPolicy/automatic`` without a voice proxy. The argument
+    /// is the requested voice id (``ChatWidgetConfig/voiceId``).
+    ///
+    /// `nil` — the default — means the system voice,
+    /// ``AVSpeechTTSProvider``. Optional engines that keep text on the
+    /// device install themselves here (e.g. `KokoroTTS.register()` from the
+    /// `AgentKokoro` product). Set it once at launch, on the main thread,
+    /// before building any chat UI. It never changes which policy applies,
+    /// only which on-device engine speaks.
+    public static var onDeviceProviderFactory: ((_ voiceId: String?) -> TTSProvider)?
+
+    private static func makeOnDeviceProvider(voiceId: String?) -> TTSProvider {
+        if let factory = onDeviceProviderFactory { return factory(voiceId) }
+        return AVSpeechTTSProvider(voiceIdentifier: voiceId)
+    }
+
     public static func resolveProvider(
         config: ChatWidgetConfig,
         apiClient: APIClient?,
@@ -33,7 +51,7 @@ public enum VoiceFactory {
         switch config.effectiveTTSProviderPolicy {
         case .localOnly:
             return VoiceProviderResolution(
-                provider: AVSpeechTTSProvider(voiceIdentifier: voiceId),
+                provider: makeOnDeviceProvider(voiceId: voiceId),
                 mode: .local
             )
         case .remote:
@@ -55,7 +73,7 @@ public enum VoiceFactory {
                 )
             }
             return VoiceProviderResolution(
-                provider: AVSpeechTTSProvider(voiceIdentifier: voiceId),
+                provider: makeOnDeviceProvider(voiceId: voiceId),
                 mode: .local
             )
         case .disabled:
