@@ -17,12 +17,20 @@ protocol KokoroAudioOutput: AnyObject {
     func stop()
 }
 
-/// ``KokoroAudioOutput`` on `AVAudioEngine` + `AVAudioPlayerNode`, so audio
-/// can start while later sentences are still being synthesised.
+/// ``KokoroAudioOutput`` on `AVAudioEngine` + `AVAudioPlayerNode`: 24 kHz
+/// float buffers are scheduled back to back on the player node, so the
+/// next chunk plays gaplessly while later ones are still being synthesised.
+/// Buffer callbacks arrive on AVFoundation's threads and only touch
+/// lock-protected state here (never the main actor).
 final class AVAudioEngineOutput: KokoroAudioOutput, @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var format: AVAudioFormat?
+
+    /// Silences output without changing timing (tests on a shared Mac).
+    var muted = false {
+        didSet { player.volume = muted ? 0 : 1 }
+    }
 
     private let lock = NSLock()
     private var pendingBuffers = 0

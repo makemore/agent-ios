@@ -23,16 +23,17 @@ final class KokoroTTSProviderTests: XCTestCase {
                               fetcher: FakeFetcher? = nil) async throws -> KokoroTTSProvider {
         let manager: KokoroModelManager
         if installed {
-            let (installedManager, dir) = try await KokoroTestSupport.installedManager()
+            let (installedManager, dir) = try await KokoroTestSupport.installedManager(voice: voice.id, loader: loader)
             directories.append(dir)
             manager = installedManager
         } else {
             let dir = KokoroTestSupport.temporaryDirectory()
             directories.append(dir)
-            manager = KokoroTestSupport.manager(directory: dir, fetcher: fetcher ?? FakeFetcher(contents: KokoroTestSupport.contents))
+            manager = KokoroTestSupport.manager(directory: dir, fetcher: fetcher ?? FakeFetcher(contents: KokoroTestSupport.served()),
+                                                voice: voice.id, loader: loader)
         }
         return KokoroTTSProvider(voice: voice, speed: 1.0, modelManager: manager, fallback: fallback,
-                                 autoDownload: autoDownload, engineLoader: loader, output: output)
+                                 autoDownload: autoDownload, engineHost: manager.engineHost, output: output)
     }
 
     // MARK: - Speaking
@@ -49,8 +50,8 @@ final class KokoroTTSProviderTests: XCTestCase {
 
         XCTAssertEqual(provider.name, "kokoro")
         XCTAssertEqual(loader.engine.calls.map(\.text), ["First sentence.", "Second sentence.", "Third sentence."])
-        XCTAssertEqual(Set(loader.engine.calls.map(\.speakerId)), [KokoroVoice.defaultVoice.speakerId])
-        XCTAssertEqual(loader.loads, [.american], "engine is loaded once and reused")
+        XCTAssertEqual(Set(loader.engine.calls.map(\.voiceId)), ["af_heart"])
+        XCTAssertEqual(loader.loads, [.enUS], "engine is loaded once and reused")
         // Every utterance streamed both pieces, in order.
         XCTAssertEqual(output.utterances.count, 3)
         for samples in output.utterances {
@@ -90,13 +91,34 @@ final class KokoroTTSProviderTests: XCTestCase {
 
     func testSpeakOptionsVoiceIdSelectsKokoroVoice() async throws {
         let loader = FakeEngineLoader()
-        let provider = try await makeProvider(loader: loader)
+        let fallback = FakeFallbackProvider()
+        let provider = try await makeProvider(loader: loader, fallback: fallback)
+        try await provider.modelManager.prepare(voice: "bm_george")
 
         try await provider.speak("Hello there.", options: TTSSpeakOptions(voiceId: "bm_george"))
         try await provider.speak("Hello again.", options: TTSSpeakOptions(voiceId: "not-a-kokoro-voice"))
 
-        XCTAssertEqual(loader.engine.calls.map(\.speakerId), [26, KokoroVoice.defaultVoice.speakerId])
-        XCTAssertEqual(loader.loads, [.british, .american], "British voices use the British lexicon")
+        XCTAssertEqual(loader.engine.calls.map(\.voiceId), ["bm_george", "af_heart"])
+        XCTAssertEqual(loader.engine.prepared.suffix(2), ["bm_george", "af_heart"],
+                       "British voices use the British G2P")
+        XCTAssertTrue(fallback.spoken.isEmpty)
+    }
+
+    func testVoiceNotDownloadedYetFallsBackAndFetchesIt() async throws {
+        let loader = FakeEngineLoader()
+        let fallback = FakeFallbackProvider()
+        let provider = try await makeProvider(loader: loader, fallback: fallback)
+        var reasons: [KokoroFallbackReason] = []
+        provider.onFallback = { reasons.append($0) }
+
+        try await provider.speak("Cheerio.", options: TTSSpeakOptions(voiceId: "bf_emma"))
+        XCTAssertEqual(fallback.spoken, ["Cheerio."])
+        for _ in 0..<400 where !provider.modelManager.isDownloaded(voice: "bf_emma") {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(provider.modelManager.isDownloaded(voice: "bf_emma"))
+        await MainActor.run {}
+        XCTAssertEqual(reasons, [.modelNotDownloaded])
     }
 
     func testPunctuationOnlyChunkIsSkipped() async throws {
@@ -111,12 +133,11 @@ final class KokoroTTSProviderTests: XCTestCase {
 
     func testProvidersShareOneLoadedEngineUntilTheModelChanges() async throws {
         let loader = FakeEngineLoader()
-        let host = KokoroEngineHost(loader: loader)
-        let (manager, dir) = try await KokoroTestSupport.installedManager()
+        let (manager, dir) = try await KokoroTestSupport.installedManager(loader: loader)
         directories.append(dir)
         func provider() -> KokoroTTSProvider {
             KokoroTTSProvider(voice: .defaultVoice, speed: 1, modelManager: manager, fallback: nil,
-                              autoDownload: false, engineHost: host, output: FakeOutput())
+                              autoDownload: false, engineHost: manager.engineHost, output: FakeOutput())
         }
         let first = provider()
         let second = provider()
@@ -126,10 +147,36 @@ final class KokoroTTSProviderTests: XCTestCase {
         XCTAssertEqual(loader.loads.count, 1, "a second chat screen must not load a second model")
 
         // Re-installing the model invalidates the loaded engine.
-        try manager.delete()
-        try await manager.download()
+        try manager.deleteDownloadedModel()
+        try await manager.prepare()
         try await second.speak("Three.")
         XCTAssertEqual(loader.loads.count, 2)
+    }
+
+    func testTurnStartLoadsTheModelInTheBackground() async throws {
+        let loader = FakeEngineLoader()
+        let (manager, dir) = try await KokoroTestSupport.installedManager(loader: loader)
+        directories.append(dir)
+        manager.engineHost.unload()
+        let provider = KokoroTTSProvider(voice: .defaultVoice, speed: 1, modelManager: manager, fallback: nil,
+                                         autoDownload: false, engineHost: manager.engineHost, output: FakeOutput())
+        provider.prepareForNewTurn()
+        try await waitUntil { loader.loads.count == 2 }
+        XCTAssertTrue(loader.engine.calls.isEmpty, "warming does not speak")
+    }
+
+    func testSpeechMetricsAreReported() async throws {
+        let provider = try await makeProvider()
+        var metrics: [KokoroSpeechMetrics] = []
+        provider.onSpeechMetrics = { metrics.append($0) }
+        try await provider.speak("Measure me.")
+        await MainActor.run {}
+        XCTAssertEqual(metrics.count, 1)
+        let m = try XCTUnwrap(metrics.first)
+        XCTAssertEqual(m.chunkCount, 2)
+        XCTAssertEqual(m.audioSeconds, 480.0 / 24_000, accuracy: 1e-9)
+        XCTAssertGreaterThanOrEqual(m.firstAudioMs, 0)
+        XCTAssertGreaterThan(m.synthSeconds, 0)
     }
 
     // MARK: - Prefetch
@@ -285,7 +332,7 @@ final class KokoroTTSProviderTests: XCTestCase {
     func testMissingModelFallsBackAndStartsDownload() async throws {
         let loader = FakeEngineLoader()
         let fallback = FakeFallbackProvider()
-        let fetcher = FakeFetcher(contents: KokoroTestSupport.contents)
+        let fetcher = FakeFetcher(contents: KokoroTestSupport.served())
         let provider = try await makeProvider(installed: false, loader: loader, fallback: fallback, fetcher: fetcher)
         var reasons: [KokoroFallbackReason] = []
         provider.onFallback = { reasons.append($0) }
@@ -293,13 +340,12 @@ final class KokoroTTSProviderTests: XCTestCase {
         try await provider.speak("Hello before the model exists.")
 
         XCTAssertEqual(fallback.spoken, ["Hello before the model exists."])
-        XCTAssertTrue(loader.loads.isEmpty)
         // The one-time download starts in the background.
-        for _ in 0..<200 where provider.modelManager.currentState != .ready {
+        for _ in 0..<400 where provider.modelManager.currentState != .ready {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertEqual(provider.modelManager.currentState, .ready)
-        XCTAssertEqual(fetcher.requested.count, 2)
+        XCTAssertEqual(Set(fetcher.requestedPaths), KokoroTestSupport.expectedPaths(voice: "af_heart"))
         await MainActor.run {}
         XCTAssertEqual(reasons.first, .modelNotDownloaded)
 
@@ -310,36 +356,58 @@ final class KokoroTTSProviderTests: XCTestCase {
         XCTAssertEqual(fallback.spoken.count, 1)
     }
 
+    func testFailedAutoDownloadIsTriedOncePerTurn() async throws {
+        let fallback = FakeFallbackProvider()
+        let fetcher = FakeFetcher(contents: KokoroTestSupport.served())
+        fetcher.failingPaths = ["manifest.json"] // e.g. offline
+        let provider = try await makeProvider(installed: false, fallback: fallback, fetcher: fetcher)
+
+        provider.prepareForNewTurn()
+        try await provider.speak("One.")
+        try await waitUntil { fetcher.requests.count == 1 }
+        if case .failed = provider.modelManager.currentState {} else {
+            try await waitUntil { if case .failed = provider.modelManager.currentState { return true }; return false }
+        }
+        provider.prepareForNewTurn() // a new turn: fall back again, but no second download in it
+        try await provider.speak("Two.")
+        try await provider.speak("Three.")
+        try await waitUntil { fetcher.requests.count == 2 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(fetcher.requests.count, 2, "one attempt per turn, not one per chunk")
+        XCTAssertEqual(fallback.spoken, ["One.", "Two.", "Three."])
+    }
+
     func testMissingModelWithoutAutoDownloadDoesNotDownload() async throws {
         let fallback = FakeFallbackProvider()
-        let fetcher = FakeFetcher(contents: KokoroTestSupport.contents)
+        let fetcher = FakeFetcher(contents: KokoroTestSupport.served())
         let provider = try await makeProvider(installed: false, autoDownload: false, fallback: fallback, fetcher: fetcher)
 
         try await provider.speak("Hello.")
 
         XCTAssertEqual(fallback.spoken, ["Hello."])
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertTrue(fetcher.requested.isEmpty)
+        XCTAssertTrue(fetcher.requests.isEmpty)
         XCTAssertEqual(provider.modelManager.currentState, .notDownloaded)
     }
 
     func testEngineLoadFailureFallsBackForTheTurnAndIsNotRetried() async throws {
         let loader = FakeEngineLoader()
-        loader.failLoad = true
         let fallback = FakeFallbackProvider()
         let provider = try await makeProvider(loader: loader, fallback: fallback)
+        provider.modelManager.engineHost.unload()
+        loader.failLoad = true
 
         try await provider.speak("First chunk.")
         try await provider.speak("Second chunk.")
         XCTAssertEqual(fallback.spoken, ["First chunk.", "Second chunk."])
-        XCTAssertEqual(loader.loads.count, 1)
+        XCTAssertEqual(loader.loads.count, 2) // prepare(), then the failed reload
 
-        // A new turn tries Kokoro again, but the same broken model is not
+        // A new turn tries Kokoro again, but the same broken files are not
         // reloaded from disk on every chunk.
         provider.prepareForNewTurn()
         try await provider.speak("Next turn.")
         XCTAssertEqual(fallback.spoken.last, "Next turn.")
-        XCTAssertEqual(loader.loads.count, 1)
+        XCTAssertEqual(loader.loads.count, 2)
     }
 
     func testSynthesisFailureFallsBackForRestOfTurnThenRecovers() async throws {
@@ -399,8 +467,9 @@ final class KokoroTTSProviderTests: XCTestCase {
 
     func testWithoutFallbackFailuresSurfaceToTheController() async throws {
         let loader = FakeEngineLoader()
-        loader.failLoad = true
         let provider = try await makeProvider(loader: loader, fallback: nil)
+        provider.modelManager.engineHost.unload()
+        loader.failLoad = true
         do {
             try await provider.speak("Hello.")
             XCTFail("expected an error")
@@ -420,9 +489,9 @@ final class KokoroTTSProviderTests: XCTestCase {
         let fallback = RecordingFallback()
         let dir = KokoroTestSupport.temporaryDirectory()
         directories.append(dir)
-        let provider = KokoroTTSProvider(
-            voice: .defaultVoice, speed: 1, modelManager: KokoroTestSupport.manager(directory: dir, fetcher: FakeFetcher(contents: [:])),
-            fallback: fallback, autoDownload: false, engineLoader: FakeEngineLoader(), output: FakeOutput())
+        let manager = KokoroTestSupport.manager(directory: dir, fetcher: FakeFetcher(contents: [:]))
+        let provider = KokoroTTSProvider(voice: .defaultVoice, speed: 1, modelManager: manager, fallback: fallback,
+                                         autoDownload: false, engineHost: manager.engineHost, output: FakeOutput())
         try await provider.speak("Hi.", options: TTSSpeakOptions(voiceId: "af_bella"))
         XCTAssertEqual(fallback.voiceIds, [nil])
     }
@@ -452,13 +521,14 @@ final class KokoroTTSProviderTests: XCTestCase {
             XCTAssertTrue(ids.contains(id), id)
         }
         XCTAssertEqual(KokoroVoice.defaultVoice.id, "af_heart")
-        XCTAssertEqual(KokoroVoice(id: "bf_emma")?.accent, .british)
+        XCTAssertEqual(KokoroVoice(id: "bf_emma")?.language, .enGB)
         XCTAssertEqual(KokoroVoice(id: "am_michael")?.gender, .male)
         XCTAssertEqual(KokoroVoice(id: "af_heart")?.label, "Heart (US, female)")
+        XCTAssertEqual(KokoroVoice(id: "bm_george")?.name, "George")
         XCTAssertNil(KokoroVoice(id: "zf_xiaobei"))
-        XCTAssertEqual(voices.first { $0.id == "bm_george" }?.labels?["lang"], "en-GB")
-        // Speaker ids are unique rows of the voice table.
-        XCTAssertEqual(Set(KokoroVoice.all.map(\.speakerId)).count, KokoroVoice.all.count)
+        XCTAssertEqual(voices.first { $0.id == "bm_george" }?.labels?["lang"], "en-gb")
+        XCTAssertEqual(voices.first { $0.id == "bf_emma" }?.labels?["suggested"], "true")
+        XCTAssertEqual(voices.first { $0.id == "af_heart" }?.labels?["engine"], "kokoro")
     }
 
     // MARK: - VoiceFactory wiring
@@ -472,7 +542,9 @@ final class KokoroTTSProviderTests: XCTestCase {
 
         XCTAssertEqual(VoiceFactory.resolveProvider(config: config, apiClient: apiClient).provider?.name, "av-speech")
 
-        KokoroTTS.register(autoDownload: false)
+        let dir = KokoroTestSupport.temporaryDirectory()
+        directories.append(dir)
+        KokoroTTS.register(configuration: KokoroConfiguration(cacheDirectory: dir), autoDownload: false)
         let resolved = VoiceFactory.resolveProvider(config: config, apiClient: apiClient, voiceId: config.voiceId)
         XCTAssertEqual(resolved.mode, .local)
         XCTAssertEqual(resolved.provider?.name, "kokoro")
@@ -498,10 +570,15 @@ final class KokoroTTSProviderTests: XCTestCase {
         XCTAssertEqual(VoiceFactory.resolveProvider(config: config, apiClient: apiClient).provider?.name, "av-speech")
     }
 
-    func testMakeProviderFallsBackToDefaultVoiceForUnknownId() {
+    func testMakeProviderFallsBackToConfiguredVoiceForUnknownId() {
         XCTAssertEqual(KokoroTTS.makeProvider(voiceId: nil, autoDownload: false).voice, .defaultVoice)
         XCTAssertEqual(KokoroTTS.makeProvider(voiceId: "com.apple.voice.Samantha", autoDownload: false).voice, .defaultVoice)
         XCTAssertEqual(KokoroTTS.makeProvider(voiceId: "am_michael", autoDownload: false).voice.id, "am_michael")
+        let british = KokoroConfiguration(voice: "bf_emma", speed: 1.2)
+        let provider = KokoroTTS.makeProvider(voiceId: "unknown", configuration: british, autoDownload: false)
+        XCTAssertEqual(provider.voice.id, "bf_emma")
+        XCTAssertEqual(provider.speed, 1.2)
+        XCTAssertEqual(KokoroTTS.engineId, "kokoro")
     }
 
     private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async throws {

@@ -1,0 +1,373 @@
+{
+  "format": "kokoro-voices/1",
+  "default": {
+    "en-us": "af_heart",
+    "en-gb": "bf_emma"
+  },
+  "voices": [
+    {
+      "id": "af_heart",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "A",
+      "file": "voices/af_heart.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_alloy",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "C",
+      "file": "voices/af_alloy.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_aoede",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "C+",
+      "file": "voices/af_aoede.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_bella",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "A-",
+      "file": "voices/af_bella.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_jessica",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "D",
+      "file": "voices/af_jessica.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_kore",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "C+",
+      "file": "voices/af_kore.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_nicole",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "B-",
+      "file": "voices/af_nicole.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_nova",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "C",
+      "file": "voices/af_nova.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_river",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "D",
+      "file": "voices/af_river.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_sarah",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "C+",
+      "file": "voices/af_sarah.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "af_sky",
+      "lang": "en-us",
+      "gender": "female",
+      "grade": "C-",
+      "file": "voices/af_sky.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_adam",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "F+",
+      "file": "voices/am_adam.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_echo",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "D",
+      "file": "voices/am_echo.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_eric",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "D",
+      "file": "voices/am_eric.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_fenrir",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "C+",
+      "file": "voices/am_fenrir.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_liam",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "D",
+      "file": "voices/am_liam.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_michael",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "C+",
+      "file": "voices/am_michael.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_onyx",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "D",
+      "file": "voices/am_onyx.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_puck",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "C+",
+      "file": "voices/am_puck.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "am_santa",
+      "lang": "en-us",
+      "gender": "male",
+      "grade": "D-",
+      "file": "voices/am_santa.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bf_alice",
+      "lang": "en-gb",
+      "gender": "female",
+      "grade": "D",
+      "file": "voices/bf_alice.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bf_emma",
+      "lang": "en-gb",
+      "gender": "female",
+      "grade": "B-",
+      "file": "voices/bf_emma.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bf_isabella",
+      "lang": "en-gb",
+      "gender": "female",
+      "grade": "C",
+      "file": "voices/bf_isabella.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bf_lily",
+      "lang": "en-gb",
+      "gender": "female",
+      "grade": "D",
+      "file": "voices/bf_lily.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bm_daniel",
+      "lang": "en-gb",
+      "gender": "male",
+      "grade": "D",
+      "file": "voices/bm_daniel.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bm_fable",
+      "lang": "en-gb",
+      "gender": "male",
+      "grade": "C",
+      "file": "voices/bm_fable.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bm_george",
+      "lang": "en-gb",
+      "gender": "male",
+      "grade": "C",
+      "file": "voices/bm_george.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    },
+    {
+      "id": "bm_lewis",
+      "lang": "en-gb",
+      "gender": "male",
+      "grade": "D+",
+      "file": "voices/bm_lewis.bin",
+      "dtype": "float32-le",
+      "shape": [
+        510,
+        1,
+        256
+      ]
+    }
+  ]
+}

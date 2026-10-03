@@ -1,23 +1,34 @@
 import Foundation
 import AgentClient
 
+/// The two English variants Kokoro v1.0 speaks. A voice's language comes
+/// from its id prefix: `a*` is `en-us`, `b*` is `en-gb`.
+public enum KokoroLanguage: String, Sendable, CaseIterable, Codable {
+    case enUS = "en-us"
+    case enGB = "en-gb"
+
+    /// The language of a Kokoro voice id, or nil for a non-English id.
+    public init?(voiceId: String) {
+        switch voiceId.first {
+        case "a": self = .enUS
+        case "b": self = .enGB
+        default: return nil
+        }
+    }
+
+    /// BCP-47 tag, e.g. `en-US`.
+    public var bcp47: String { self == .enUS ? "en-US" : "en-GB" }
+}
+
 /// One Kokoro v1.0 voice, identified the way Kokoro names it (`af_heart`,
 /// `bm_george`, …) so the same id selects the same voice on iOS, Android
 /// and the web widget.
 ///
-/// The prefix encodes accent and gender: `a` American / `b` British,
-/// `f` female / `m` male. Only the English voices are listed: they are the
-/// ones the downloaded model files cover (American and British lexicons),
-/// and the set the other platforms ship.
+/// The prefix encodes language and gender: `a` American / `b` British,
+/// `f` female / `m` male. ``KokoroModelManager/voices()`` reads the list
+/// from the downloaded `voices/voices.json`; ``all`` is the same list built
+/// in, for pickers shown before anything is downloaded.
 public struct KokoroVoice: Identifiable, Hashable, Sendable {
-    public enum Accent: String, Sendable {
-        case american = "en-US"
-        case british = "en-GB"
-
-        /// BCP-47 language tag for the accent.
-        public var languageCode: String { rawValue }
-    }
-
     public enum Gender: String, Sendable {
         case female
         case male
@@ -26,21 +37,25 @@ public struct KokoroVoice: Identifiable, Hashable, Sendable {
     /// Kokoro's own voice id, e.g. `"af_heart"`.
     public let id: String
     /// Human label, e.g. `"Heart"`.
-    public let displayName: String
-    public let accent: Accent
+    public let name: String
+    public let language: KokoroLanguage
     public let gender: Gender
-    /// Row of this voice in the model's `voices.bin` (Kokoro v1.0 order).
-    let speakerId: Int
+    /// Kokoro's overall grade from `VOICES.md` (`"A"` best).
+    public let grade: String
+    /// The suggested voice for its language (`af_heart`, `bf_emma`).
+    public let suggested: Bool
 
-    init(_ id: String, _ displayName: String, _ speakerId: Int) {
+    public init(id: String, name: String? = nil, language: KokoroLanguage, gender: Gender,
+                grade: String = "", suggested: Bool = false) {
         self.id = id
-        self.displayName = displayName
-        self.speakerId = speakerId
-        self.accent = id.hasPrefix("b") ? .british : .american
-        self.gender = id.dropFirst().hasPrefix("m") ? .male : .female
+        self.name = name ?? Self.displayName(for: id)
+        self.language = language
+        self.gender = gender
+        self.grade = grade
+        self.suggested = suggested
     }
 
-    /// Looks a voice up by its Kokoro id. `nil` for an unknown id.
+    /// Looks a voice up by its Kokoro id in ``all``. `nil` for an unknown id.
     public init?(id: String) {
         guard let voice = Self.all.first(where: { $0.id == id }) else { return nil }
         self = voice
@@ -48,54 +63,47 @@ public struct KokoroVoice: Identifiable, Hashable, Sendable {
 
     /// `"Heart (US, female)"` — a label suitable for a picker.
     public var label: String {
-        let region = accent == .american ? "US" : "UK"
-        return "\(displayName) (\(region), \(gender.rawValue))"
+        let region = language == .enUS ? "US" : "UK"
+        return "\(name) (\(region), \(gender.rawValue))"
+    }
+
+    /// `af_heart` -> `Heart`.
+    static func displayName(for id: String) -> String {
+        guard let underscore = id.firstIndex(of: "_") else { return id }
+        let rest = id[id.index(after: underscore)...]
+        return rest.prefix(1).uppercased() + rest.dropFirst()
     }
 
     /// The voice used when none is chosen — Kokoro's own default.
-    public static let defaultVoice = KokoroVoice("af_heart", "Heart", 3)
+    public static let defaultVoiceId = "af_heart"
+    public static var defaultVoice: KokoroVoice { KokoroVoice(id: defaultVoiceId)! }
 
-    /// Every voice this provider can speak in. Speaker ids follow the
-    /// sherpa-onnx `kokoro-multi-lang-v1_0` voice table.
+    private static func v(_ id: String, _ grade: String, suggested: Bool = false) -> KokoroVoice {
+        KokoroVoice(id: id, language: id.hasPrefix("b") ? .enGB : .enUS,
+                    gender: id.dropFirst().hasPrefix("m") ? .male : .female, grade: grade, suggested: suggested)
+    }
+
+    /// Every voice in kokoro/v1 `voices/voices.json`, in its order.
     public static let all: [KokoroVoice] = [
-        KokoroVoice("af_alloy", "Alloy", 0),
-        KokoroVoice("af_aoede", "Aoede", 1),
-        KokoroVoice("af_bella", "Bella", 2),
-        defaultVoice,
-        KokoroVoice("af_jessica", "Jessica", 4),
-        KokoroVoice("af_kore", "Kore", 5),
-        KokoroVoice("af_nicole", "Nicole", 6),
-        KokoroVoice("af_nova", "Nova", 7),
-        KokoroVoice("af_river", "River", 8),
-        KokoroVoice("af_sarah", "Sarah", 9),
-        KokoroVoice("af_sky", "Sky", 10),
-        KokoroVoice("am_adam", "Adam", 11),
-        KokoroVoice("am_echo", "Echo", 12),
-        KokoroVoice("am_eric", "Eric", 13),
-        KokoroVoice("am_fenrir", "Fenrir", 14),
-        KokoroVoice("am_liam", "Liam", 15),
-        KokoroVoice("am_michael", "Michael", 16),
-        KokoroVoice("am_onyx", "Onyx", 17),
-        KokoroVoice("am_puck", "Puck", 18),
-        KokoroVoice("am_santa", "Santa", 19),
-        KokoroVoice("bf_alice", "Alice", 20),
-        KokoroVoice("bf_emma", "Emma", 21),
-        KokoroVoice("bf_isabella", "Isabella", 22),
-        KokoroVoice("bf_lily", "Lily", 23),
-        KokoroVoice("bm_daniel", "Daniel", 24),
-        KokoroVoice("bm_fable", "Fable", 25),
-        KokoroVoice("bm_george", "George", 26),
-        KokoroVoice("bm_lewis", "Lewis", 27),
+        v("af_heart", "A", suggested: true), v("af_alloy", "C"), v("af_aoede", "C+"), v("af_bella", "A-"),
+        v("af_jessica", "D"), v("af_kore", "C+"), v("af_nicole", "B-"), v("af_nova", "C"),
+        v("af_river", "D"), v("af_sarah", "C+"), v("af_sky", "C-"),
+        v("am_adam", "F+"), v("am_echo", "D"), v("am_eric", "D"), v("am_fenrir", "C+"),
+        v("am_liam", "D"), v("am_michael", "C+"), v("am_onyx", "D"), v("am_puck", "C+"), v("am_santa", "D-"),
+        v("bf_alice", "D"), v("bf_emma", "B-", suggested: true), v("bf_isabella", "C"), v("bf_lily", "D"),
+        v("bm_daniel", "D"), v("bm_fable", "C"), v("bm_george", "C"), v("bm_lewis", "D+"),
     ]
 
     /// The voices as ``VoiceDescriptor``s, for hosts that list voices
     /// through ``TTSProvider/listVoices()``.
-    public static var descriptors: [VoiceDescriptor] {
-        all.map { voice in
-            VoiceDescriptor(id: voice.id, name: voice.displayName, labels: [
-                "engine": "kokoro",
-                "lang": voice.accent.languageCode,
+    public static func descriptors(_ voices: [KokoroVoice] = all) -> [VoiceDescriptor] {
+        voices.map { voice in
+            VoiceDescriptor(id: voice.id, name: voice.name, labels: [
+                "engine": KokoroTTS.engineId,
+                "lang": voice.language.rawValue,
                 "gender": voice.gender.rawValue,
+                "grade": voice.grade,
+                "suggested": voice.suggested ? "true" : "false",
                 "label": voice.label,
             ])
         }

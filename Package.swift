@@ -7,7 +7,9 @@ let package = Package(
     name: "AgentFrontend",
     platforms: [
         .iOS(.v16),
-        .macOS(.v13)
+        // macOS 14: ONNX Runtime's Swift package (AgentKokoro) declares
+        // macOS 14, and SwiftPM platforms are package-wide.
+        .macOS(.v14)
     ],
     products: [
         .library(
@@ -18,10 +20,9 @@ let package = Package(
             name: "AgentFrontend",
             targets: ["AgentFrontend"]
         ),
-        // Optional on-device neural TTS (Kokoro-82M via sherpa-onnx). A
+        // Optional on-device neural TTS (Kokoro-82M on ONNX Runtime). A
         // separate product so hosts that never import it do not link the
-        // engine: SwiftPM only fetches and builds a dependency for the
-        // products a host actually uses.
+        // engine.
         .library(
             name: "AgentKokoro",
             targets: ["AgentKokoro"]
@@ -33,11 +34,11 @@ let package = Package(
         // use, not bundled.
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
-        // Kokoro-82M inference for the optional `AgentKokoro` product
-        // (ONNX Runtime + the sherpa-onnx text frontend). Model weights are
-        // downloaded on first use, not bundled. Minor-pinned because the
-        // Swift wrapper ships in the same package as the C API it wraps.
-        .package(url: "https://github.com/k2-fsa/sherpa-onnx.git", .upToNextMinor(from: "1.13.8")),
+        // Microsoft ONNX Runtime (MIT), full build, for the optional
+        // `AgentKokoro` product: runs the Kokoro model and our G2P model.
+        // Exact pin: the binary xcframework and its licence inventory
+        // (README, "On-device neural voice") are checked per version.
+        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"),
     ],
     targets: [
         .target(
@@ -59,7 +60,7 @@ let package = Package(
             name: "AgentKokoro",
             dependencies: [
                 "AgentClient",
-                .product(name: "sherpa-onnx", package: "sherpa-onnx"),
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
             ],
             path: "Sources/AgentKokoro"
         ),
@@ -76,7 +77,10 @@ let package = Package(
         .testTarget(
             name: "AgentKokoroTests",
             dependencies: ["AgentKokoro"],
-            path: "Tests/AgentKokoroTests"
+            path: "Tests/AgentKokoroTests",
+            // kokoro/v1 golden vectors, manifest and small JSON files
+            // (Apache-2.0, from tools/kokoro-assets).
+            resources: [.copy("Resources/kokoro-v1")]
         ),
     ]
 )
