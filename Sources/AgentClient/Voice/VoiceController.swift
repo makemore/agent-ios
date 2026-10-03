@@ -186,6 +186,7 @@ public final class VoiceController: ObservableObject {
         turnSuppressed = false
         chunker.reset()
         recentSpokenText = ""
+        provider?.prepareForNewTurn()
     }
 
     /// Toggle speech on/off. Disabling stops any current playback.
@@ -209,6 +210,10 @@ public final class VoiceController: ObservableObject {
     private func enqueue(_ text: String) {
         guard !text.isEmpty, !turnFailed, !turnSuppressed else { return }
         queue.append(text)
+        // Announce every chunk as it is queued, in order and before it is
+        // spoken, so a provider that synthesises locally can work on it
+        // while earlier chunks play.
+        provider?.prefetch(text, options: TTSSpeakOptions(emotion: currentEmotion))
         if !isDraining { drain() }
     }
 

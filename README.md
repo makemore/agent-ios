@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.1.0` → add the **AgentFrontend** product to your app target.
+from `3.2.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.1.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.2.0"),
 ],
 targets: [
     .target(
@@ -174,6 +174,167 @@ will not match ElevenLabs quality. Speech input also has a `speechInputPolicy`;
 protected mode defaults to on-device recognition and disables the mic when the
 OS cannot provide it.
 
+### On-device neural voice (Kokoro)
+
+The optional **`AgentKokoro`** product adds [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
+v1.0, a small neural TTS model that sounds far more natural than the system
+voice and runs entirely on the device. Assistant text never leaves the phone,
+so it is suitable for Protected AI Mode; the only network traffic is the
+one-time download of the model files. It is opt-in: nothing changes until the
+host registers it.
+
+The engine is Microsoft [ONNX Runtime](https://onnxruntime.ai) (full build, CPU)
+running the Kokoro model, with our own English text-to-phoneme front end:
+number/date/money normalisation, the misaki dictionaries, and a small BART
+model (also ONNX) for words the dictionaries do not know. There is no
+espeak-ng, sherpa-onnx or `phonemizer` anywhere. The front end follows the
+cross-platform spec in the meta-repo, `tools/kokoro-assets/README.md`, and
+passes all of its golden vectors, so the same text produces the same phonemes,
+and the same voice id the same voice, on iOS, Android and the web widget.
+iOS 16+ (the package's minimum); ONNX Runtime's Swift package requires
+macOS 14, so the package's macOS minimum is 14.
+
+Add the product next to `AgentFrontend` (or `AgentClient`):
+
+```swift
+.product(name: "AgentKokoro", package: "agent-ios"),
+```
+
+**Use it as the widget's on-device voice.** Register once at launch. From then
+on, whenever the library resolves on-device speech (`.localOnly`, Protected AI
+Mode, or `.automatic` without a voice proxy) it speaks with Kokoro instead of
+`AVSpeechSynthesizer`. Policies are unchanged: `.disabled` still means no voice,
+and a configured remote voice proxy still wins under `.automatic`/`.remote`.
+
+```swift
+import AgentKokoro
+
+KokoroTTS.register()                 // e.g. in your App's init; engine id "kokoro"
+
+var config = ChatWidgetConfig(backendUrl: "...", agentKey: "...")
+config.enableTTS = true
+config.ttsProviderPolicy = .localOnly
+config.voiceId = "bf_emma"           // any Kokoro voice id; default "af_heart"
+```
+
+**Or build the controller yourself** and inject it:
+
+```swift
+let provider = KokoroTTSProvider(configuration: KokoroConfiguration(voice: "am_michael", speed: 1.1))
+let voice = VoiceController(provider: provider)
+ChatWidgetView(viewModel: viewModel, config: config, voiceController: voice)
+```
+
+**Configuration.** `KokoroConfiguration` has the same fields on every platform:
+`baseURL` (default `https://storage.googleapis.com/makemore-voice-models/kokoro/v1/`,
+our public copy of the asset set; point it at your own mirror of the same
+files), `voice` (default `"af_heart"`) and `speed` (default `1.0`, 0.5–2.0),
+plus `cacheDirectory`, `allowsCellularDownload` and `manifestSHA256`.
+**`allowsCellularDownload` is `false` by default**: the ~97 MB download only
+runs on Wi-Fi or wired networks (not cellular, a personal hotspot or Low Data
+Mode) unless the host opts in; until then Kokoro speaks with the system voice.
+
+**Download, verification and cache.** Nothing is bundled. The first time
+Kokoro is asked to speak without its files it starts a one-time download (that
+turn is spoken by the system voice). It fetches `manifest.json`, checks it
+against the SHA-256 pinned in the library, then fetches only what the voice
+needs and checks every file's size and SHA-256 against the manifest:
+
+| Download | Size |
+| --- | --- |
+| Model (`kokoro-v1.0-q8.onnx`) + vocab | 92.4 MB |
+| One voice pack | 0.52 MB |
+| One language's G2P (gzip dictionaries, BART model, vocab) + `voices.json` | 1.4–1.5 MB dictionaries + 3.1 MB model |
+| **Total, `en-us` voice (e.g. `af_heart`)** | **97.4 MB** (97,404,535 bytes + 21 KB manifest) |
+| **Total, `en-gb` voice (e.g. `bf_emma`)** | **97.5 MB** (97,498,865 bytes + 21 KB manifest) |
+
+The language comes from the voice id (`a*` = `en-us`, `b*` = `en-gb`); a second
+language or voice adds only its own files. Files are cached by SHA-256 in
+`Application Support/AgentKokoro` (excluded from iCloud backup). An interrupted
+download resumes with an HTTP range request; files already verified are never
+fetched again.
+
+```swift
+let model = KokoroTTS.modelManager           // or KokoroModelManager.shared
+model.state      // .notDownloaded / .downloading / .loading / .ready / .failed(KokoroModelError)
+model.onModelProgress = { p in print(p.fraction, p.bytesDownloaded, p.bytesTotal) }
+try await model.prepare()                    // download + verify + load, idempotent
+model.prefetch(voice: "bf_emma")             // the same in the background
+let voices = try await model.voices()        // id, name, language, gender, grade, suggested
+model.downloadedBytes                        // bytes on disk
+try model.deleteDownloadedModel()            // free the space; next use downloads again
+
+// Your own mirror, cellular allowed, no download on first use:
+KokoroTTS.register(configuration: KokoroConfiguration(
+    baseURL: URL(string: "https://cdn.example.com/kokoro/v1/")!,
+    allowsCellularDownload: true), autoDownload: false)
+```
+
+`state` and `progress` are `@Published`, so a SwiftUI view can observe the
+manager for a progress bar.
+
+**Behaviour.** Each chunk from `VoiceController` is turned into phonemes and
+synthesised on a background queue (never the main thread). Long text is cut
+into pieces at punctuation: the first piece is kept short so audio starts
+early, later pieces grow, and each piece's 24 kHz audio is scheduled on an
+`AVAudioPlayerNode` behind the previous one, so playback is gapless while the
+rest is synthesised. Chunks queued behind the one playing are synthesised ahead,
+and the model loads in the background when a turn starts. `stop()` silences
+audio immediately (generation stops after the current piece). Playback follows
+the same `AVAudioSession` rules as the other providers
+(`.playback`/`.spokenAudio`, leaves a hands-free session alone, never plays
+during Live voice). If the files are missing, the model fails to load, or a
+chunk fails, that turn is spoken by `AVSpeechTTSProvider` instead — the fallback
+stays for the rest of the turn so a reply never switches voice mid-way — and a
+content-free reason is logged and passed to `KokoroTTSProvider.onFallback`. Text
+in scripts the English voices cannot read (Chinese, Japanese, Korean) also uses
+the system voice.
+
+**Measuring.** `KokoroTTSProvider.onSpeechMetrics` reports, per utterance,
+`loadMs`, `firstAudioMs` (from `speak()` to the first buffer scheduled),
+`chunkCount`, `audioSeconds` and `synthSeconds` (`realTimeFactor` is their
+ratio); with `AGENT_LOG=voice` the same line is printed. In the iOS simulator
+on an Apple M5 Mac (debug build, Mac shared with other heavy jobs, so numbers
+varied): loading the model and the `en-us` G2P took 0.4–0.7 s; synthesis ran at
+1.8–2.6× real time; for a two-sentence reply whose first piece is two seconds
+of speech, the first audio was scheduled 0.8–1.3 s after `speak()` with the
+model loaded (1.2–1.7 s including the load), and a chunk prefetched while the
+previous one played started at once. It has not yet been measured on an
+iPhone.
+
+**Voices** (`KokoroVoice.all`, `KokoroTTS.voices`, `listVoices()`, or
+`voices()` from the asset set):
+
+| | Female | Male |
+|---|---|---|
+| American (`en-us`) | `af_heart` (default), `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky` | `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa` |
+| British (`en-gb`) | `bf_alice`, `bf_emma` (suggested), `bf_isabella`, `bf_lily` | `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis` |
+
+**Licences.** No GPL, AGPL or LGPL code or data is linked, bundled or
+downloaded.
+
+| Component | How it ships | Licence |
+| --- | --- | --- |
+| `AgentKokoro` sources, including our port of misaki's lexicon and hexgrad/kokoro's chunking | compiled into the app | Ours; the ported parts are Apache-2.0 (hexgrad), attributed in the source headers |
+| [onnxruntime-swift-package-manager](https://github.com/microsoft/onnxruntime-swift-package-manager) 1.24.2 (Objective-C bindings) | compiled into the app | MIT |
+| ONNX Runtime 1.24.2 `onnxruntime.xcframework` (pod archive `onnxruntime-c`, full build, static) | linked into the app | MIT. Third-party code inside, per its `ThirdPartyNotices.txt` and the symbols in the binary: ONNX (Apache-2.0), Protocol Buffers (BSD-3-Clause), Abseil (Apache-2.0), RE2 (BSD-3-Clause), FlatBuffers (Apache-2.0), nlohmann/json (MIT), Microsoft GSL (MIT), HowardHinnant/date (MIT), SafeInt (MIT), Boost.Mp11 (BSL-1.0), MLAS (MIT), XNNPACK (BSD-3-Clause), pthreadpool (BSD-2-Clause), cpuinfo (BSD-2-Clause), KleidiAI (Apache-2.0), coremltools protos/MILBlob/ModelPackage (BSD-3-Clause), MurmurHash3 (public domain), **Eigen (MPL-2.0, unmodified; approved by the owner)** |
+| `onnxruntime-extensions` 0.13.0 xcframework | downloaded by SwiftPM with the package; **not linked** (we do not use the `onnxruntime_extensions` product) | MIT (its notices list no GPL/LGPL code) |
+| kokoro/v1 asset set: Kokoro v1.0 q8 model, 28 voice packs, misaki dictionaries, our BART G2P export, vocab files | downloaded at runtime | Apache-2.0 (all 49 files; see the set's `NOTICE` and `manifest.json`) |
+| Golden test vectors, manifest, vocab and voices JSON in `Tests/AgentKokoroTests/Resources` | tests only | Apache-2.0 (from the asset set) |
+
+**No telemetry.** The pinned ONNX Runtime 1.24.2 Apple build has no telemetry
+provider and no network code: its telemetry hooks are no-ops on Apple
+platforms, and the binary references no sockets, `URLSession`, 1DS/OneCollector
+client or Microsoft endpoint. (ONNX Runtime added optional POSIX telemetry in
+1.29; `AgentKokoro` also sets `ORT_DISABLE_TELEMETRY=1`, unless the host set it,
+before creating its environment, so a future version bump stays silent.) The
+only network traffic is the asset download from `baseURL`.
+
+Apps that do not import `AgentKokoro` do not compile or link any of it, but
+SwiftPM still resolves the ONNX Runtime package and downloads its two binary
+archives (about 70 MB, cached) for every consumer of this package, as it
+already does for WhisperKit and WebRTC.
+
 ### Auth Strategies
 
 | Strategy    | Description                          |
@@ -229,12 +390,14 @@ let widget = AgentFrontend.createChatWidget(
 
 ## Two Products
 
-The package ships two library products:
+The package ships two library products, plus the optional `AgentKokoro`
+voice (see [On-device neural voice](#on-device-neural-voice-kokoro)):
 
 | Product | What it contains | Depends on |
 |---------|-----------------|------------|
 | **AgentClient** | Models, networking, SSE, configuration, storage | Foundation only |
 | **AgentFrontend** | SwiftUI chat widget + view layer | AgentClient |
+| **AgentKokoro** (optional) | On-device Kokoro neural voice (`KokoroTTSProvider`, G2P, model download/cache) | AgentClient, ONNX Runtime |
 
 Existing consumers that `import AgentFrontend` continue to work unchanged — AgentFrontend re-exports AgentClient's types transitively.
 
@@ -242,7 +405,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.1.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.2.0"),
 ],
 targets: [
     .target(
@@ -269,10 +432,39 @@ Sources/AgentFrontend/
 ├── AgentFrontend.swift          # Public API entry point
 ├── Utilities/                   # PlatformColors
 └── Views/                       # ChatWidgetView, MessageView, InputView, etc.
+
+Sources/AgentKokoro/             # Optional on-device Kokoro voice
+├── KokoroTTSProvider.swift      # TTSProvider: streaming, prefetch, fallback, metrics
+├── KokoroTTS.swift              # register() / makeProvider()
+├── KokoroVoice.swift            # Voice catalogue (Kokoro ids), languages
+├── Assets/                      # Configuration, manifest, download/verify/cache, state
+├── Engine/                      # ONNX Runtime sessions, chunking, AVAudioEngine playback
+└── G2P/                         # Normaliser, tokenizer, lexicon, G2P (spec port)
 ```
 
 
 ## Changelog
+
+### 3.2.0
+
+- **On-device neural voice (`AgentKokoro`, new optional product).** `KokoroTTSProvider` speaks with
+  Kokoro-82M v1.0 on ONNX Runtime 1.24.2 with our own English G2P (spec port; passes every kokoro/v1
+  golden vector), entirely on the device: pieces streamed gaplessly to `AVAudioEngine`, chunks
+  prefetched while earlier ones play, model loaded at turn start, prompt cancel,
+  `AudioSessionCoordinator` respected. `KokoroModelManager` downloads only what a voice needs
+  (97.4 MB for `en-us`, 97.5 MB for `en-gb`) from a configurable base URL (default: our public
+  kokoro/v1 bucket), pins the manifest's SHA-256, verifies every file, resumes interrupted downloads,
+  caches by SHA-256 and can delete it; `prepare()`, `onModelProgress`, `voices()`. On any failure or
+  while files are missing, the turn falls back to `AVSpeechTTSProvider` with a content-free reason.
+  `onSpeechMetrics` reports load time, time to first audio and real-time factor. 28 English voices
+  with Kokoro ids. `KokoroTTS.register()` makes Kokoro the voice whenever on-device speech is
+  resolved. No GPL/AGPL/LGPL code or data; see [On-device neural voice](#on-device-neural-voice-kokoro).
+- **macOS minimum is now 14** (package-wide; required by ONNX Runtime's Swift package). iOS stays 16.
+- `VoiceFactory.onDeviceProviderFactory`: optional hook that replaces the system voice used for
+  `.localOnly`, Protected AI Mode and proxy-less `.automatic`. `nil` (default) keeps `AVSpeechTTSProvider`.
+- `TTSProvider` gains two optional members with no-op defaults (existing providers compile unchanged):
+  `prepareForNewTurn()`, called by `VoiceController.reset()`, and `prefetch(_:options:)`, called for
+  every chunk as `VoiceController` queues it.
 
 ### 3.1.0
 
