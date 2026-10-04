@@ -122,6 +122,20 @@ public final class KokoroTTSProvider: TTSProvider, @unchecked Sendable {
                   engineHost: modelManager.engineHost, output: AVAudioEngineOutput())
     }
 
+    /// Like ``init(configuration:modelManager:fallback:autoDownload:)``, but
+    /// the audio goes to `output` instead of this device's speaker.
+    /// Pass `fallback: nil` when the fallback voice would play somewhere
+    /// else than `output` does.
+    public convenience init(configuration: KokoroConfiguration = KokoroConfiguration(),
+                            modelManager: KokoroModelManager = .shared,
+                            fallback: TTSProvider?,
+                            autoDownload: Bool = true,
+                            output: KokoroAudioOutput) {
+        self.init(voice: KokoroVoice(id: configuration.voice) ?? .defaultVoice, speed: configuration.speed,
+                  modelManager: modelManager, fallback: fallback, autoDownload: autoDownload,
+                  engineHost: modelManager.engineHost, output: output)
+    }
+
     init(voice: KokoroVoice, speed: Float, modelManager: KokoroModelManager, fallback: TTSProvider?,
          autoDownload: Bool, engineHost: KokoroEngineHost, output: KokoroAudioOutput) {
         self.voice = voice
@@ -317,8 +331,10 @@ public final class KokoroTTSProvider: TTSProvider, @unchecked Sendable {
         let sampleRate = try await task.awaitSampleRate()
         if job.isCancelled { throw CancellationError() }
 
-        await MainActor.run { Self.configurePlaybackSession() }
-        if job.isCancelled { throw CancellationError() }
+        if output.usesDeviceAudioSession {
+            await MainActor.run { Self.configurePlaybackSession() }
+            if job.isCancelled { throw CancellationError() }
+        }
         do {
             try output.begin(sampleRate: sampleRate)
         } catch {

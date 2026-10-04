@@ -1,9 +1,16 @@
 import Foundation
 import AVFoundation
 
-/// Plays a stream of mono float PCM for one utterance at a time.
-/// Internal seam: tests substitute a fake that records what it was given.
-protocol KokoroAudioOutput: AnyObject {
+/// Where ``KokoroTTSProvider`` sends a stream of mono float PCM, one
+/// utterance at a time. The default plays on this device's speaker; a host
+/// can supply its own (``KokoroTTSProvider/init(configuration:modelManager:fallback:autoDownload:output:)``)
+/// to send the audio elsewhere, e.g. to a paired Apple Watch. Tests
+/// substitute a fake that records what it was given.
+public protocol KokoroAudioOutput: AnyObject {
+    /// Whether this output plays through this device's audio session.
+    /// When false, the provider leaves the session alone (no `.playback`
+    /// category, no ducking of other audio). Defaults to true.
+    var usesDeviceAudioSession: Bool { get }
     /// Prepares for a new utterance at `sampleRate`. Throws if the audio
     /// hardware cannot be started.
     func begin(sampleRate: Int) throws
@@ -15,6 +22,10 @@ protocol KokoroAudioOutput: AnyObject {
     /// Stops playback immediately and drops anything queued. Any thread;
     /// safe to call repeatedly.
     func stop()
+}
+
+public extension KokoroAudioOutput {
+    var usesDeviceAudioSession: Bool { true }
 }
 
 /// ``KokoroAudioOutput`` on `AVAudioEngine` + `AVAudioPlayerNode`: 24 kHz
