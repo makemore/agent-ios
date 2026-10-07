@@ -149,3 +149,21 @@ public struct TaskProgress: Codable {
     }
 }
 
+
+/// What an agent's runs may use (`GET runs/features/?agent_key=`).
+public struct AgentFeatures: Codable, Equatable, Sendable {
+    public let agentKey: String
+    /// The agent has web access and the host allows it. The per-chat "Web" switch is shown
+    /// only then; turning it off sends `params["web_search"] = false`.
+    public let webAccess: Bool
+
+    public init(agentKey: String, webAccess: Bool) {
+        self.agentKey = agentKey
+        self.webAccess = webAccess
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case agentKey = "agent_key"
+        case webAccess = "web_access"
+    }
+}

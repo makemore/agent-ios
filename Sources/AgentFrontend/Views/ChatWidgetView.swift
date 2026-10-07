@@ -460,7 +460,8 @@ public struct ChatWidgetView: View {
     private func loadModelsAndSystemsInParallel() async {
         async let systems: Void = viewModel.loadSystems()
         async let models: Void = viewModel.loadModels()
-        _ = await (systems, models)
+        async let features: Void = viewModel.loadAgentFeatures()
+        _ = await (systems, models, features)
     }
 
     /// Default action router for ``BlockAction`` taps inside any

@@ -196,6 +196,26 @@ extension APIClient {
         return try await getRun(path: "\(config.apiPaths.runs)by-idempotency-key/?\(query.percentEncodedQuery ?? "")")
     }
 
+    /// What this agent's runs may use, from the runtime's `runs/features/` endpoint.
+    /// `webAccess` is the agent's web access setting and the host's policy together
+    /// (agent_runtime_core.web_access); the "Web" switch is offered only when it is true.
+    public func loadAgentFeatures(agentKey: String) async throws -> AgentFeatures {
+        var query = URLComponents()
+        query.queryItems = [URLQueryItem(name: "agent_key", value: agentKey)]
+        let generation = authenticationGeneration
+        let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
+        let request = buildRequest(path: "\(config.apiPaths.runs)features/?\(query.percentEncodedQuery ?? "")",
+                                   method: "GET", token: token)
+        let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
+        if http.statusCode == 404 { throw APIError.notFound }
+        guard http.statusCode == 200 else { throw APIError.httpError(statusCode: http.statusCode) }
+        return try JSONDecoder().decode(AgentFeatures.self, from: data)
+    }
+
     private func getRun(path: String) async throws -> AgentRun {
         let generation = authenticationGeneration
         let token = try await getOrCreateSession()

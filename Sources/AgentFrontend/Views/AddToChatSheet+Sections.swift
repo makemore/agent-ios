@@ -99,8 +99,11 @@ extension AddToChatSheet {
     var togglesCard: some View {
         VStack(spacing: 0) {
             toggleRow(systemImage: "scope", label: "Research", isOn: researchBinding)
-            rowDivider
-            toggleRow(systemImage: "globe", label: "Web search", isOn: webSearchBinding)
+            // Only for agents that can use the web (their setting and the host's policy).
+            if viewModel?.webAccessAvailable == true {
+                rowDivider
+                toggleRow(systemImage: "globe", label: "Web", isOn: webSearchBinding)
+            }
         }
         .background(config.appearance.surface)
         .clipShape(RoundedRectangle(cornerRadius: 14))

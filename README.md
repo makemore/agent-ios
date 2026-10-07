@@ -445,6 +445,14 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 ## Changelog
 
+### Unreleased
+
+- **Web access.** `ChatViewModel.webAccessAvailable` comes from the runtime's new
+  `GET runs/features/?agent_key=` (`APIClient.loadAgentFeatures`, `AgentFeatures`): the agent's own
+  web access setting and the host's policy (agent_runtime_core.web_access). The Add to chat "Web"
+  switch (was "Web search") shows only when it is true and is reloaded when the agent changes;
+  turning it off still sends `params["web_search"] = false`.
+
 ### 3.2.0
 
 - **On-device neural voice (`AgentKokoro`, new optional product).** `KokoroTTSProvider` speaks with

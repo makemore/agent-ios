@@ -205,9 +205,14 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
-    /// "Web search" toggle. Surfaced as `params["web_search"]: Bool`.
-    /// Defaults to true \u2014 matches the AddToChatSheet's prior visible
-    /// state and is a no-op when no web-search tool is configured.
+    /// Whether the current agent can use the web: its own web access setting and the
+    /// host's policy (`APIClient.loadAgentFeatures`). The "Web" switch is shown only when
+    /// true. False until the answer arrives, and stays false for hosts without the endpoint.
+    @Published public private(set) var webAccessAvailable: Bool = false
+
+    /// The person's per-chat "Web" switch. Surfaced as `params["web_search"] = false`
+    /// when turned off (agent_runtime_core.web_access); on by default, so an agent with
+    /// web access uses it unless the person opts out.
     @Published public var webSearchEnabled: Bool = true {
         didSet {
             guard oldValue != webSearchEnabled else { return }
@@ -1356,6 +1361,22 @@ public class ChatViewModel: ObservableObject {
         return config.agentKey
     }
 
+    /// Ask the runtime what the current agent's runs may use (today: web access). Safe to
+    /// call repeatedly; call again when the agent changes (`selectSystem`). Failures leave
+    /// the switch hidden.
+    public func loadAgentFeatures() async {
+        let key = effectiveAgentKey
+        do {
+            let features = try await apiClient.loadAgentFeatures(agentKey: key)
+            guard key == effectiveAgentKey else { return }  // The agent changed meanwhile.
+            webAccessAvailable = features.webAccess
+        } catch {
+            guard key == effectiveAgentKey else { return }
+            webAccessAvailable = false
+            AgentLog.error("[ChatVM] Failed to load agent features: \(error)")
+        }
+    }
+
     /// Load available systems from the backend
     public func loadSystems() async {
         isLoadingSystems = true
@@ -1391,7 +1412,14 @@ public class ChatViewModel: ObservableObject {
         // If the system changed, clear the conversation so the new agent key takes effect
         if previousSlug != system.slug {
             clearMessages()
+            refreshAgentFeatures()
         }
+    }
+
+    /// The agent changed: hide its "Web" switch until the new agent's features arrive.
+    private func refreshAgentFeatures() {
+        webAccessAvailable = false
+        Task { await loadAgentFeatures() }
     }
 
     /// Select a specific version of the current system
@@ -1412,6 +1440,7 @@ public class ChatViewModel: ObservableObject {
         storage.set(config.systemKey, value: nil)
         storage.set(config.systemVersionKey, value: nil)
         storage.set(config.systemVersionIdKey, value: nil)
+        refreshAgentFeatures()
     }
 
     // MARK: - Model picker
