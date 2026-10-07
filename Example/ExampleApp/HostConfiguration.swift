@@ -53,11 +53,10 @@ struct HostConfiguration: Hashable {
         return (env["AUTO_SEND_PROMPT"] ?? "").isEmpty == false
     }
 
-    /// Default DRF token baked into the launcher so a fresh sim run can
-    /// hit the local Django backend without copy-paste. Override at any
-    /// time by editing the field in the launcher (the new value is
-    /// persisted in `@AppStorage`).
-    static let defaultAuthToken = "72be8261e1cf35dd3d7ae39c8f9b5268095113ab"
+    /// The launcher's starting token for the real-backend scenarios: empty, so no
+    /// credential lives in the repository. Paste your local backend's DRF token in
+    /// the launcher (persisted in `@AppStorage`) or set AGENT_TOKEN in the scheme.
+    static let defaultAuthToken = ""
 
     /// URL the launcher's stub-fixture scenarios point at. Reads
     /// `STUB_SERVER_URL` from the active Xcode scheme, falling back to
