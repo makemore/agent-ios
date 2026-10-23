@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.3.0` → add the **AgentFrontend** product to your app target.
+from `3.4.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.3.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.4.0"),
 ],
 targets: [
     .target(
@@ -415,7 +415,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.3.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.4.0"),
 ],
 targets: [
     .target(
@@ -455,8 +455,12 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 ## Changelog
 
-### Unreleased
+### 3.4.0
 
+- **`LiveVoiceSession.delegations`** counts the times a live call handed work to the agent
+  (`session.delegation.created` on the data channel, sent by voice servers that share it, such as
+  Studio's). The work is an ordinary run in the call's conversation, so a host can follow it and show
+  the agent's steps on the call screen. Additive.
 - **Web access.** `ChatViewModel.webAccessAvailable` comes from the runtime's new
   `GET runs/features/?agent_key=` (`APIClient.loadAgentFeatures`, `AgentFeatures`): the agent's own
   web access setting and the host's policy (agent_runtime_core.web_access). The Add to chat "Web"

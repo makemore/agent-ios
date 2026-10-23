@@ -17,6 +17,10 @@ public final class LiveVoiceSession: ObservableObject {
     @Published public private(set) var outputLevel: Double = 0
     @Published public private(set) var captions: [LiveVoiceCaption] = []
     @Published public private(set) var conversationId: String?
+    /// How many times this call has handed work to the agent (`session.delegation.created`, sent to the
+    /// caller's app by voice servers that share it; GPT-Live keeps it on the sideband). The agent's work
+    /// is an ordinary run in the call's conversation: a host can follow it to show what the agent is doing.
+    @Published public private(set) var delegations = 0
     @Published public private(set) var usageSeconds: Double?
     /// Usage acknowledgment alone does not confirm server history persistence.
     @Published public private(set) var finalUsageConfirmed = false
@@ -99,6 +103,7 @@ public final class LiveVoiceSession: ObservableObject {
         pendingMuteId = nil
         providerSessionId = nil
         captions = []
+        delegations = 0
         usageSeconds = nil
         finalUsageConfirmed = false
         finalizationIncomplete = false
@@ -202,6 +207,9 @@ public final class LiveVoiceSession: ObservableObject {
             captions.append(LiveVoiceCaption(id: UUID(), speaker: type == "session.input_transcript.delta" ? .user : .assistant,
                                             delta: delta, startMilliseconds: event["start_ms"] as? Double,
                                             endMilliseconds: event["end_ms"] as? Double))
+        case "session.delegation.created":
+            guard state == .active else { return }
+            delegations += 1
         case "session.usage.updated": readUsage(event)
         case "session.input_audio.muted", "session.input_audio.unmuted":
             guard state == .active, let id = event["client_event_id"] as? String, id == pendingMuteId,
