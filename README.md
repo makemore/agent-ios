@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.2.0` → add the **AgentFrontend** product to your app target.
+from `3.4.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.2.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.4.0"),
 ],
 targets: [
     .target(
@@ -225,6 +225,16 @@ let voice = VoiceController(provider: provider)
 ChatWidgetView(viewModel: viewModel, config: config, voiceController: voice)
 ```
 
+**Or send the audio somewhere else** (e.g. a paired Apple Watch): implement
+`KokoroAudioOutput` and pass it in. Return `false` from `usesDeviceAudioSession`
+so the provider leaves this device's audio session alone, and pass a fallback
+that does not play here (or `nil`, to get `KokoroTTSError.unavailable` instead):
+
+```swift
+let provider = KokoroTTSProvider(configuration: KokoroConfiguration(voice: "af_heart"),
+                                 fallback: nil, autoDownload: false, output: myWatchSender)
+```
+
 **Configuration.** `KokoroConfiguration` has the same fields on every platform:
 `baseURL` (default `https://storage.googleapis.com/makemore-voice-models/kokoro/v1/`,
 our public copy of the asset set; point it at your own mirror of the same
@@ -405,7 +415,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.2.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.4.0"),
 ],
 targets: [
     .target(
@@ -445,13 +455,25 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 ## Changelog
 
-### Unreleased
+### 3.4.0
 
+- **`LiveVoiceSession.delegations`** counts the times a live call handed work to the agent
+  (`session.delegation.created` on the data channel, sent by voice servers that share it, such as
+  Studio's). The work is an ordinary run in the call's conversation, so a host can follow it and show
+  the agent's steps on the call screen. Additive.
 - **Web access.** `ChatViewModel.webAccessAvailable` comes from the runtime's new
   `GET runs/features/?agent_key=` (`APIClient.loadAgentFeatures`, `AgentFeatures`): the agent's own
   web access setting and the host's policy (agent_runtime_core.web_access). The Add to chat "Web"
   switch (was "Web search") shows only when it is true and is reloaded when the agent changes;
   turning it off still sends `params["web_search"] = false`.
+
+### 3.3.0
+
+- **`KokoroAudioOutput` is public**, with a `KokoroTTSProvider` initialiser that takes one: a host
+  can send Kokoro's 24 kHz mono float audio somewhere other than this device's speaker (Studio
+  streams it to a paired Apple Watch). New requirement `usesDeviceAudioSession` (default `true`);
+  when `false` the provider does not configure or activate the device's audio session.
+  Additive; existing code is unchanged.
 
 ### 3.2.0
 

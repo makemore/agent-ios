@@ -38,6 +38,37 @@ final class KokoroTTSProviderTests: XCTestCase {
 
     // MARK: - Speaking
 
+    func testHostOutputGetsTheAudioThroughThePublicInitialiser() async throws {
+        let loader = FakeEngineLoader()
+        let (manager, dir) = try await KokoroTestSupport.installedManager(loader: loader)
+        directories.append(dir)
+        let output = FakeOutput()
+        output.usesDeviceAudioSession = false
+        let provider = KokoroTTSProvider(modelManager: manager, fallback: nil, autoDownload: false, output: output)
+
+        try await provider.speak("Sent to the watch.")
+
+        XCTAssertEqual(loader.engine.calls.map(\.text), ["Sent to the watch."])
+        XCTAssertEqual(output.utterances, [[Float](repeating: 0, count: 240) + [Float](repeating: 1, count: 240)])
+    }
+
+    func testHostOutputWithoutTheModelFailsInsteadOfPlayingHere() async throws {
+        let dir = KokoroTestSupport.temporaryDirectory()
+        directories.append(dir)
+        let manager = KokoroTestSupport.manager(directory: dir, fetcher: FakeFetcher(contents: KokoroTestSupport.served()))
+        let output = FakeOutput()
+        output.usesDeviceAudioSession = false
+        let provider = KokoroTTSProvider(modelManager: manager, fallback: nil, autoDownload: false, output: output)
+
+        do {
+            try await provider.speak("Nothing to say it with.")
+            XCTFail("expected the provider to report the missing model")
+        } catch KokoroTTSError.unavailable(let reason) {
+            XCTAssertEqual(reason, .modelNotDownloaded)
+        }
+        XCTAssertTrue(output.utterances.isEmpty)
+    }
+
     func testSpeaksChunksInOrderWithKokoro() async throws {
         let loader = FakeEngineLoader()
         let output = FakeOutput()

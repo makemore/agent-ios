@@ -103,6 +103,22 @@ final class LiveVoiceTests: XCTestCase {
         peer.message(["type": "session.closed"])
     }
 
+    func testDelegationsCountHandoversDuringTheCallOnly() async throws {
+        let signaling = LiveSignalingMock(), peer = LivePeerMock()
+        let session = model(signaling, peer)
+        try await connect(session, peer)
+        XCTAssertEqual(session.delegations, 0)
+        let handover: [String: Any] = ["type": "session.delegation.created", "offset_ms": 1200,
+                                       "delegation": ["id": "del_1", "type": "delegation", "target": "client"]]
+        peer.message(handover)
+        peer.message(handover)
+        XCTAssertEqual(session.delegations, 2)
+        session.end()
+        peer.message(handover)
+        XCTAssertEqual(session.delegations, 2, "Nothing is handed over once the call is ending")
+        peer.message(["type": "session.closed"])
+    }
+
     func testEndBeforePermissionDoesNotActivateMicrophone() async throws {
         let gate = LiveGate<Bool>()
         let signaling = LiveSignalingMock(), peer = LivePeerMock()

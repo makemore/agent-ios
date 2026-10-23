@@ -99,6 +99,8 @@ final class FakeOutput: KokoroAudioOutput, @unchecked Sendable {
     /// Hold `finish()` open until `stop()` — simulates long playback.
     var holdPlayback = false
     var failBegin = false
+    /// False for an output that plays somewhere else (a host's own sink).
+    var usesDeviceAudioSession = true
     let playbackStarted = DispatchSemaphore(value: 0)
 
     /// Samples enqueued per utterance, in order.
