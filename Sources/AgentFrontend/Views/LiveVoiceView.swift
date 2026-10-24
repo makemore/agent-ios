@@ -3,6 +3,9 @@ import SwiftUI
 
 /// Full-screen native voice UI. The host makes chat inactive before presenting
 /// this view and uses onEnd to dismiss/reload the resulting conversation.
+/// An optional appearance supplies surface, text and accent colors, including
+/// the audio orb. Nil preserves the original dark look; themed hosts own the
+/// color scheme. Chat layout and typography tokens are not used here.
 @MainActor
 public struct LiveVoiceView: View {
     @StateObject private var session: LiveVoiceSession
@@ -15,17 +18,20 @@ public struct LiveVoiceView: View {
     private let onEnd: (String?) -> Void
     private let endsOnBackground: Bool
     private let endsOnDisappear: Bool
+    private let appearance: ChatAppearance?
     /// Optional authoritative host/sideband activity, never inferred from text
     /// or silence. Kept separate from listening and measured audio output.
     private let backendActivity: String?
 
     public init(apiClient: APIClient, conversationId: String? = nil,
                 backendActivity: String? = nil, endsOnBackground: Bool = true,
-                endsOnDisappear: Bool = true, onEnd: @escaping (String?) -> Void) {
+                endsOnDisappear: Bool = true, appearance: ChatAppearance? = nil,
+                onEnd: @escaping (String?) -> Void) {
         _session = StateObject(wrappedValue: LiveVoiceSession(apiClient: apiClient, conversationId: conversationId))
         self.backendActivity = backendActivity
         self.endsOnBackground = endsOnBackground
         self.endsOnDisappear = endsOnDisappear
+        self.appearance = appearance
         self.onEnd = onEnd
     }
 
@@ -33,20 +39,26 @@ public struct LiveVoiceView: View {
     /// screen, owns an incoming call. Presentation never starts the session.
     public init(session: LiveVoiceSession, backendActivity: String? = nil,
                 endsOnBackground: Bool = true, endsOnDisappear: Bool = true,
+                appearance: ChatAppearance? = nil,
                 onEnd: @escaping (String?) -> Void) {
         _session = StateObject(wrappedValue: session)
         self.backendActivity = backendActivity
         self.endsOnBackground = endsOnBackground
         self.endsOnDisappear = endsOnDisappear
+        self.appearance = appearance
         self.onEnd = onEnd
     }
 
     public var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(red: 0.025, green: 0.035, blue: 0.10),
-                                    Color(red: 0.08, green: 0.045, blue: 0.19)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                .ignoresSafeArea()
+            if let appearance {
+                appearance.background.ignoresSafeArea()
+            } else {
+                LinearGradient(colors: [Color(red: 0.025, green: 0.035, blue: 0.10),
+                                        Color(red: 0.08, green: 0.045, blue: 0.19)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .ignoresSafeArea()
+            }
             ScrollView {
                 VStack(spacing: 24) {
                     Text("Kinto Live")
@@ -54,8 +66,8 @@ public struct LiveVoiceView: View {
                         .accessibilityAddTraits(.isHeader)
                     Text("An AI conversation, at your pace")
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.75))
-                    LiveAudioOrb(level: session.outputLevel, reduceMotion: reduceMotion,
+                        .foregroundStyle(appearance?.textSecondary ?? .white.opacity(0.75))
+                    LiveAudioOrb(level: session.outputLevel, reduceMotion: reduceMotion, appearance: appearance,
                                  diameter: canStart ? 160 : 230)
                         .padding(.vertical, canStart ? 12 : 20)
                         .accessibilityHidden(true)
@@ -63,16 +75,16 @@ public struct LiveVoiceView: View {
                     if session.finalizationIncomplete {
                         Text("Audio has stopped. Conversation history may be incomplete because server finalization could not be confirmed.")
                             .font(.footnote)
-                            .foregroundStyle(.yellow)
+                            .foregroundStyle(appearance?.textPrimary ?? .yellow)
                     }
                     if canStart {
                         Text("You’re talking with an AI, not a person. Audio goes directly to OpenAI over an encrypted connection. Kinto saves text transcripts to your conversation. OpenAI also sends audio copies to Kinto’s control connection; Kinto discards these without recording them.")
                             .font(.callout)
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(appearance?.textSecondary ?? .white.opacity(0.85))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Toggle("Show captions", isOn: $showsCaptions)
-                        .tint(.purple)
+                        .tint(appearance?.accent ?? .purple)
                         .frame(minHeight: 48)
                     if showsCaptions { captions }
                 }
@@ -89,11 +101,11 @@ public struct LiveVoiceView: View {
                     .padding(.vertical, 12)
                     .frame(maxWidth: 560)
                     .frame(maxWidth: .infinity)
-                    .background(Color(red: 0.055, green: 0.04, blue: 0.15))
+                    .background(appearance?.surface ?? Color(red: 0.055, green: 0.04, blue: 0.15))
             }
         }
-        .foregroundStyle(.white)
-        .preferredColorScheme(.dark)
+        .foregroundStyle(appearance?.textPrimary ?? .white)
+        .preferredColorScheme(appearance == nil ? .dark : nil)
         .interactiveDismissDisabled(session.state == .ending || session.finalizationIncomplete)
         .alert("Conversation history may be incomplete", isPresented: $showsFinalizationWarning) {
             Button("Return to chat") { notifyEnd() }
@@ -135,16 +147,18 @@ public struct LiveVoiceView: View {
             if session.state == .active {
                 Label(session.isSpeaking ? "AI speaking" : "Connected",
                       systemImage: session.isSpeaking ? "waveform" : "checkmark.circle")
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(appearance?.textSecondary ?? .white.opacity(0.8))
                 if session.acknowledgedMuted == nil && session.isMuted {
                     Text("Muted on this device • waiting for confirmation").font(.caption)
                 }
                 if let backendActivity {
-                    Text(backendActivity).font(.subheadline).foregroundStyle(.white.opacity(0.75))
+                    Text(backendActivity).font(.subheadline)
+                        .foregroundStyle(appearance?.textSecondary ?? .white.opacity(0.75))
                 }
             }
             if case .failed(let message) = session.state {
-                Text(message).font(.callout).foregroundStyle(.white.opacity(0.8))
+                Text(message).font(.callout)
+                    .foregroundStyle(appearance?.textSecondary ?? .white.opacity(0.8))
             }
         }
         .frame(maxWidth: .infinity, minHeight: 80)
@@ -160,7 +174,8 @@ public struct LiveVoiceView: View {
                         .frame(maxWidth: .infinity, minHeight: 56)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.indigo)
+                .tint(appearance?.accent ?? .indigo)
+                .foregroundStyle(appearance?.textOnAccent ?? .white)
                 .accessibilityHint("Requests microphone permission and connects to the AI voice service")
 
                 Button(action: endFromButton) {
@@ -168,7 +183,7 @@ public struct LiveVoiceView: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.bordered)
-                .tint(.white.opacity(0.75))
+                .tint(appearance?.textSecondary ?? .white.opacity(0.75))
                 .accessibilityHint("Returns to chat without starting live voice")
             } else {
                 HStack(spacing: 16) {
@@ -178,6 +193,7 @@ public struct LiveVoiceView: View {
                                 .frame(maxWidth: .infinity, minHeight: 56)
                         }
                         .buttonStyle(.bordered)
+                        .tint(appearance?.accent)
                         .accessibilityValue(session.isMuted ? "Microphone off" : "Microphone on")
                     }
                     Button(role: .destructive, action: endFromButton) {
@@ -186,6 +202,7 @@ public struct LiveVoiceView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Color(red: 0.72, green: 0.12, blue: 0.24))
+                    .foregroundStyle(.white)
                     .disabled(session.state == .ending)
                     .accessibilityHint("Immediately stops your microphone and AI audio")
                 }
@@ -208,12 +225,13 @@ public struct LiveVoiceView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
+        .background(appearance?.surface ?? .white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
     }
 
     private func captionLane(_ speaker: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(speaker).font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.65))
+            Text(speaker).font(.caption.weight(.semibold))
+                .foregroundStyle(appearance?.textSecondary ?? .white.opacity(0.65))
             Text(text.isEmpty ? "No captions yet" : text)
                 .font(.body)
                 .multilineTextAlignment(.leading)
@@ -252,27 +270,35 @@ public struct LiveVoiceView: View {
 private struct LiveAudioOrb: View {
     let level: Double
     let reduceMotion: Bool
+    let appearance: ChatAppearance?
     let diameter: CGFloat
     private var energy: Double { sqrt(max(0, min(1, level))) }
+
+    private var gradientColors: [Color] {
+        if let appearance {
+            return [appearance.surfaceElevated, appearance.accent, appearance.textPrimary]
+        }
+        return [Color(red: 0.52, green: 0.77, blue: 1), .blue, .indigo,
+                Color(red: 0.18, green: 0.04, blue: 0.4)]
+    }
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(Color.purple.opacity(0.22 + energy * 0.35))
+                .fill((appearance?.accent ?? .purple).opacity(0.22 + energy * 0.35))
                 .blur(radius: 28)
                 .scaleEffect(1.05)
             Circle()
-                .fill(RadialGradient(colors: [Color(red: 0.52, green: 0.77, blue: 1), .blue, .indigo,
-                                             Color(red: 0.18, green: 0.04, blue: 0.4)],
+                .fill(RadialGradient(colors: gradientColors,
                                      center: .topLeading, startRadius: 8, endRadius: 220))
             ZStack {
-                Ellipse().fill(.cyan.opacity(0.6)).frame(width: 200, height: 72).rotationEffect(.degrees(-35)).offset(y: -24)
-                Ellipse().fill(.purple.opacity(0.8)).frame(width: 245, height: 72).rotationEffect(.degrees(40)).offset(y: 40)
-                Circle().fill(.white.opacity(0.5)).frame(width: 65, height: 65).offset(x: -45, y: -60)
+                Ellipse().fill((appearance?.surfaceElevated ?? .cyan).opacity(0.6)).frame(width: 200, height: 72).rotationEffect(.degrees(-35)).offset(y: -24)
+                Ellipse().fill((appearance?.textPrimary ?? .purple).opacity(0.8)).frame(width: 245, height: 72).rotationEffect(.degrees(40)).offset(y: 40)
+                Circle().fill((appearance?.background ?? .white).opacity(0.5)).frame(width: 65, height: 65).offset(x: -45, y: -60)
             }
             .blur(radius: 20)
             .clipShape(Circle())
-            Circle().stroke(.white.opacity(0.25), lineWidth: 1)
+            Circle().stroke(appearance?.divider ?? .white.opacity(0.25), lineWidth: 1)
         }
         // Scale the entire reference artwork, including gradients, offsets and
         // blur, then report its actual size to the surrounding layout.
