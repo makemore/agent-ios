@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.4.0` → add the **AgentFrontend** product to your app target.
+from `3.5.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.4.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.5.0"),
 ],
 targets: [
     .target(
@@ -345,6 +345,37 @@ SwiftPM still resolves the ONNX Runtime package and downloads its two binary
 archives (about 70 MB, cached) for every consumer of this package, as it
 already does for WhisperKit and WebRTC.
 
+### Live calls as system calls (CallKit)
+
+`LiveVoiceCallKitController` (in `AgentClient`, iOS) makes a `LiveVoiceSession` a system call: it shows
+in iOS's call UI and on the lock screen, keeps talking when the app goes to the background, and takes
+mute and hang-up from the system or a headset. Ending the system call ends the session, and the session
+ending (the voice service hanging up, a failure) ends the system call. Keep one controller for the app
+(one CallKit provider), owned by something that outlives views:
+
+```swift
+let calls = LiveVoiceCallKitController()   // iOS names the provider after the app
+
+// In the foreground, from the person's tap (a system call never prompts):
+guard await LiveVoiceCallKitController.requestMicrophonePermission() else { return }
+let call = try await calls.startCall(handle: "agent:\(agentKey)", displayName: agentName,
+                                     signaling: mySignaling, conversationId: conversationId)
+// Show call.session (state, captions, levels). Mute and hang up through the controller so the
+// system call UI stays in step:
+calls.setMuted(true)
+calls.endCall()
+```
+
+`startCall` returns once CallKit has accepted the call and started the session (follow
+`call.session.state` for connection). It throws `LiveVoiceCallKitError`, whose messages are fixed text:
+`.busy`, `.microphonePermission`, `.audioBusy`, `.unentitled`, `.timedOut` and so on. `call` stays set
+while the session finalizes its history, then becomes nil and `onCallEnded` runs. The app needs the
+`audio` background mode (`UIBackgroundModes`); `voip` is only for incoming calls over PushKit. Calls are
+left out of the Phone app's Recents unless `Configuration(includesCallsInRecents: true)`. Elsewhere than
+iOS, `isSupported` is false and `startCall` throws `.unsupported`. Lower-level pieces for apps that run
+their own provider (for example incoming calls over PushKit): `LiveVoiceSystemCall` (one inert call,
+started only from an accepted CallKit action) and `LiveVoiceCallKitAudio` (system-call audio ownership).
+
 ### Auth Strategies
 
 | Strategy    | Description                          |
@@ -415,7 +446,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.4.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.5.0"),
 ],
 targets: [
     .target(
@@ -454,6 +485,19 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 
 ## Changelog
+
+### 3.5.0
+
+- **`LiveVoiceCallKitController`**: a Live call as a system call, for any app using
+  `LiveVoiceSession` (see [Live calls as system calls](#live-calls-as-system-calls-callkit)). One
+  controller owns the app's CallKit provider: `startCall` reports an outgoing call, CallKit's start
+  action prepares system-call audio (`LiveVoiceCallKitAudio`) and only then starts the session; the
+  system's mute and end buttons drive the session, and the session ending ends the system call. Calls
+  keep going in the background. Fixed-text errors (`LiveVoiceCallKitError`), start timeout, background
+  time while connecting and finalizing. Generalised from Kinto's app-level call service; additive.
+- **`LiveVoiceView(appearance:)`** (from Kinto, through `git subrepo push`): an optional
+  `ChatAppearance` themes the Live voice screen's surface, text, accent and orb. `nil` keeps the
+  original dark look. Additive.
 
 ### 3.4.0
 
