@@ -133,22 +133,32 @@ public struct APIMessage: Codable {
 public struct APIMessageMetadata: Codable {
     public var contentBlocks: [ContentBlock]?
     public var toolName: String?
+    /// A person's photos on a user message (ids at the host's `APIPaths.attachments`).
+    public var attachmentIds: [String]?
 
-    public init(contentBlocks: [ContentBlock]? = nil, toolName: String? = nil) {
+    public init(contentBlocks: [ContentBlock]? = nil, toolName: String? = nil, attachmentIds: [String]? = nil) {
         self.contentBlocks = contentBlocks
         self.toolName = toolName
+        self.attachmentIds = attachmentIds
     }
 
-    private enum CodingKeys: String, CodingKey { case contentBlocks, content_blocks, toolName, tool_name }
+    private enum CodingKeys: String, CodingKey {
+        case contentBlocks, content_blocks, toolName, tool_name, attachmentIds, attachment_ids
+    }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         contentBlocks = try c.decodeIfPresent([ContentBlock].self, forKey: .contentBlocks) ?? c.decodeIfPresent([ContentBlock].self, forKey: .content_blocks)
         toolName = try c.decodeIfPresent(String.self, forKey: .toolName) ?? c.decodeIfPresent(String.self, forKey: .tool_name)
+        // Ids only; anything else in the list is ignored rather than failing the history.
+        let ids = (try? c.decodeIfPresent([AnyCodable].self, forKey: .attachmentIds))
+            ?? (try? c.decodeIfPresent([AnyCodable].self, forKey: .attachment_ids))
+        attachmentIds = ids?.compactMap { $0.stringValue() }.filter { !$0.isEmpty }
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(contentBlocks, forKey: .contentBlocks)
         try c.encodeIfPresent(toolName, forKey: .toolName)
+        try c.encodeIfPresent(attachmentIds, forKey: .attachmentIds)
     }
 }
 

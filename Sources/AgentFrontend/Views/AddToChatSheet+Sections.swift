@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import AgentClient
 
 /// Sections + row primitives for `AddToChatSheet`. Split out so the
@@ -9,7 +10,7 @@ extension AddToChatSheet {
 
     var topTiles: some View {
         HStack(spacing: 12) {
-            cameraTile
+            if photosAllowed { cameraTile }
             recentsTile
         }
         .frame(height: 130)
@@ -82,6 +83,38 @@ extension AddToChatSheet {
 
     var rowsCard: some View {
         VStack(spacing: 0) {
+            if let onPickPhotos, photosAllowed {
+                PhotosPicker(selection: $photoSelection, maxSelectionCount: ChatViewModel.maxPhotosPerMessage,
+                             matching: .images) {
+                    HStack(spacing: 14) {
+                        rowIcon("photo.on.rectangle")
+                        Text("Photos")
+                            .font(.body)
+                            .foregroundColor(config.appearance.textPrimary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onChange(of: photoSelection) { items in
+                    guard !items.isEmpty else { return }
+                    photoSelection = []
+                    Task { @MainActor in
+                        var picked: [FileAttachment] = []
+                        for (index, item) in items.enumerated() {
+                            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+                            let type = PhotoPreparation.sniffType(data) ?? "image/jpeg"
+                            let ext = type == "image/heic" ? "heic" : String(type.dropFirst("image/".count))
+                            picked.append(FileAttachment(name: "photo-\(index + 1).\(ext)", size: data.count, type: type, data: data))
+                        }
+                        onPickPhotos(picked)
+                        dismiss()
+                    }
+                }
+                rowDivider
+            }
             actionRow(systemImage: "doc.badge.plus", label: "Add files") {
                 onAddFiles()
             }

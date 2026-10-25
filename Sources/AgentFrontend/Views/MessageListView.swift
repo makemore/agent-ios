@@ -86,6 +86,8 @@ public struct MessageListView: View {
     /// everything else to the host. Optional so the existing
     /// preview/harness call site keeps compiling.
     let onBlockAction: ((BlockAction) -> Void)?
+    /// Reads a photo kept by the host (`APIPaths.attachments`) for its thumbnail.
+    let loadAttachment: ((String) async -> Data?)?
 
     public init(
         messages: [Message],
@@ -101,8 +103,10 @@ public struct MessageListView: View {
         onCopy: (() -> Void)? = nil,
         activity: SubAgentActivityState = SubAgentActivityState(),
         agentIsSpeaking: Bool = false,
-        onBlockAction: ((BlockAction) -> Void)? = nil
+        onBlockAction: ((BlockAction) -> Void)? = nil,
+        loadAttachment: ((String) async -> Data?)? = nil
     ) {
+        self.loadAttachment = loadAttachment
         self.messages = messages
         self.isLoading = isLoading
         self.hasMoreMessages = hasMoreMessages
@@ -597,7 +601,8 @@ public struct MessageListView: View {
                 showAgentAvatar: config.showPresenceOrb,
                 agentAvatarSpeaking: agentIsSpeaking
                     && message.id == latestAssistantId,
-                onBlockAction: onBlockAction
+                onBlockAction: onBlockAction,
+                loadAttachment: loadAttachment
             )
             .id(message.id)
         }

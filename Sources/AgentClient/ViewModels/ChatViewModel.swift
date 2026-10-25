@@ -220,6 +220,20 @@ public class ChatViewModel: ObservableObject {
         }
     }
 
+    /// The host has no attachment storage (its first upload answered 503
+    /// `attachments_unavailable`): hide the photo buttons; chat keeps working.
+    @Published public private(set) var attachmentsUnavailable: Bool = false
+
+    /// Photos upload to the host when picked and go on the message as ids
+    /// (`APIPaths.attachments` set, and the host keeps attachments).
+    public var attachmentsEnabled: Bool { apiClient.attachmentsEnabled && !attachmentsUnavailable }
+
+    /// At most this many photos go on one message (the run API's limit).
+    public static let maxPhotosPerMessage = 4
+
+    /// Thumbnails already read this session, by attachment id.
+    private let attachmentCache = NSCache<NSString, NSData>()
+
     private static let responseStyleStorageKey = "chat_widget_response_style"
     private static let toolAccessStorageKey = "chat_widget_tool_access"
     private static let researchStorageKey = "chat_widget_research_enabled"
@@ -507,8 +521,12 @@ public class ChatViewModel: ObservableObject {
         supersedeUserMessageOrdinal: Int? = nil,
         hidden: Bool = false
     ) async {
+        // Photos already uploaded to the host travel as ids; a photo alone can be sent.
+        let photoIds = files.compactMap(\.attachmentId)
         guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration,
-              !lifecyclePaused, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isLoading else { return }
+              !lifecyclePaused, !isLoading,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !photoIds.isEmpty,
+              photoIds.count <= Self.maxPhotosPerMessage else { return }
         // Waiting and ambiguous acknowledgements remain owned by the original
         // send. A second tap must never silently start a second model/tool run.
         if pendingRun != nil { await reconcilePendingRun(); return }
@@ -548,6 +566,8 @@ public class ChatViewModel: ObservableObject {
             // In ephemeral mode send the full conversation history so the
             // server has complete context (it won't load from the DB).
             let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            var userTurn: [String: Any] = ["role": "user", "content": trimmedContent]
+            if !photoIds.isEmpty { userTurn["attachment_ids"] = photoIds }
             let apiMessages: [[String: Any]]
             if config.ephemeral {
                 var history: [[String: Any]] = messages
@@ -555,9 +575,9 @@ public class ChatViewModel: ObservableObject {
                     .map { ["role": $0.role.rawValue, "content": $0.content] }
                 // The visible tail duplicates trimmedContent unless hidden.
                 if !hidden { history.removeLast() }
-                apiMessages = history + [["role": "user", "content": trimmedContent]]
+                apiMessages = history + [userTurn]
             } else {
-                apiMessages = [["role": "user", "content": trimmedContent]]
+                apiMessages = [userTurn]
             }
 
             AgentLog.debug(.network, "[ChatVM] createRun sending conversationId=\(conversationId ?? "nil")")
@@ -658,6 +678,42 @@ public class ChatViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Photos (APIPaths.attachments)
+
+    /// Prepares a picked or taken photo (HEIC and large photos become a JPEG of at most
+    /// 4096 px) and uploads it to the host at once. Returns the attachment to send with
+    /// the next message (its `attachmentId` set). A 503 `attachments_unavailable` turns
+    /// ``attachmentsEnabled`` off for this chat.
+    public func uploadPhoto(
+        data: Data,
+        filename: String,
+        progress: ((Double) -> Void)? = nil
+    ) async throws -> FileAttachment {
+        guard apiClient.attachmentsEnabled, !attachmentsUnavailable else { throw AttachmentUploadError.unavailable }
+        guard let photo = PhotoPreparation.prepare(data: data, filename: filename) else {
+            throw AttachmentUploadError.rejected("That photo couldn't be read.")
+        }
+        do {
+            let uploaded = try await apiClient.uploadAttachment(
+                data: photo.data, filename: photo.filename, contentType: photo.contentType,
+                progress: progress.map { report in { value in Task { @MainActor in report(value) } } })
+            attachmentCache.setObject(photo.data as NSData, forKey: uploaded.id as NSString)
+            return FileAttachment(name: uploaded.name, size: uploaded.size, type: uploaded.contentType,
+                                  attachmentId: uploaded.id)
+        } catch AttachmentUploadError.unavailable {
+            attachmentsUnavailable = true
+            throw AttachmentUploadError.unavailable
+        }
+    }
+
+    /// A photo's bytes for its thumbnail (cached for the session), or nil when it can't be read.
+    public func attachmentData(id: String) async -> Data? {
+        if let cached = attachmentCache.object(forKey: id as NSString) { return cached as Data }
+        guard apiClient.attachmentsEnabled, let data = try? await apiClient.fetchAttachment(id: id) else { return nil }
+        attachmentCache.setObject(data as NSData, forKey: id as NSString)
+        return data
+    }
+
     /// Cancel the current run
     public func cancelRun() async {
         guard !invalidated, authenticationGeneration == apiClient.authenticationGeneration,
@@ -1652,9 +1708,10 @@ public class ChatViewModel: ObservableObject {
         // Truncate messages to just before this message
         messages = Array(messages.prefix(index))
 
-        // Send the edited message with supersede flag
+        // Send the edited message with supersede flag; its photos go again.
         await sendMessage(
             newContent,
+            files: (messageToEdit.files ?? []).filter { $0.attachmentId != nil },
             model: model,
             thinking: thinking,
             supersedeFromMessageIndex: index,
@@ -1694,9 +1751,10 @@ public class ChatViewModel: ObservableObject {
         // Truncate messages to just before the user message
         messages = Array(messages.prefix(userMessageIndex))
 
-        // Resend the same message with supersede flag
+        // Resend the same message with supersede flag; its photos go again.
         await sendMessage(
             userMessage.content,
+            files: (userMessage.files ?? []).filter { $0.attachmentId != nil },
             model: model,
             thinking: thinking,
             supersedeFromMessageIndex: userMessageIndex,
@@ -2667,9 +2725,13 @@ public class ChatViewModel: ObservableObject {
         // Skip empty assistant messages
         let content = m.content ?? ""
         var rows: [Message] = []
+        // A person's photos come back as metadata.attachment_ids.
+        let photos = m.role == "user" ? (m.metadata?.attachmentIds ?? []).map {
+            FileAttachment(id: "attachment-\($0)", name: "Photo", size: 0, type: "image/jpeg", attachmentId: $0)
+        } : []
         if m.role != "assistant" || !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             rows.append(Message(id: identity, role: MessageRole(rawValue: m.role) ?? .system,
-                                content: content, timestamp: timestamp))
+                                content: content, timestamp: timestamp, files: photos.isEmpty ? nil : photos))
         }
         if let blocks = m.metadata?.contentBlocks, !blocks.isEmpty {
             rows.append(Message(id: "\(identity)-blocks", role: .assistant, content: "",

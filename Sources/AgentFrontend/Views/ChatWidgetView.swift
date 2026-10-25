@@ -242,7 +242,9 @@ public struct ChatWidgetView: View {
                 agentIsSpeaking: voiceController.isSpeaking,
                 onBlockAction: { action in
                     handleBlockAction(action)
-                }
+                },
+                loadAttachment: viewModel.attachmentsEnabled || viewModel.attachmentsUnavailable
+                    ? { id in await viewModel.attachmentData(id: id) } : nil
             )
             .onChange(of: voiceController.isSpeaking) { speaking in
                 if !speaking { speakingMessageId = nil }

@@ -39,6 +39,8 @@ public struct MessageView: View {
     let agentAvatarSpeaking: Bool
 
     var onBlockAction: ((BlockAction) -> Void)?
+    /// Reads a photo kept by the host for its thumbnail; `nil` lists files by name only.
+    var loadAttachment: ((String) async -> Data?)? = nil
 
     private var isUser: Bool { message.role == .user }
     private var isSystem: Bool { message.role == .system }
@@ -399,8 +401,17 @@ public struct MessageView: View {
     
     @ViewBuilder
     private func fileAttachments(_ files: [FileAttachment]) -> some View {
+        let photos = files.filter { $0.attachmentId != nil || ($0.data != nil && $0.type.hasPrefix("image/")) }
+        let others = files.filter { file in !photos.contains { $0.id == file.id } }
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(files) { file in
+            if !photos.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(photos) { file in
+                        AttachmentThumbnail(file: file, load: loadAttachment)
+                    }
+                }
+            }
+            ForEach(others) { file in
                 HStack(spacing: 4) {
                     Image(systemName: "paperclip")
                         .font(.caption)

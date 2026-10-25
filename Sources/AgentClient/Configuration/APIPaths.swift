@@ -49,6 +49,13 @@ public struct APIPaths {
     /// Voice catalogue endpoint.
     public var voiceVoices: String?
 
+    /// A thread's attachments collection (Studio:
+    /// `/studio/api/workspace/threads/<id>/attachments/`, relative or absolute). When set, a
+    /// photo uploads here when it is picked (multipart `file`) and the message carries its id
+    /// (`attachment_ids`); history reads it from `{attachments}{id}/`. `nil` (the default):
+    /// photos stay on the phone, as before.
+    public var attachments: String?
+
     public init(
         anonymousSession: String = "/api/accounts/anonymous-session/",
         conversations: String = "/api/agent-runtime/conversations/",
@@ -64,7 +71,8 @@ public struct APIPaths {
         agents: String = "/api/agent-runtime/agents/",
         voiceToken: String? = "/api/agent-runtime/voice/token/",
         voiceTts: String? = "/api/agent-runtime/voice/tts/",
-        voiceVoices: String? = "/api/agent-runtime/voice/voices/"
+        voiceVoices: String? = "/api/agent-runtime/voice/voices/",
+        attachments: String? = nil
     ) {
         self.anonymousSession = anonymousSession
         self.conversations = conversations
@@ -81,6 +89,7 @@ public struct APIPaths {
         self.voiceToken = voiceToken
         self.voiceTts = voiceTts
         self.voiceVoices = voiceVoices
+        self.attachments = attachments
     }
     
     /// Get the run events URL with the run ID substituted
