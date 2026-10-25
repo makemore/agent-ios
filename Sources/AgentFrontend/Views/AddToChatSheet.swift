@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import AgentClient
 #if canImport(UIKit)
 import UIKit
@@ -24,6 +25,12 @@ struct AddToChatSheet: View {
     /// Invoked when the camera tile capture completes. Hosts append
     /// the returned image as a `FileAttachment` on the composer.
     let onCaptureImage: (PlatformImage) -> Void
+    /// Upload mode (`APIPaths.attachments`): photos picked from the library, as attachments
+    /// with their original bytes (HEIC included; the view model converts). `nil` hides the row.
+    var onPickPhotos: (([FileAttachment]) -> Void)? = nil
+    /// False once the host said it keeps no photos: the camera tile and photo row go away.
+    var photosAllowed: Bool = true
+    @State var photoSelection: [PhotosPickerItem] = []
 
     @Environment(\.dismiss) var dismiss
     @State var showCamera: Bool = false

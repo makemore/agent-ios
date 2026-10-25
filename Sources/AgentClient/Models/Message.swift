@@ -152,14 +152,18 @@ public struct FileAttachment: Identifiable, Equatable, Codable {
     public let type: String
     public var url: URL?
     public var data: Data?
-    
+    /// The host's id for this file once uploaded to `APIPaths.attachments`; a message
+    /// sends these as `attachment_ids`, and history rows carry them for thumbnails.
+    public var attachmentId: String?
+
     public init(
         id: String = UUID().uuidString,
         name: String,
         size: Int,
         type: String,
         url: URL? = nil,
-        data: Data? = nil
+        data: Data? = nil,
+        attachmentId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -167,6 +171,7 @@ public struct FileAttachment: Identifiable, Equatable, Codable {
         self.type = type
         self.url = url
         self.data = data
+        self.attachmentId = attachmentId
     }
 }
 

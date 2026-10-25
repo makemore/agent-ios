@@ -111,6 +111,26 @@ public struct InputView: View {
 
     @State private var inputText: String = ""
     @State private var attachedFiles: [FileAttachment] = []
+    /// Upload mode (`APIPaths.attachments`): each photo's upload, by its local id.
+    @State private var photoUploads: [String: PhotoUpload] = [:]
+    @State private var photoTasks: [String: Task<Void, Never>] = [:]
+    /// Why a photo couldn't be added (not a photo, too many, no storage here).
+    @State private var attachmentNotice: String?
+
+    enum PhotoUpload: Equatable {
+        case uploading(Double)
+        case ready
+        case failed(String)
+    }
+
+    /// Photos upload as soon as they are picked when the host gives an attachments URL.
+    private var photoMode: Bool { viewModel?.attachmentsEnabled == true }
+    private var photosBusy: Bool {
+        attachedFiles.contains { file in
+            guard let state = photoUploads[file.id] else { return false }
+            return state != .ready
+        }
+    }
     /// Drives the composer's sheet presentation. `.addToChat` shows
     /// the "Add to Chat" panel from the `+` button; `.filePicker` is
     /// chained when the user picks "Add files" inside that panel.
@@ -451,13 +471,15 @@ public struct InputView: View {
                     },
                     onCaptureImage: { image in
                         if let attachment = makeAttachment(from: image) {
-                            attachedFiles.append(attachment)
+                            addAttachments([attachment])
                         }
-                    }
+                    },
+                    onPickPhotos: photoMode ? { photos in addAttachments(photos) } : nil,
+                    photosAllowed: viewModel?.attachmentsUnavailable != true
                 )
             case .filePicker:
                 FilePickerView { files in
-                    attachedFiles.append(contentsOf: files)
+                    addAttachments(files)
                 }
             }
         }
@@ -529,7 +551,64 @@ public struct InputView: View {
     
     private var canSend: Bool {
         guard inputEnabled, inputVisible, !sendDisabled, !isLoading, !loadingMirror else { return false }
+        if photoMode && photosBusy { return false }  // Wait for uploads; retry or remove a failed one.
         return !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
+    }
+
+    /// New attachments from the camera, photo library or file picker. In upload mode only
+    /// photos are taken, at most ``ChatViewModel/maxPhotosPerMessage``, and each starts
+    /// uploading at once; otherwise they stay on the composer as before.
+    private func addAttachments(_ files: [FileAttachment]) {
+        guard photoMode, let viewModel else {
+            attachedFiles.append(contentsOf: files)
+            return
+        }
+        attachmentNotice = nil
+        let photos = files.filter { $0.type.hasPrefix("image/") && $0.data != nil }
+        if photos.count < files.count { attachmentNotice = "Only photos can be attached here." }
+        let room = ChatViewModel.maxPhotosPerMessage - attachedFiles.count
+        if photos.count > room { attachmentNotice = "Up to \(ChatViewModel.maxPhotosPerMessage) photos per message." }
+        for photo in photos.prefix(max(0, room)) {
+            attachedFiles.append(photo)
+            startUpload(photo, viewModel: viewModel)
+        }
+    }
+
+    private func startUpload(_ file: FileAttachment, viewModel: ChatViewModel) {
+        guard let data = file.data else { return }
+        let localId = file.id
+        photoTasks[localId]?.cancel()
+        photoUploads[localId] = .uploading(0)
+        photoTasks[localId] = Task { @MainActor in
+            do {
+                let uploaded = try await viewModel.uploadPhoto(data: data, filename: file.name) { value in
+                    if case .uploading = photoUploads[localId] { photoUploads[localId] = .uploading(value) }
+                }
+                guard !Task.isCancelled, let index = attachedFiles.firstIndex(where: { $0.id == localId }) else { return }
+                // Keep the local id (and bytes, for the sent message's thumbnail) with the host's id.
+                attachedFiles[index] = FileAttachment(id: localId, name: uploaded.name, size: uploaded.size,
+                                                      type: uploaded.type, data: data, attachmentId: uploaded.attachmentId)
+                photoUploads[localId] = .ready
+            } catch AttachmentUploadError.unavailable {
+                guard !Task.isCancelled else { return }
+                // This host keeps no photos: drop them all; the photo buttons go away.
+                for task in photoTasks.values { task.cancel() }
+                photoTasks = [:]
+                photoUploads = [:]
+                attachedFiles = []
+                attachmentNotice = AttachmentUploadError.unavailable.errorDescription
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                photoUploads[localId] = .failed((error as? LocalizedError)?.errorDescription ?? "Upload failed. Try again.")
+            }
+        }
+    }
+
+    private func retryUpload(_ file: FileAttachment) {
+        guard let viewModel else { return }
+        startUpload(file, viewModel: viewModel)
     }
 
     private var effectiveSpeechInputPolicy: SpeechInputPolicy {
@@ -574,6 +653,9 @@ public struct InputView: View {
         // can't repopulate the input.
         inputText = ""
         attachedFiles = []
+        photoUploads = [:]
+        photoTasks = [:]
+        attachmentNotice = nil
         // Collapse the field back to one line — see `composerGeneration`.
         composerGeneration += 1
 
@@ -945,7 +1027,7 @@ public struct InputView: View {
         VStack(spacing: 0) {
             Divider()
 
-            if !attachedFiles.isEmpty {
+            if !attachedFiles.isEmpty || attachmentNotice != nil {
                 attachedFilesView
             }
 
@@ -1028,7 +1110,7 @@ public struct InputView: View {
         // room for. Hands-free keeps the field, and so keeps both rows.
         let twoRow = isMultiline && !showsWaveform
         VStack(spacing: 8) {
-            if !attachedFiles.isEmpty {
+            if !attachedFiles.isEmpty || attachmentNotice != nil {
                 attachedFilesView
             }
             VStack(alignment: .leading, spacing: 8) {
@@ -1244,33 +1326,63 @@ public struct InputView: View {
 
     @ViewBuilder
     private var attachedFilesView: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(attachedFiles) { file in
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.fill")
-                            .font(.caption)
-                        Text(file.name)
-                            .font(.caption)
-                            .lineLimit(1)
-                        Button(action: { removeFile(file) }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.caption)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(PlatformColors.systemGray5)
-                    .cornerRadius(12)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            if let attachmentNotice {
+                Text(attachmentNotice)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                    .accessibilityAddTraits(.isStaticText)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(attachedFiles) { file in
+                        HStack(spacing: 4) {
+                            Image(systemName: file.type.hasPrefix("image/") ? "photo" : "doc.fill")
+                                .font(.caption)
+                            Text(file.name)
+                                .font(.caption)
+                                .lineLimit(1)
+                            switch photoUploads[file.id] {
+                            case .uploading(let progress)?:
+                                ProgressView(value: progress)
+                                    .frame(width: 36)
+                                    .accessibilityLabel("Uploading \(file.name)")
+                            case .failed(let message)?:
+                                Text(message)
+                                    .font(.caption2)
+                                    .foregroundColor(.red)
+                                    .lineLimit(1)
+                                Button("Retry") { retryUpload(file) }
+                                    .font(.caption.weight(.semibold))
+                            default:
+                                EmptyView()
+                            }
+                            Button(action: { removeFile(file) }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                            }
+                            .accessibilityLabel("Remove \(file.name)")
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(PlatformColors.systemGray5)
+                        .cornerRadius(12)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            }
         }
     }
-    
+
     private func removeFile(_ file: FileAttachment) {
+        photoTasks[file.id]?.cancel()
+        photoTasks[file.id] = nil
+        photoUploads[file.id] = nil
         attachedFiles.removeAll { $0.id == file.id }
+        if attachedFiles.isEmpty { attachmentNotice = nil }
     }
 
     // MARK: - Shared composer atoms

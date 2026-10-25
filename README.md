@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.5.0` → add the **AgentFrontend** product to your app target.
+from `3.6.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.5.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.6.0"),
 ],
 targets: [
     .target(
@@ -446,7 +446,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.5.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.6.0"),
 ],
 targets: [
     .target(
@@ -485,6 +485,22 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 
 ## Changelog
+
+### 3.6.0
+
+- **Photos upload to the thread first** (`APIPaths.attachments`, default `nil`). When the host gives
+  a thread's attachments URL (Studio: `/studio/api/workspace/threads/<id>/attachments/`), a photo
+  taken with the camera or picked from the new **Photos** row in Add to Chat uploads at once
+  (multipart `file`, the client's auth). Its chip shows progress, or the error with Retry. Sending
+  puts the ids on the message as `attachment_ids` (at most 4, so a photo alone can be sent), and edit
+  and retry send them again. HEIC photos, and photos over 4096 px or 15 MB, become a JPEG first
+  (`PhotoPreparation`, ImageIO: upright, without metadata). History shows a user message's
+  `metadata.attachment_ids` as thumbnails read from `{attachments}{id}/`. A 503
+  `attachments_unavailable` hides the camera and Photos rows (`ChatViewModel.attachmentsUnavailable`).
+  New API: `APIClient.uploadAttachment` / `fetchAttachment` / `attachmentsEnabled`,
+  `ChatViewModel.uploadPhoto` / `attachmentData(id:)`, `FileAttachment.attachmentId`,
+  `APIMessageMetadata.attachmentIds`, `UploadedAttachment`, `AttachmentUploadError`. Without the
+  path nothing changes: photos stay on the phone as before. Additive.
 
 ### 3.5.0
 
