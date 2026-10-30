@@ -28,13 +28,13 @@ credentials required**. Use the latest tag from
 
 In Xcode: **File → Add Package Dependencies…** → paste
 `https://github.com/makemore/agent-ios.git` → choose **Up to Next Major Version**
-from `3.6.0` → add the **AgentFrontend** product to your app target.
+from `3.7.0` → add the **AgentFrontend** product to your app target.
 
 Or in your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.6.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.7.0"),
 ],
 targets: [
     .target(
@@ -446,7 +446,7 @@ To use only the headless core (e.g. to build a custom UI):
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.6.0"),
+    .package(url: "https://github.com/makemore/agent-ios.git", from: "3.7.0"),
 ],
 targets: [
     .target(
@@ -486,13 +486,30 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 ## Changelog
 
+### 3.7.0
+
+- **Files of any kind, many at once** (with `APIPaths.attachments`). Add to Chat's **Add files** row now
+  opens the system Files picker (`fileImporter`, anything can be chosen, several at once; reads are
+  security-scoped and off the main thread). A message takes up to **20** attachments
+  (`ChatViewModel.maxAttachmentsPerMessage`; `maxPhotosPerMessage` stays as a deprecated alias). The host
+  refuses programs (400 with its reason, shown on the chip with Retry), files over 25 MB (photos over 20 MB)
+  and, with no storage (503 `attachments_unavailable`), hides the attach buttons. Uploads are one POST per
+  file, at most 3 in flight (`maxConcurrentUploads`); each chip has its own progress or error, and one
+  failing doesn't touch the rest. Photos still become thumbnails; other files show an icon, name and size,
+  in the composer and in sent messages. `ChatViewModel.uploadFile(data:filename:contentType:progress:)`
+  is the new entry point (photos go through `uploadPhoto` as before); `FileAttachment` gains `isImage`,
+  `symbolName` and `sizeText`. When a loaded conversation has attachments, the client reads the thread's attachment list once
+  (`GET {attachments}` → `{"attachments": [{attachment_id, name, size, content_type}]}`) for names, types and icons;
+  bytes are fetched only for `image/*` thumbnails, never to find a type, and a failed list leaves plain "Attachment"
+  chips. Without an attachments URL the camera and **Add files** rows are hidden (nothing would reach the agent). Upload errors now say "file". Additive.
+
 ### 3.6.0
 
 - **Photos upload to the thread first** (`APIPaths.attachments`, default `nil`). When the host gives
   a thread's attachments URL (Studio: `/studio/api/workspace/threads/<id>/attachments/`), a photo
   taken with the camera or picked from the new **Photos** row in Add to Chat uploads at once
   (multipart `file`, the client's auth). Its chip shows progress, or the error with Retry. Sending
-  puts the ids on the message as `attachment_ids` (at most 4, so a photo alone can be sent), and edit
+  puts the ids on the message as `attachment_ids` (at most 4 then; 20 from 3.7.0, so a photo alone can be sent), and edit
   and retry send them again. HEIC photos, and photos over 4096 px or 15 MB, become a JPEG first
   (`PhotoPreparation`, ImageIO: upright, without metadata). History shows a user message's
   `metadata.attachment_ids` as thumbnails read from `{attachments}{id}/`. A 503

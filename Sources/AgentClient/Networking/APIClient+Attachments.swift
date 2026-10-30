@@ -1,6 +1,6 @@
 import Foundation
 
-/// A photo uploaded to the host's attachments URL (`APIPaths.attachments`).
+/// A file (photo or document) uploaded to the host's attachments URL (`APIPaths.attachments`).
 public struct UploadedAttachment: Codable, Equatable {
     public let id: String
     public let name: String
@@ -19,9 +19,10 @@ public struct UploadedAttachment: Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Photo"
-        contentType = try c.decodeIfPresent(String.self, forKey: .contentType)
-            ?? c.decodeIfPresent(String.self, forKey: .content_type) ?? "image/jpeg"
+        let type = try c.decodeIfPresent(String.self, forKey: .contentType)
+            ?? c.decodeIfPresent(String.self, forKey: .content_type)
+        contentType = type ?? "image/jpeg"
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? (type == nil || type!.hasPrefix("image/") ? "Photo" : "File")
         size = try c.decodeIfPresent(Int.self, forKey: .size) ?? 0
     }
 
@@ -34,15 +35,15 @@ public struct UploadedAttachment: Codable, Equatable {
     }
 }
 
-/// Why a photo could not be uploaded, worded for the person.
+/// Why a file could not be uploaded, worded for the person.
 public enum AttachmentUploadError: LocalizedError, Equatable {
     /// 413 `too_large`.
     case tooLarge
-    /// 503 `attachments_unavailable`: this host keeps no attachments. Hide the photo button.
+    /// 503 `attachments_unavailable`: this host keeps no attachments. Hide the attach buttons.
     case unavailable
-    /// 400: not a photo the server can read (its message).
+    /// 400: a file the host refuses (a program, or unreadable); its message.
     case rejected(String)
-    /// 401/403/404: not allowed to add photos to this conversation.
+    /// 401/403/404: not allowed to add files to this conversation.
     case notAllowed
     /// No connection, or the request did not complete.
     case network
@@ -52,13 +53,13 @@ public enum AttachmentUploadError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .tooLarge: return "This photo is too large."
-        case .unavailable: return "Photos can't be added here."
+        case .tooLarge: return "This file is too large."
+        case .unavailable: return "Files can't be added here."
         case .rejected(let message): return message
-        case .notAllowed: return "You can't add photos to this conversation."
+        case .notAllowed: return "You can't add files to this conversation."
         case .network: return "Upload failed. Check the connection and try again."
         case .http: return "Upload failed. Try again."
-        case .notConfigured: return "Photos can't be added here."
+        case .notConfigured: return "Files can't be added here."
         }
     }
 }
@@ -77,9 +78,9 @@ private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
 
 extension APIClient {
 
-    // MARK: - Attachments (a thread's photos; only when `apiPaths.attachments` is set)
+    // MARK: - Attachments (a thread's files; only when `apiPaths.attachments` is set)
 
-    /// True when the host gave an attachments URL, so photos upload before sending and the
+    /// True when the host gave an attachments URL, so files upload before sending and the
     /// message carries their ids (`attachment_ids`).
     public var attachmentsEnabled: Bool {
         !(config.apiPaths.attachments ?? "").isEmpty
@@ -94,9 +95,9 @@ extension APIClient {
         return URL(string: "\(config.backendUrl)\(path)")
     }
 
-    /// Upload one photo (multipart, field `file`) with this client's auth and return its id.
+    /// Upload one file (photo or document; multipart, field `file`) with this client's auth and return its id.
     /// `progress` is called with 0...1 as the body is sent. The data should already be a
-    /// photo the server takes (see ``PhotoPreparation``).
+    /// photo the server takes (see ``PhotoPreparation``); any other file goes as it is.
     public func uploadAttachment(
         data: Data,
         filename: String,
@@ -152,7 +153,7 @@ extension APIClient {
             throw AttachmentUploadError.unavailable
         case 400:
             let detail = (body["file"] as? [String])?.first ?? (body["file"] as? String) ?? (body["detail"] as? String)
-            throw AttachmentUploadError.rejected(detail ?? "That photo couldn't be read.")
+            throw AttachmentUploadError.rejected(detail ?? "That file couldn't be read.")
         case 401, 403, 404:
             throw AttachmentUploadError.notAllowed
         default:
@@ -160,7 +161,7 @@ extension APIClient {
         }
     }
 
-    /// Read one attachment's bytes (a photo thumbnail) from `{attachments}{id}/` with this client's auth.
+    /// Read one attachment's bytes (a photo thumbnail or a file) from `{attachments}{id}/` with this client's auth.
     public func fetchAttachment(id: String) async throws -> Data {
         let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id
         guard let url = attachmentsURL("\(encoded)/") else { throw AttachmentUploadError.notConfigured }
@@ -180,13 +181,46 @@ extension APIClient {
         return data
     }
 
+    /// The thread's attachments, `GET {attachments}` → `{"attachments": [{attachment_id, name, size,
+    /// content_type, created_at}]}`, by id. Names, types and sizes only; no bytes.
+    public func listAttachments() async throws -> [String: UploadedAttachment] {
+        guard let url = attachmentsURL() else { throw AttachmentUploadError.notConfigured }
+        try validateTransport()
+        let generation = authenticationGeneration
+        let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        for (key, value) in authHeaders(token: token) { request.setValue(value, forHTTPHeaderField: key) }
+        let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
+        guard http.statusCode == 200 else { throw APIError.httpError(statusCode: http.statusCode) }
+        return Self.parseAttachmentList(data)
+    }
+
+    static func parseAttachmentList(_ data: Data) -> [String: UploadedAttachment] {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let items = object["attachments"] as? [[String: Any]] else { return [:] }
+        var result: [String: UploadedAttachment] = [:]
+        for item in items {
+            guard let id = (item["attachment_id"] as? String) ?? (item["id"] as? String), !id.isEmpty else { continue }
+            let name = (item["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "File"
+            result[id] = UploadedAttachment(id: id, name: name,
+                                            contentType: (item["content_type"] as? String) ?? "application/octet-stream",
+                                            size: (item["size"] as? Int) ?? 0)
+        }
+        return result
+    }
+
     static func multipartBody(data: Data, filename: String, contentType: String, boundary: String) -> Data {
         // Quotes and line breaks can't appear in the part header's file name.
         let safeName = filename.replacingOccurrences(of: "\"", with: "_")
             .components(separatedBy: .newlines).joined()
         var body = Data()
         body.append(Data("--\(boundary)\r\n".utf8))
-        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(safeName.isEmpty ? "photo.jpg" : safeName)\"\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(safeName.isEmpty ? "file" : safeName)\"\r\n".utf8))
         body.append(Data("Content-Type: \(contentType)\r\n\r\n".utf8))
         body.append(data)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))

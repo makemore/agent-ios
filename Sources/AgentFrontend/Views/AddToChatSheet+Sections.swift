@@ -84,7 +84,7 @@ extension AddToChatSheet {
     var rowsCard: some View {
         VStack(spacing: 0) {
             if let onPickPhotos, photosAllowed {
-                PhotosPicker(selection: $photoSelection, maxSelectionCount: ChatViewModel.maxPhotosPerMessage,
+                PhotosPicker(selection: $photoSelection, maxSelectionCount: ChatViewModel.maxAttachmentsPerMessage,
                              matching: .images) {
                     HStack(spacing: 14) {
                         rowIcon("photo.on.rectangle")
@@ -115,10 +115,13 @@ extension AddToChatSheet {
                 }
                 rowDivider
             }
-            actionRow(systemImage: "doc.badge.plus", label: "Add files") {
-                onAddFiles()
+            // Only where files upload to the thread; without an attachments URL nothing would reach the agent.
+            if onPickPhotos != nil, photosAllowed {
+                actionRow(systemImage: "doc.badge.plus", label: "Add files") {
+                    onAddFiles()
+                }
+                rowDivider
             }
-            rowDivider
             soonRow(systemImage: "tray.full", label: "Add to project")
             rowDivider
             styleMenuRow

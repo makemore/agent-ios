@@ -123,7 +123,7 @@ public struct InputView: View {
         case failed(String)
     }
 
-    /// Photos upload as soon as they are picked when the host gives an attachments URL.
+    /// Files and photos upload as soon as they are picked when the host gives an attachments URL.
     private var photoMode: Bool { viewModel?.attachmentsEnabled == true }
     private var photosBusy: Bool {
         attachedFiles.contains { file in
@@ -141,10 +141,11 @@ public struct InputView: View {
     /// sheet so the picker is presented in the AddToChat sheet's
     /// `onDismiss` callback (sequential sheets otherwise race).
     @State private var pendingFilePicker: Bool = false
+    /// The Files picker (`fileImporter`), presented once the Add to Chat sheet has gone.
+    @State private var showFileImporter: Bool = false
 
     private enum ActiveSheet: Identifiable {
         case addToChat
-        case filePicker
         var id: Int { hashValue }
     }
     /// Bumped on every send and applied as the text field's `.id()`.
@@ -456,7 +457,7 @@ public struct InputView: View {
             if pendingFilePicker {
                 pendingFilePicker = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    activeSheet = .filePicker
+                    showFileImporter = true
                 }
             }
         }) { sheet in
@@ -475,11 +476,20 @@ public struct InputView: View {
                         }
                     },
                     onPickPhotos: photoMode ? { photos in addAttachments(photos) } : nil,
-                    photosAllowed: viewModel?.attachmentsUnavailable != true
+                    photosAllowed: photoMode
                 )
-            case .filePicker:
-                FilePickerView { files in
-                    addAttachments(files)
+            }
+        }
+        // Anything can be chosen, several at once; the host refuses programs.
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item, .data],
+                      allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result, !urls.isEmpty else { return }
+            Task { @MainActor in
+                let read = await FileImportReader.read(urls)
+                addAttachments(read.files)
+                if !read.skipped.isEmpty {
+                    attachmentNotice = read.skipped.prefix(2).joined(separator: "; ")
+                        + (read.skipped.count > 2 ? " and \(read.skipped.count - 2) more" : "") + "."
                 }
             }
         }
@@ -555,22 +565,21 @@ public struct InputView: View {
         return !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedFiles.isEmpty
     }
 
-    /// New attachments from the camera, photo library or file picker. In upload mode only
-    /// photos are taken, at most ``ChatViewModel/maxPhotosPerMessage``, and each starts
-    /// uploading at once; otherwise they stay on the composer as before.
+    /// New attachments from the camera, photo library or Files. In upload mode at most
+    /// ``ChatViewModel/maxAttachmentsPerMessage`` are taken and each starts uploading (the view
+    /// model runs a few at a time); otherwise they stay on the composer as before.
     private func addAttachments(_ files: [FileAttachment]) {
         guard photoMode, let viewModel else {
             attachedFiles.append(contentsOf: files)
             return
         }
         attachmentNotice = nil
-        let photos = files.filter { $0.type.hasPrefix("image/") && $0.data != nil }
-        if photos.count < files.count { attachmentNotice = "Only photos can be attached here." }
-        let room = ChatViewModel.maxPhotosPerMessage - attachedFiles.count
-        if photos.count > room { attachmentNotice = "Up to \(ChatViewModel.maxPhotosPerMessage) photos per message." }
-        for photo in photos.prefix(max(0, room)) {
-            attachedFiles.append(photo)
-            startUpload(photo, viewModel: viewModel)
+        let usable = files.filter { $0.data != nil }
+        let room = max(0, ChatViewModel.maxAttachmentsPerMessage - attachedFiles.count)
+        if usable.count > room { attachmentNotice = "Up to \(ChatViewModel.maxAttachmentsPerMessage) files per message." }
+        for file in usable.prefix(room) {
+            attachedFiles.append(file)
+            startUpload(file, viewModel: viewModel)
         }
     }
 
@@ -581,17 +590,19 @@ public struct InputView: View {
         photoUploads[localId] = .uploading(0)
         photoTasks[localId] = Task { @MainActor in
             do {
-                let uploaded = try await viewModel.uploadPhoto(data: data, filename: file.name) { value in
+                let uploaded = try await viewModel.uploadFile(data: data, filename: file.name, contentType: file.type) { value in
                     if case .uploading = photoUploads[localId] { photoUploads[localId] = .uploading(value) }
                 }
                 guard !Task.isCancelled, let index = attachedFiles.firstIndex(where: { $0.id == localId }) else { return }
-                // Keep the local id (and bytes, for the sent message's thumbnail) with the host's id.
+                // Keep the local id with the host's id, and the bytes of a photo (for the sent
+                // message's thumbnail); other files' bytes are let go.
                 attachedFiles[index] = FileAttachment(id: localId, name: uploaded.name, size: uploaded.size,
-                                                      type: uploaded.type, data: data, attachmentId: uploaded.attachmentId)
+                                                      type: uploaded.type, data: uploaded.type.hasPrefix("image/") ? data : nil,
+                                                      attachmentId: uploaded.attachmentId)
                 photoUploads[localId] = .ready
             } catch AttachmentUploadError.unavailable {
                 guard !Task.isCancelled else { return }
-                // This host keeps no photos: drop them all; the photo buttons go away.
+                // This host keeps no attachments: drop them all; the attach buttons go away.
                 for task in photoTasks.values { task.cancel() }
                 photoTasks = [:]
                 photoUploads = [:]
@@ -1335,15 +1346,31 @@ public struct InputView: View {
                     .padding(.top, 6)
                     .accessibilityAddTraits(.isStaticText)
             }
+            if attachedFiles.count > 3 {
+                Text("\(attachedFiles.count) of \(ChatViewModel.maxAttachmentsPerMessage) files")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(attachedFiles) { file in
                         HStack(spacing: 4) {
-                            Image(systemName: file.type.hasPrefix("image/") ? "photo" : "doc.fill")
+                            Image(systemName: file.symbolName)
                                 .font(.caption)
-                            Text(file.name)
-                                .font(.caption)
-                                .lineLimit(1)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(file.name)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                if !file.isImage, !file.sizeText.isEmpty {
+                                    Text(file.sizeText)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: 140, alignment: .leading)
                             switch photoUploads[file.id] {
                             case .uploading(let progress)?:
                                 ProgressView(value: progress)
@@ -1354,6 +1381,7 @@ public struct InputView: View {
                                     .font(.caption2)
                                     .foregroundColor(.red)
                                     .lineLimit(1)
+                                    .frame(maxWidth: 120)
                                 Button("Retry") { retryUpload(file) }
                                     .font(.caption.weight(.semibold))
                             default:
@@ -1581,34 +1609,6 @@ public struct InputView: View {
         }
     }
 }
-
-/// Simple file picker placeholder
-struct FilePickerView: View {
-    let onSelect: ([FileAttachment]) -> Void
-    @Environment(\.dismiss) private var dismiss
-    
-    var body: some View {
-        NavigationView {
-            VStack {
-                Text("File picker not implemented")
-                    .foregroundColor(.secondary)
-                Text("Use DocumentPicker for production")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .navigationTitle("Select Files")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-        }
-    }
-}
-
 
 #if DEBUG
 struct InputView_Previews: PreviewProvider {
