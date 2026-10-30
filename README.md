@@ -498,9 +498,10 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
   failing doesn't touch the rest. Photos still become thumbnails; other files show an icon, name and size,
   in the composer and in sent messages. `ChatViewModel.uploadFile(data:filename:contentType:progress:)`
   is the new entry point (photos go through `uploadPhoto` as before); `FileAttachment` gains `isImage`,
-  `symbolName` and `sizeText`. History reads names and types from `metadata.attachments` when the host
-  sends them, otherwise an attachment shows as a photo, falling back to a file icon when its bytes
-  aren't a picture. Upload errors now say "file". Additive.
+  `symbolName` and `sizeText`. When a loaded conversation has attachments, the client reads the thread's attachment list once
+  (`GET {attachments}` → `{"attachments": [{attachment_id, name, size, content_type}]}`) for names, types and icons;
+  bytes are fetched only for `image/*` thumbnails, never to find a type, and a failed list leaves plain "Attachment"
+  chips. Without an attachments URL the camera and **Add files** rows are hidden (nothing would reach the agent). Upload errors now say "file". Additive.
 
 ### 3.6.0
 

@@ -139,11 +139,49 @@ final class ChatFilesTests: XCTestCase {
         XCTAssertFalse(FileAttachment(name: "a", size: 2_000_000, type: "x").sizeText.isEmpty)
     }
 
-    func testHistoryUsesNamesAndTypesWhenTheHostSendsThem() throws {
-        let json = #"{"role":"user","content":"See","metadata":{"attachment_ids":["f-1","p-2"],"attachments":[{"id":"f-1","name":"plan.docx","content_type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","size":4096}]}}"#
-        let message = try JSONDecoder().decode(APIMessage.self, from: Data(json.utf8))
-        XCTAssertEqual(message.metadata?.attachmentIds, ["f-1", "p-2"])
-        XCTAssertEqual(message.metadata?.attachments?.first?.name, "plan.docx")
+    func testHistoryReadsTheAttachmentListOnceAndFetchesBytesOnlyForImages() async throws {
+        let vm = model()
+        MockURLProtocol.register { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/attachments") && request.httpMethod == "GET" {
+                return .json(status: 200, body: Data("""
+                {"attachments":[
+                 {"attachment_id":"f-1","name":"plan.docx","size":4096,"content_type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","created_at":"2026-10-30T10:00:00Z"},
+                 {"attachment_id":"p-2","name":"shot.jpg","size":99,"content_type":"image/jpeg","created_at":"2026-10-30T10:00:00Z"}]}
+                """.utf8))
+            }
+            if path.contains("/conversations/") {
+                return .json(status: 200, body: Data(#"{"id":"c-1","messages":[{"role":"user","content":"See","id":"m1","seq":1,"metadata":{"attachment_ids":["f-1","p-2"]}},{"role":"user","content":"Again","id":"m2","seq":2,"metadata":{"attachment_ids":["f-1"]}}]}"#.utf8))
+            }
+            return nil
+        }
+        _ = await vm.loadConversation("c-1")
+        let files = vm.messages.compactMap(\.files).flatMap { $0 }
+        XCTAssertEqual(files.map(\.name), ["plan.docx", "shot.jpg", "plan.docx"])
+        XCTAssertEqual(files.first?.symbolName, "doc.text")
+        XCTAssertEqual(files.first?.isImage, false)
+        XCTAssertEqual(files[1].isImage, true)
+        XCTAssertEqual(files.first?.size, 4096)
+        let lists = MockURLProtocol.recorded.filter { $0.method == "GET" && $0.path.hasSuffix("/attachments") }
+        XCTAssertEqual(lists.count, 1, "once per conversation")
+        XCTAssertTrue(MockURLProtocol.recorded.filter { $0.path.contains("/attachments/") && $0.method == "GET" }.isEmpty, "no bytes fetched")
+    }
+
+    func testAFailedListLeavesPlainAttachmentChipsAndFetchesNoBytes() async {
+        let vm = model()
+        MockURLProtocol.register { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/attachments") { return .json(status: 500, body: Data("{}".utf8)) }
+            if path.contains("/conversations/") {
+                return .json(status: 200, body: Data(#"{"id":"c-1","messages":[{"role":"user","content":"See","id":"m1","seq":1,"metadata":{"attachment_ids":["f-1"]}}]}"#.utf8))
+            }
+            return nil
+        }
+        _ = await vm.loadConversation("c-1")
+        let file = vm.messages.first?.files?.first
+        XCTAssertEqual(file?.name, "Attachment")
+        XCTAssertEqual(file?.isImage, false)
+        XCTAssertTrue(MockURLProtocol.recorded.filter { $0.path.contains("/attachments/") }.isEmpty)
     }
 }
 

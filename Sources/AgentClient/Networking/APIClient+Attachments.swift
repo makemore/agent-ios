@@ -181,6 +181,39 @@ extension APIClient {
         return data
     }
 
+    /// The thread's attachments, `GET {attachments}` → `{"attachments": [{attachment_id, name, size,
+    /// content_type, created_at}]}`, by id. Names, types and sizes only; no bytes.
+    public func listAttachments() async throws -> [String: UploadedAttachment] {
+        guard let url = attachmentsURL() else { throw AttachmentUploadError.notConfigured }
+        try validateTransport()
+        let generation = authenticationGeneration
+        let token = try await getOrCreateSession()
+        try validateAuthenticationGeneration(generation)
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        for (key, value) in authHeaders(token: token) { request.setValue(value, forHTTPHeaderField: key) }
+        let (data, response) = try await session.data(for: request)
+        try validateAuthenticationGeneration(generation)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
+        guard http.statusCode == 200 else { throw APIError.httpError(statusCode: http.statusCode) }
+        return Self.parseAttachmentList(data)
+    }
+
+    static func parseAttachmentList(_ data: Data) -> [String: UploadedAttachment] {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let items = object["attachments"] as? [[String: Any]] else { return [:] }
+        var result: [String: UploadedAttachment] = [:]
+        for item in items {
+            guard let id = (item["attachment_id"] as? String) ?? (item["id"] as? String), !id.isEmpty else { continue }
+            let name = (item["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "File"
+            result[id] = UploadedAttachment(id: id, name: name,
+                                            contentType: (item["content_type"] as? String) ?? "application/octet-stream",
+                                            size: (item["size"] as? Int) ?? 0)
+        }
+        return result
+    }
+
     static func multipartBody(data: Data, filename: String, contentType: String, boundary: String) -> Data {
         // Quotes and line breaks can't appear in the part header's file name.
         let safeName = filename.replacingOccurrences(of: "\"", with: "_")

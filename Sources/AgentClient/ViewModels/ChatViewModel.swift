@@ -241,6 +241,41 @@ public class ChatViewModel: ObservableObject {
     public static let maxFileBytes = 25 * 1024 * 1024
     private let uploadGate = UploadGate(limit: ChatViewModel.maxConcurrentUploads)
 
+    /// The thread's attachment list (names, types, sizes) by id, read once per conversation.
+    private var attachmentDetails: [String: UploadedAttachment] = [:]
+    private var attachmentListConversation: String?
+
+    static func historyAttachment(id: String, known: [String: UploadedAttachment]) -> FileAttachment {
+        if let info = known[id] {
+            return FileAttachment(id: "attachment-\(id)", name: info.name, size: info.size, type: info.contentType, attachmentId: id)
+        }
+        return FileAttachment(id: "attachment-\(id)", name: "Attachment", size: 0, type: "application/octet-stream", attachmentId: id)
+    }
+
+    /// When the loaded history has attachments the list doesn't know yet, reads the thread's attachment
+    /// list once (a GET with names, types and sizes) and updates their chips. A failed read leaves them
+    /// as plain "Attachment" chips; bytes are only ever fetched for `image/*` thumbnails.
+    func resolveAttachmentDetails() async {
+        guard apiClient.attachmentsEnabled, !attachmentsUnavailable, let convId = conversationId else { return }
+        func unknown() -> Bool {
+            messages.contains { $0.files?.contains { $0.attachmentId.map { attachmentDetails[$0] == nil } ?? false } ?? false }
+        }
+        guard unknown(), attachmentListConversation != convId else { return }
+        attachmentListConversation = convId
+        let generation = stateGeneration
+        guard let list = try? await apiClient.listAttachments(), generation == stateGeneration, !list.isEmpty else { return }
+        attachmentDetails.merge(list) { _, new in new }
+        messages = messages.map { message in
+            guard message.role == .user, let files = message.files else { return message }
+            var updated = message
+            updated.files = files.map { file in
+                guard let id = file.attachmentId, let info = list[id] else { return file }
+                return Self.historyAttachment(id: id, known: [id: info])
+            }
+            return updated
+        }
+    }
+
     /// Thumbnails already read this session, by attachment id.
     private let attachmentCache = NSCache<NSString, NSData>()
 
@@ -1632,6 +1667,7 @@ public class ChatViewModel: ObservableObject {
             discardPendingRun()
             conversationId = convId
             messages = (conversation.messages ?? []).flatMap { mapApiMessage($0) }
+            if attachmentListConversation != convId { attachmentListConversation = nil }
             storage.set(config.conversationIdKey, value: convId)
             hasRestoredConversation = true
             error = nil
@@ -1675,6 +1711,7 @@ public class ChatViewModel: ObservableObject {
                 contextWindow = nil
                 contextModelId = nil
             }
+            await resolveAttachmentDetails()
             return true
         } catch {
             guard generation == stateGeneration, !invalidated, !Task.isCancelled,
@@ -2776,15 +2813,9 @@ public class ChatViewModel: ObservableObject {
         let content = m.content ?? ""
         var rows: [Message] = []
         // A person's photos come back as metadata.attachment_ids.
-        // With names and types from the host (`metadata.attachments`) they show as files; without,
-        // as before: a photo, read from the host for its thumbnail.
-        let details = Dictionary((m.metadata?.attachments ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let photos = m.role == "user" ? (m.metadata?.attachmentIds ?? []).map { id -> FileAttachment in
-            if let info = details[id] {
-                return FileAttachment(id: "attachment-\(id)", name: info.name, size: info.size, type: info.contentType, attachmentId: id)
-            }
-            return FileAttachment(id: "attachment-\(id)", name: "Photo", size: 0, type: "image/jpeg", attachmentId: id)
-        } : []
+        // Names and types come from the thread's attachment list (see ``resolveAttachmentDetails()``);
+        // until it is read an attachment is a plain file chip, and no bytes are fetched to tell what it is.
+        let photos = m.role == "user" ? (m.metadata?.attachmentIds ?? []).map { Self.historyAttachment(id: $0, known: attachmentDetails) } : []
         if m.role != "assistant" || !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             rows.append(Message(id: identity, role: MessageRole(rawValue: m.role) ?? .system,
                                 content: content, timestamp: timestamp, files: photos.isEmpty ? nil : photos))

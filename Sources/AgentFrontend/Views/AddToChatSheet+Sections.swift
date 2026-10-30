@@ -115,10 +115,13 @@ extension AddToChatSheet {
                 }
                 rowDivider
             }
-            actionRow(systemImage: "doc.badge.plus", label: "Add files") {
-                onAddFiles()
+            // Only where files upload to the thread; without an attachments URL nothing would reach the agent.
+            if onPickPhotos != nil, photosAllowed {
+                actionRow(systemImage: "doc.badge.plus", label: "Add files") {
+                    onAddFiles()
+                }
+                rowDivider
             }
-            rowDivider
             soonRow(systemImage: "tray.full", label: "Add to project")
             rowDivider
             styleMenuRow

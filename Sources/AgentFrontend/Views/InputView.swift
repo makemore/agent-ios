@@ -476,7 +476,7 @@ public struct InputView: View {
                         }
                     },
                     onPickPhotos: photoMode ? { photos in addAttachments(photos) } : nil,
-                    photosAllowed: viewModel?.attachmentsUnavailable != true
+                    photosAllowed: photoMode
                 )
             }
         }
