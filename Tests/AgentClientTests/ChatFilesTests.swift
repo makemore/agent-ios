@@ -183,6 +183,48 @@ final class ChatFilesTests: XCTestCase {
         XCTAssertEqual(file?.isImage, false)
         XCTAssertTrue(MockURLProtocol.recorded.filter { $0.path.contains("/attachments/") }.isEmpty)
     }
+
+    func testAFailedListIsRetriedOnTheNextLoad() async {
+        let vm = model()
+        var listCalls = 0
+        MockURLProtocol.register { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/attachments") {
+                listCalls += 1
+                if listCalls == 1 { return .json(status: 500, body: Data("{}".utf8)) }
+                return .json(status: 200, body: Data(#"{"attachments":[{"attachment_id":"f-1","name":"a.pdf","size":5,"content_type":"application/pdf"}]}"#.utf8))
+            }
+            if path.contains("/conversations/") {
+                return .json(status: 200, body: Data(#"{"id":"c-1","messages":[{"role":"user","content":"See","id":"m1","seq":1,"metadata":{"attachment_ids":["f-1"]}}]}"#.utf8))
+            }
+            return nil
+        }
+        _ = await vm.loadConversation("c-1")
+        XCTAssertEqual(vm.messages.first?.files?.first?.name, "Attachment")
+        await vm.resolveAttachmentDetails()
+        XCTAssertEqual(vm.messages.first?.files?.first?.name, "a.pdf")
+        XCTAssertEqual(listCalls, 2)
+    }
+
+    func testOlderPagesAreNamedToo() async {
+        let vm = model()
+        MockURLProtocol.register { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/attachments") {
+                return .json(status: 200, body: Data(#"{"attachments":[{"attachment_id":"old-1","name":"old.csv","size":5,"content_type":"text/csv"}]}"#.utf8))
+            }
+            if path.contains("/conversations/") {
+                let before = request.url?.query?.contains("before_seq") == true
+                return .json(status: 200, body: Data(before
+                    ? #"{"id":"c-1","messages":[{"role":"user","content":"Old","id":"m0","seq":1,"metadata":{"attachment_ids":["old-1"]}}]}"#.utf8
+                    : #"{"id":"c-1","has_more":true,"next_before_seq":2,"messages":[{"role":"user","content":"New","id":"m1","seq":2}]}"#.utf8))
+            }
+            return nil
+        }
+        _ = await vm.loadConversation("c-1")
+        await vm.loadMoreMessages()
+        XCTAssertEqual(vm.messages.first?.files?.first?.name, "old.csv")
+    }
 }
 
 private actor Tracker {

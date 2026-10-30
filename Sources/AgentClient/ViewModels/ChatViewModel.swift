@@ -261,9 +261,10 @@ public class ChatViewModel: ObservableObject {
             messages.contains { $0.files?.contains { $0.attachmentId.map { attachmentDetails[$0] == nil } ?? false } ?? false }
         }
         guard unknown(), attachmentListConversation != convId else { return }
-        attachmentListConversation = convId
         let generation = stateGeneration
-        guard let list = try? await apiClient.listAttachments(), generation == stateGeneration, !list.isEmpty else { return }
+        // The marker is set only once the list was read, so a failed read is tried again next time.
+        guard let list = try? await apiClient.listAttachments(), generation == stateGeneration, conversationId == convId else { return }
+        attachmentListConversation = convId
         attachmentDetails.merge(list) { _, new in new }
         messages = messages.map { message in
             guard message.role == .user, let files = message.files else { return message }
@@ -736,13 +737,23 @@ public class ChatViewModel: ObservableObject {
         progress: ((Double) -> Void)? = nil
     ) async throws -> FileAttachment {
         guard apiClient.attachmentsEnabled, !attachmentsUnavailable else { throw AttachmentUploadError.unavailable }
-        if PhotoPreparation.sniffType(data) != nil, PhotoPreparation.prepare(data: data, filename: filename) != nil {
-            return try await uploadPhoto(data: data, filename: filename, progress: progress)
-        }
         guard !data.isEmpty else { throw AttachmentUploadError.rejected("That file is empty.") }
-        guard data.count <= Self.maxFileBytes else { throw AttachmentUploadError.tooLarge }
-        return try await upload(data: data, filename: filename,
-                                contentType: contentType ?? Self.contentType(forFilename: filename), progress: progress)
+        let isPhoto = PhotoPreparation.sniffType(data) != nil
+        guard isPhoto || data.count <= Self.maxFileBytes else { throw AttachmentUploadError.tooLarge }
+        return try await upload(filename: filename, progress: progress) {
+            // A photo is prepared once, off the main actor, when its turn comes; an unreadable one goes as a file.
+            if isPhoto, let photo = await Self.preparePhoto(data: data, filename: filename) {
+                return PreparedPhoto(data: photo.data, filename: photo.filename, contentType: photo.contentType)
+            }
+            guard data.count <= Self.maxFileBytes else { throw AttachmentUploadError.tooLarge }
+            return PreparedPhoto(data: data, filename: filename,
+                                 contentType: contentType ?? Self.contentType(forFilename: filename))
+        }
+    }
+
+    /// Photo preparation (ImageIO decode and re-encode) on a background thread.
+    private nonisolated static func preparePhoto(data: Data, filename: String) async -> PreparedPhoto? {
+        await Task.detached(priority: .userInitiated) { PhotoPreparation.prepare(data: data, filename: filename) }.value
     }
 
     /// The type to send for a file name (its extension), or `application/octet-stream`.
@@ -754,15 +765,17 @@ public class ChatViewModel: ObservableObject {
         return "application/octet-stream"
     }
 
-    private func upload(data: Data, filename: String, contentType: String,
-                        progress: ((Double) -> Void)?) async throws -> FileAttachment {
+    /// Waits for one of the upload places, prepares the bytes (off the main actor), uploads, and gives the place back.
+    private func upload(filename: String, progress: ((Double) -> Void)?,
+                        prepare: () async throws -> PreparedPhoto) async throws -> FileAttachment {
         try await uploadGate.acquire()
         do {
+            let file = try await prepare()
             let uploaded = try await apiClient.uploadAttachment(
-                data: data, filename: filename, contentType: contentType,
+                data: file.data, filename: file.filename, contentType: file.contentType,
                 progress: progress.map { report in { value in Task { @MainActor in report(value) } } })
             await uploadGate.release()
-            if uploaded.contentType.hasPrefix("image/") { attachmentCache.setObject(data as NSData, forKey: uploaded.id as NSString) }
+            if uploaded.contentType.hasPrefix("image/") { attachmentCache.setObject(file.data as NSData, forKey: uploaded.id as NSString) }
             return FileAttachment(name: uploaded.name, size: uploaded.size, type: uploaded.contentType,
                                   attachmentId: uploaded.id)
         } catch AttachmentUploadError.unavailable {
@@ -785,10 +798,12 @@ public class ChatViewModel: ObservableObject {
         progress: ((Double) -> Void)? = nil
     ) async throws -> FileAttachment {
         guard apiClient.attachmentsEnabled, !attachmentsUnavailable else { throw AttachmentUploadError.unavailable }
-        guard let photo = PhotoPreparation.prepare(data: data, filename: filename) else {
-            throw AttachmentUploadError.rejected("That photo couldn't be read.")
+        return try await upload(filename: filename, progress: progress) {
+            guard let photo = await Self.preparePhoto(data: data, filename: filename) else {
+                throw AttachmentUploadError.rejected("That photo couldn't be read.")
+            }
+            return photo
         }
-        return try await upload(data: photo.data, filename: photo.filename, contentType: photo.contentType, progress: progress)
     }
 
     /// A photo's bytes for its thumbnail (cached for the session), or nil when it can't be read.
@@ -1667,7 +1682,7 @@ public class ChatViewModel: ObservableObject {
             discardPendingRun()
             conversationId = convId
             messages = (conversation.messages ?? []).flatMap { mapApiMessage($0) }
-            if attachmentListConversation != convId { attachmentListConversation = nil }
+            if attachmentListConversation != convId { attachmentListConversation = nil; attachmentDetails = [:] }
             storage.set(config.conversationIdKey, value: convId)
             hasRestoredConversation = true
             error = nil
@@ -1771,7 +1786,8 @@ public class ChatViewModel: ObservableObject {
             guard generation == stateGeneration, !invalidated else { return }
             self.error = "Earlier messages could not be loaded."
         }
-        
+        // Older pages may carry attachments the list hasn't named yet.
+        await resolveAttachmentDetails()
         loadingMoreMessages = false
     }
 
