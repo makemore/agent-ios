@@ -401,25 +401,33 @@ public struct MessageView: View {
     
     @ViewBuilder
     private func fileAttachments(_ files: [FileAttachment]) -> some View {
-        let photos = files.filter { $0.attachmentId != nil || ($0.data != nil && $0.type.hasPrefix("image/")) }
+        // Photos (and history attachments of unknown kind) are thumbnails; other files are chips.
+        let photos = files.filter { $0.isImage && ($0.attachmentId != nil || $0.data != nil) }
         let others = files.filter { file in !photos.contains { $0.id == file.id } }
         VStack(alignment: .leading, spacing: 4) {
             if !photos.isEmpty {
-                HStack(spacing: 6) {
+                // Up to 20 photos wrap onto rows rather than running off the bubble.
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], alignment: .leading, spacing: 6) {
                     ForEach(photos) { file in
                         AttachmentThumbnail(file: file, load: loadAttachment)
                     }
                 }
             }
             ForEach(others) { file in
-                HStack(spacing: 4) {
-                    Image(systemName: "paperclip")
+                HStack(spacing: 6) {
+                    Image(systemName: file.symbolName)
                         .font(.caption)
                     Text(file.name)
                         .font(.caption)
                         .lineLimit(1)
+                        .truncationMode(.middle)
+                    if !file.sizeText.isEmpty {
+                        Text(file.sizeText)
+                            .font(.caption2)
+                    }
                 }
                 .foregroundColor(.secondary)
+                .accessibilityElement(children: .combine)
             }
         }
     }

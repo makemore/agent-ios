@@ -156,6 +156,32 @@ public struct FileAttachment: Identifiable, Equatable, Codable {
     /// sends these as `attachment_ids`, and history rows carry them for thumbnails.
     public var attachmentId: String?
 
+    /// Photos show as thumbnails; every other file as an icon, name and size.
+    public var isImage: Bool { type.hasPrefix("image/") }
+
+    /// An SF Symbol for this file's kind (from its type, else its extension).
+    public var symbolName: String { Self.symbolName(type: type, name: name) }
+
+    /// "1.2 MB", or an empty string when the size is unknown.
+    public var sizeText: String {
+        size > 0 ? ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file) : ""
+    }
+
+    public static func symbolName(type: String, name: String) -> String {
+        let type = type.lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        if type.hasPrefix("image/") { return "photo" }
+        if type.hasPrefix("video/") { return "film" }
+        if type.hasPrefix("audio/") { return "waveform" }
+        if type == "application/pdf" || ext == "pdf" { return "doc.richtext" }
+        if ["zip", "gz", "tar", "tgz", "7z", "rar", "bz2"].contains(ext) || type.contains("zip") { return "doc.zipper" }
+        if ["xls", "xlsx", "csv", "tsv", "numbers", "ods"].contains(ext) || type.contains("spreadsheet") || type == "text/csv" { return "tablecells" }
+        if ["ppt", "pptx", "key", "odp"].contains(ext) || type.contains("presentation") { return "rectangle.on.rectangle" }
+        if ["json", "xml", "yaml", "yml", "html", "css", "js", "ts", "py", "swift", "java", "c", "cpp", "h", "rb", "go", "rs", "sh", "sql"].contains(ext) { return "chevron.left.forwardslash.chevron.right" }
+        if type.hasPrefix("text/") || ["txt", "md", "rtf", "doc", "docx", "pages", "odt", "log"].contains(ext) { return "doc.text" }
+        return "doc"
+    }
+
     public init(
         id: String = UUID().uuidString,
         name: String,

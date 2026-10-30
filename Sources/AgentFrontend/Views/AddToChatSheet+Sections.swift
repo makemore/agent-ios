@@ -84,7 +84,7 @@ extension AddToChatSheet {
     var rowsCard: some View {
         VStack(spacing: 0) {
             if let onPickPhotos, photosAllowed {
-                PhotosPicker(selection: $photoSelection, maxSelectionCount: ChatViewModel.maxPhotosPerMessage,
+                PhotosPicker(selection: $photoSelection, maxSelectionCount: ChatViewModel.maxAttachmentsPerMessage,
                              matching: .images) {
                     HStack(spacing: 14) {
                         rowIcon("photo.on.rectangle")

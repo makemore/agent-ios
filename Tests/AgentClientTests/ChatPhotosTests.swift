@@ -114,7 +114,7 @@ final class ChatPhotosTests: XCTestCase {
                 XCTAssertEqual(error, expected)
             }
         }
-        XCTAssertEqual(AttachmentUploadError.tooLarge.errorDescription, "This photo is too large.")
+        XCTAssertEqual(AttachmentUploadError.tooLarge.errorDescription, "This file is too large.")
     }
 
     func testAPhotoAloneIsSentAsAttachmentIds() async throws {
@@ -133,9 +133,9 @@ final class ChatPhotosTests: XCTestCase {
         XCTAssertEqual(vm.messages.first { $0.role == .user }?.files?.first?.attachmentId, "a-1")
     }
 
-    func testMoreThanFourPhotosAreNotSent() async {
+    func testMoreThanTwentyAttachmentsAreNotSent() async {
         let vm = model()
-        let photos = (1...5).map { FileAttachment(name: "p\($0)", size: 1, type: "image/jpeg", attachmentId: "a-\($0)") }
+        let photos = (1...21).map { FileAttachment(name: "p\($0)", size: 1, type: "image/jpeg", attachmentId: "a-\($0)") }
         await vm.sendMessage("Look", files: photos)
         XCTAssertTrue(MockURLProtocol.recorded.isEmpty)
     }

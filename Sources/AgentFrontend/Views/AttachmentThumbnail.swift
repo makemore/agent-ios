@@ -6,7 +6,7 @@ import UIKit
 import AppKit
 #endif
 
-/// A photo on a message: from its bytes when this phone sent it, otherwise read from
+/// A photo (or, from history, an attachment of unknown kind) on a message: from its bytes when this phone sent it, otherwise read from
 /// the host (`APIPaths.attachments`) by its id. Falls back to the file's name.
 struct AttachmentThumbnail: View {
     let file: FileAttachment
@@ -23,7 +23,7 @@ struct AttachmentThumbnail: View {
                     .scaledToFill()
             } else if failed || (file.attachmentId == nil || load == nil) {
                 VStack(spacing: 4) {
-                    Image(systemName: "photo")
+                    Image(systemName: file.symbolName)
                     Text(file.name).font(.caption2).lineLimit(1)
                 }
                 .foregroundColor(.secondary)
@@ -38,7 +38,8 @@ struct AttachmentThumbnail: View {
         .accessibilityLabel(file.name)
         .task(id: file.attachmentId) {
             guard file.data == nil, data == nil, let id = file.attachmentId, let load else { return }
-            if let loaded = await load(id) { data = loaded } else { failed = true }
+            // A file that isn't a picture (history without a type) falls back to its icon and name.
+            if let loaded = await load(id), Self.image(from: loaded) != nil { data = loaded } else { failed = true }
         }
     }
 

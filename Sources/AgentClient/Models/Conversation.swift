@@ -135,15 +135,19 @@ public struct APIMessageMetadata: Codable {
     public var toolName: String?
     /// A person's photos on a user message (ids at the host's `APIPaths.attachments`).
     public var attachmentIds: [String]?
+    /// Names, types and sizes for those ids, when the host sends them (`metadata.attachments`).
+    public var attachments: [UploadedAttachment]?
 
-    public init(contentBlocks: [ContentBlock]? = nil, toolName: String? = nil, attachmentIds: [String]? = nil) {
+    public init(contentBlocks: [ContentBlock]? = nil, toolName: String? = nil, attachmentIds: [String]? = nil,
+                attachments: [UploadedAttachment]? = nil) {
+        self.attachments = attachments
         self.contentBlocks = contentBlocks
         self.toolName = toolName
         self.attachmentIds = attachmentIds
     }
 
     private enum CodingKeys: String, CodingKey {
-        case contentBlocks, content_blocks, toolName, tool_name, attachmentIds, attachment_ids
+        case contentBlocks, content_blocks, toolName, tool_name, attachmentIds, attachment_ids, attachments
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -153,12 +157,14 @@ public struct APIMessageMetadata: Codable {
         let ids = (try? c.decodeIfPresent([AnyCodable].self, forKey: .attachmentIds))
             ?? (try? c.decodeIfPresent([AnyCodable].self, forKey: .attachment_ids))
         attachmentIds = ids?.compactMap { $0.stringValue() }.filter { !$0.isEmpty }
+        attachments = try? c.decodeIfPresent([UploadedAttachment].self, forKey: .attachments)
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(contentBlocks, forKey: .contentBlocks)
         try c.encodeIfPresent(toolName, forKey: .toolName)
         try c.encodeIfPresent(attachmentIds, forKey: .attachmentIds)
+        try c.encodeIfPresent(attachments, forKey: .attachments)
     }
 }
 
