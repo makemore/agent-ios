@@ -7,8 +7,8 @@ let package = Package(
     name: "AgentFrontend",
     platforms: [
         .iOS(.v16),
-        // macOS 14: ONNX Runtime's Swift package (AgentKokoro) declares
-        // macOS 14, and SwiftPM platforms are package-wide.
+        // macOS 14: ONNX Runtime's Objective-C bindings (AgentKokoro)
+        // declare macOS 14, and SwiftPM platforms are package-wide.
         .macOS(.v14)
     ],
     products: [
@@ -34,11 +34,6 @@ let package = Package(
         // use, not bundled.
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
-        // Microsoft ONNX Runtime (MIT), full build, for the optional
-        // `AgentKokoro` product: runs the Kokoro model and our G2P model.
-        // Exact pin: the binary xcframework and its licence inventory
-        // (README, "On-device neural voice") are checked per version.
-        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"),
     ],
     targets: [
         .target(
@@ -60,9 +55,30 @@ let package = Package(
             name: "AgentKokoro",
             dependencies: [
                 "AgentClient",
-                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
+                "OnnxRuntimeBindings",
             ],
             path: "Sources/AgentKokoro"
+        ),
+        // Microsoft ONNX Runtime 1.24.2 (MIT), full build, for the optional
+        // `AgentKokoro` product: runs the Kokoro model and our G2P model.
+        // Kept here (ThirdParty/onnxruntime/README.md): Microsoft's
+        // onnxruntime-swift-package-manager repository and its download
+        // host went away on 2026-11-22. Its Objective-C bindings, unchanged,
+        // and the same pod archive (identical bytes, so the same checksum)
+        // on our own bucket. The licence inventory (README, "On-device
+        // neural voice") is checked per version.
+        .target(
+            name: "OnnxRuntimeBindings",
+            dependencies: ["onnxruntime"],
+            path: "ThirdParty/onnxruntime/objectivec",
+            cxxSettings: [
+                .define("SPM_BUILD"),
+            ]
+        ),
+        .binaryTarget(
+            name: "onnxruntime",
+            url: "https://storage.googleapis.com/flisk447-media/vendor/onnxruntime/pod-archive-onnxruntime-c-1.24.2.zip",
+            checksum: "f7100a992d2a8135168c8afd831e6a58b465349101982aa58b3e11d36e600b54"
         ),
         .testTarget(
             name: "AgentClientTests",
@@ -82,6 +98,8 @@ let package = Package(
             // (Apache-2.0, from tools/kokoro-assets).
             resources: [.copy("Resources/kokoro-v1")]
         ),
-    ]
+    ],
+    // The ONNX Runtime bindings are C++17 (as in Microsoft's package); the
+    // package's other targets are Swift.
+    cxxLanguageStandard: .cxx17
 )
-
