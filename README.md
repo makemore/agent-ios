@@ -191,7 +191,7 @@ espeak-ng, sherpa-onnx or `phonemizer` anywhere. The front end follows the
 cross-platform spec in the meta-repo, `tools/kokoro-assets/README.md`, and
 passes all of its golden vectors, so the same text produces the same phonemes,
 and the same voice id the same voice, on iOS, Android and the web widget.
-iOS 16+ (the package's minimum); ONNX Runtime's Swift package requires
+iOS 16+ (the package's minimum); ONNX Runtime's Objective-C bindings require
 macOS 14, so the package's macOS minimum is 14.
 
 Add the product next to `AgentFrontend` (or `AgentClient`):
@@ -326,9 +326,8 @@ downloaded.
 | Component | How it ships | Licence |
 | --- | --- | --- |
 | `AgentKokoro` sources, including our port of misaki's lexicon and hexgrad/kokoro's chunking | compiled into the app | Ours; the ported parts are Apache-2.0 (hexgrad), attributed in the source headers |
-| [onnxruntime-swift-package-manager](https://github.com/microsoft/onnxruntime-swift-package-manager) 1.24.2 (Objective-C bindings) | compiled into the app | MIT |
-| ONNX Runtime 1.24.2 `onnxruntime.xcframework` (pod archive `onnxruntime-c`, full build, static) | linked into the app | MIT. Third-party code inside, per its `ThirdPartyNotices.txt` and the symbols in the binary: ONNX (Apache-2.0), Protocol Buffers (BSD-3-Clause), Abseil (Apache-2.0), RE2 (BSD-3-Clause), FlatBuffers (Apache-2.0), nlohmann/json (MIT), Microsoft GSL (MIT), HowardHinnant/date (MIT), SafeInt (MIT), Boost.Mp11 (BSL-1.0), MLAS (MIT), XNNPACK (BSD-3-Clause), pthreadpool (BSD-2-Clause), cpuinfo (BSD-2-Clause), KleidiAI (Apache-2.0), coremltools protos/MILBlob/ModelPackage (BSD-3-Clause), MurmurHash3 (public domain), **Eigen (MPL-2.0, unmodified; approved by the owner)** |
-| `onnxruntime-extensions` 0.13.0 xcframework | downloaded by SwiftPM with the package; **not linked** (we do not use the `onnxruntime_extensions` product) | MIT (its notices list no GPL/LGPL code) |
+| onnxruntime-swift-package-manager 1.24.2's Objective-C bindings, kept unmodified in `ThirdParty/onnxruntime` (Microsoft's repository went on 2026-11-22) | compiled into the app | MIT |
+| ONNX Runtime 1.24.2 `onnxruntime.xcframework` (pod archive `onnxruntime-c`, full build, static; the same archive, rehosted by us, checksum pinned: `ThirdParty/onnxruntime/README.md`) | linked into the app | MIT. Third-party code inside, per its `ThirdPartyNotices.txt` and the symbols in the binary: ONNX (Apache-2.0), Protocol Buffers (BSD-3-Clause), Abseil (Apache-2.0), RE2 (BSD-3-Clause), FlatBuffers (Apache-2.0), nlohmann/json (MIT), Microsoft GSL (MIT), HowardHinnant/date (MIT), SafeInt (MIT), Boost.Mp11 (BSL-1.0), MLAS (MIT), XNNPACK (BSD-3-Clause), pthreadpool (BSD-2-Clause), cpuinfo (BSD-2-Clause), KleidiAI (Apache-2.0), coremltools protos/MILBlob/ModelPackage (BSD-3-Clause), MurmurHash3 (public domain), **Eigen (MPL-2.0, unmodified; approved by the owner)** |
 | kokoro/v1 asset set: Kokoro v1.0 q8 model, 28 voice packs, misaki dictionaries, our BART G2P export, vocab files | downloaded at runtime | Apache-2.0 (all 49 files; see the set's `NOTICE` and `manifest.json`) |
 | Golden test vectors, manifest, vocab and voices JSON in `Tests/AgentKokoroTests/Resources` | tests only | Apache-2.0 (from the asset set) |
 
@@ -341,9 +340,9 @@ before creating its environment, so a future version bump stays silent.) The
 only network traffic is the asset download from `baseURL`.
 
 Apps that do not import `AgentKokoro` do not compile or link any of it, but
-SwiftPM still resolves the ONNX Runtime package and downloads its two binary
-archives (about 70 MB, cached) for every consumer of this package, as it
-already does for WhisperKit and WebRTC.
+SwiftPM still downloads ONNX Runtime's binary archive (about 52 MB, cached)
+for every consumer of this package, as it already does for WhisperKit and
+WebRTC.
 
 ### Live calls as system calls (CallKit)
 
@@ -485,6 +484,16 @@ Sources/AgentKokoro/             # Optional on-device Kokoro voice
 
 
 ## Changelog
+
+### 3.7.1
+
+- **ONNX Runtime kept in this package.** Microsoft's `onnxruntime-swift-package-manager` repository
+  (404 since 2026-11-22) and its download host have gone, so a clean resolve failed for every
+  consumer. Its Objective-C bindings (1.24.2, MIT, unmodified) are now the `OnnxRuntimeBindings`
+  target in `ThirdParty/onnxruntime`, and the same `onnxruntime-c` 1.24.2 pod archive (Microsoft's
+  checksum) is fetched from our bucket (`ThirdParty/onnxruntime/README.md`). `AgentKokoro`'s API is
+  unchanged; `onnxruntime_extensions`, which nothing used, is no longer downloaded. A host that named
+  the `onnxruntime-swift-package-manager` package itself should drop it.
 
 ### 3.7.0
 
